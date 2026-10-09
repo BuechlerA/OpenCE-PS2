@@ -1,3 +1,47 @@
+# Halo: Combat Evolved for the PlayStation 2 (OpenCE-PS2)
+
+This fork prepares a port of the Halo: Combat Evolved decompilation to the
+PlayStation 2. It starts from
+[OpenCommunityEdition/OpenCE](https://github.com/OpenCommunityEdition/OpenCE),
+the port to Linux, Windows and Android, whose README follows this section.
+
+The target is a retail PS2 with 32 MB of memory. Development uses the
+PCSX2 emulator, with the memory kept at 32 MB.
+
+## Status
+
+Planning. The game does not run on a PS2 yet. This fork contains:
+
+| Item | Contents |
+| --- | --- |
+| [docs/ps2_port_plan.md](docs/ps2_port_plan.md) | The plan: the hardware gap, the renderer and platform layer, the map converter, the memory budget, the game logic, the phases and their gates, and the risks. |
+| [tools/ps2](tools/ps2/README.md) | Tools that measure the Xbox maps for the PS2's memory budget and prototype the map converter. They read the maps and write reports only. |
+
+## Findings so far
+
+Measured on the 24 maps of a retail Xbox disc:
+
+- **Memory.** Every campaign level fills the Xbox's 22 MB for map data
+  (21.3 to 22.0 MB). A PS2 map converter and the PS2 renderer bring the
+  levels to 15.5 to 16.3 MB. With 16-bit collision data and smaller sound,
+  script and font records, they come to 13.7 to 14.4 MB, inside the PS2
+  budget of 16 MB. The multiplayer maps need 4.2 to 5.9 MB.
+- **Main savings.** Smaller model and level vertices (the PS2 has no bump
+  mapping), animations in the engine's own keyframe format, no
+  super-high-detail models, and compact collision.
+- **Textures** stream from the disc: 35 to 49 MB for each campaign map,
+  of which the PS2 does not need the bump maps.
+- **Not measured yet:** the cost of the game logic on the PS2's CPU. That
+  needs the game running on PS2 hardware (Phase 1 of the plan).
+
+## Game data
+
+This fork does not include the game data, and the PS2 port will not
+either. Use your own Xbox disc image of the game. Keep it in `assets/` at
+the root of the repository, which git ignores.
+
+---
+
 # Halo: Combat Evolved for Linux, Windows and Android
 
 [![Join our Discord](https://invidget.switchblade.xyz/9gqcHyr5km)](https://discord.gg/9gqcHyr5km)
