@@ -12,6 +12,12 @@ gets a stub that calls halo_ps2_unimplemented with its name
 stops. A run in PCSX2 (tools/ps2/pcsx2_run.py --until unimplemented:) so
 names the next function to write. The report lists the stubs.
 
+It also refuses a build whose objects define a function or variable that
+the libraries do (anything but the few the game means to, OVERRIDES): the
+linker would quietly take ours, and the libraries' own calls with it, as
+the Win32 CreateThread once replaced the EE kernel's and stopped the
+program before main.
+
 A symbol is taken as a function when an object calls it (an R_MIPS_26
 relocation, jal) or a header declares it with a parameter list. Any other
 missing symbol is data, which a stub cannot stand in for: the script lists
@@ -27,6 +33,9 @@ from pathlib import Path
 
 # the libraries mips64r5900el-ps2-elf-gcc links by default (gcc -dumpspecs, *lib)
 DEFAULT_LIBRARIES = ("m", "c", "cdvd", "pthread", "pthreadglue", "cglue", "kernel", "gcc")
+# the library names the game defines on purpose: its MSVC string functions
+# (source/cseries/cseries.c), which behave as newlib's
+OVERRIDES = {"strlwr", "strupr", "strnlen"}
 HEADER_ROOTS = (Path("source"), Path("port/include"), Path("port/linux/include"), Path("port/linux/src"),
                 Path("port/linux/game"), Path("port/ps2"))
 
@@ -35,8 +44,9 @@ def tool(cc, name):
     return str(Path(cc).with_name(Path(cc).name.replace("gcc", name)))
 
 
-def symbols(nm, files):
-    """(defined, {undefined: [objects]}) of the files"""
+def symbols(nm, files, strong=None):
+    """(defined, {undefined: [objects]}) of the files; strong, if given,
+    gets {name: object} of the definitions that are not weak"""
     defined, undefined = set(), collections.defaultdict(list)
     for i in range(0, len(files), 100):
         out = subprocess.run([nm, "-g", *files[i:i + 100]], capture_output=True, text=True, check=True).stdout
@@ -50,6 +60,8 @@ def symbols(nm, files):
                 undefined[parts[1]].append(current)
             elif len(parts) == 3 and parts[1] not in ("U", "w"):
                 defined.add(parts[2])
+                if strong is not None and parts[1] not in ("W", "V", "v"):
+                    strong.setdefault(parts[2], current)
     return defined, undefined
 
 
@@ -94,8 +106,16 @@ def main():
                               check=True).stdout.strip()
         if Path(path).is_file():
             libraries.append(path)
-    defined, undefined = symbols(nm, args.objects)
-    library_defined, _ = symbols(nm, libraries)
+    ours = {}
+    defined, undefined = symbols(nm, args.objects, ours)
+    library_strong = {}
+    library_defined, _ = symbols(nm, libraries, library_strong)
+    clashes = sorted(name for name in ours if name in library_strong and name not in OVERRIDES)
+    if clashes:
+        for name in clashes:
+            print(f"unimplemented_stubs: {ours[name]} defines {name}, which {library_strong[name]} defines too",
+                  file=sys.stderr)
+        sys.exit(1)
     missing = sorted(s for s in undefined if s not in defined and s not in library_defined)
 
     functions = called(objdump, args.objects, set(missing))

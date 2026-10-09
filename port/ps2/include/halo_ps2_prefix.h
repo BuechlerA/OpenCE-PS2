@@ -60,6 +60,17 @@ keeps <limits.h>'s. */
 #undef CHAR_MIN
 #endif
 
+/* ---------- Win32 names that are also the EE kernel's
+
+ps2sdk's libkernel has system calls named CreateThread and ResumeThread,
+which its own startup and pthreads call; the Win32 functions of those names
+(port/linux/src/xbox_kernel.c) would replace them. The game and the platform
+layer call the Win32 ones by other names. A unit that includes ps2sdk's
+<kernel.h> (port/ps2/src) #undefs these first. */
+
+#define CreateThread halo_win32_CreateThread
+#define ResumeThread halo_win32_ResumeThread
+
 /* ---------- MSVC inline semantics
 
 The Linux prefix makes __inline static, and its halo_msvc_semantics.h marks

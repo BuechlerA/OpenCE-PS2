@@ -13,6 +13,7 @@
       "msvc_wide.c",
       "xbdm.c",
       "xbox_files.c",
+      "xbox_kernel.c",
       "xbox_xapi.c"
     ]
   },

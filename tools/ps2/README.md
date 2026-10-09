@@ -77,7 +77,9 @@ calls and that nothing defines yet is a stub: it prints
 `unimplemented: NAME` and stops. `build/ps2/unimplemented.txt` lists the
 stubs. A run in PCSX2 shows the next function to write. A missing data
 symbol (a table, a global) stops the build instead, because a stub cannot
-stand in for data.
+stand in for data. So does an object that defines a name ps2sdk's libraries
+define (the linker would quietly take ours for the libraries' own calls
+too), apart from the few the game defines on purpose.
 
 `port/ps2/port.json` lists the Linux platform layer's files that the PS2
 build compiles as they are. `port/ps2/src` holds the PS2's own files.

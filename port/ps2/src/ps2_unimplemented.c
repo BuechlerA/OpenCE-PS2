@@ -9,6 +9,9 @@ function to write.
 */
 
 #include <stdio.h>
+/* the EE kernel's, not the Win32 ones (halo_ps2_prefix.h) */
+#undef CreateThread
+#undef ResumeThread
 #include <kernel.h>
 
 void halo_ps2_unimplemented(const char *name)

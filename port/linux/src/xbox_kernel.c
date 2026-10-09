@@ -14,7 +14,10 @@ threads, asynchronous procedure calls, time, memory and debug output.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* (nothing here maps memory; the PS2's newlib has no sys/mman.h) */
+#ifndef HALO_PS2
 #include <sys/mman.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -26,7 +29,11 @@ void platform_log(const char *format, ...)
 {
 	va_list arguments;
 
+#ifdef HALO_PS2
+	fputs("halo-ps2: ", stderr);
+#else
 	fputs("halo-linux: ", stderr);
+#endif
 	va_start(arguments, format);
 	vfprintf(stderr, format, arguments);
 	va_end(arguments);

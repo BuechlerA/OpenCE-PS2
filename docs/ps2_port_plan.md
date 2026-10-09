@@ -638,11 +638,31 @@ Done so far:
   The objects have 4.49 MB of code at `-Os` (5.90 MB at `-O2`) and 3.39 MB
   of `.bss`.
 - `ninja ps2` links `build/ps2/halo.elf` (`tools/ps2_build.py`), with the
-  game, the port's game units, seven files of the Linux platform layer
-  (`port/ps2/port.json`), musl's maths, zlib and `port/ps2/src`. 321
+  game, the port's game units, eight files of the Linux platform layer
+  (`port/ps2/port.json`), musl's maths, zlib and `port/ps2/src`. 176
   functions of the platform layer are still stubs that name themselves and
-  stop (`tools/ps2/unimplemented_stubs.py`). In PCSX2 the game runs from
-  `main` to its first stub, `Direct3DCreate8` (`rasterizer_preinitialize`).
+  stop (`tools/ps2/unimplemented_stubs.py`). In PCSX2 the game creates its
+  Direct3D device and stops at `XPhysicalAlloc` (`physical_memory_allocate`,
+  the memory map, next).
+- Direct3D: `port/ps2/src/ps2_d3d_null.c` draws nothing, for the Xbox
+  rasterizer to run on until the PS2's renderer replaces it. Resources keep
+  their Xbox headers and memory (as `d3d8_resources.c`), states are kept,
+  visibility tests see nothing, and the vertical blank callback runs at the
+  PS2's vertical blank (`ps2_vblank.c`).
+- The kernel: `port/linux/src/xbox_kernel.c` builds as it is. ps2sdk's
+  pthreads, condition variables with timeouts, recursive mutexes, clocks
+  and sleeps behave as it needs (measured in PCSX2).
+- Threads: the EE's kernel does not share time between threads of one
+  priority, and the Xbox's did. Every game thread runs at ps2sdk's pthread
+  priority (92, main's moved down to it before `main`), and a thread above
+  them rotates that priority's queue at each vertical blank.
+- Names: ps2sdk's libraries define some names the port also defines
+  (newlib's `_open`, `_close` and the rest; the EE kernel's `CreateThread`
+  and `ResumeThread`, which the Win32 ones replaced, stopping the program
+  before `main`). The PS2 build keeps the libraries' (`msvc_crt.c`) or
+  renames the port's (`halo_ps2_prefix.h`), and
+  `tools/ps2/unimplemented_stubs.py` now refuses a build that redefines a
+  library's name.
 - The ELF loads 25.3 MB: 6.4 MB of code and constants, 0.4 MB of data and
   18.5 MB of `.bss`, of which 13.5 MB is the port's game units for features
   the PS2 does not have (Custom Edition maps 6.4 MB, the tag validator
