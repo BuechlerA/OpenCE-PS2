@@ -97,8 +97,13 @@ enum
 	MAXIMUM_TAG_SCHEMA_GROUPS_PER_FIELD = 15,
 
 	/* the largest tag cache a map's tags are checked in: a Custom Edition
-	map's (cache_file_formats.h, CUSTOM_EDITION_TAG_CACHE_BYTES) */
+	map's (cache_file_formats.h, CUSTOM_EDITION_TAG_CACHE_BYTES); the PS2's
+	own, which plays no Custom Edition map (halo_port_capacity.h) */
+#ifdef HALO_PS2
+	TAG_VALIDATE_MAXIMUM_TAG_CACHE_SIZE = HALO_PORT_TAG_CACHE_SIZE,
+#else
 	TAG_VALIDATE_MAXIMUM_TAG_CACHE_SIZE = 0x01700000,
+#endif
 	/* the file ranges a Custom Edition map's bitmap pixels and sound samples
 	may be in (tag_validate_custom_edition_tags) */
 	MAXIMUM_TAG_VALIDATE_FILE_RANGES = 4,

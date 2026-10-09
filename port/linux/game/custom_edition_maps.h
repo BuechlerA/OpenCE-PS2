@@ -27,7 +27,12 @@ ui_widget.c ask this file for their names, descriptions and pictures.
 /* the most CE multiplayer maps the level list holds, which every map list
 (the menus', the Map screen's) has room for: as many as their display
 indices fit before the campaigns' (custom_edition_maps.c) */
+#ifdef HALO_PS2
+/* the PS2 plays no Custom Edition map (docs/ps2_port_plan.md, "Scope") */
+#define CUSTOM_EDITION_MAPS_MAXIMUM 1
+#else
 #define CUSTOM_EDITION_MAPS_MAXIMUM 8192
+#endif
 
 /* ---------- structures */
 

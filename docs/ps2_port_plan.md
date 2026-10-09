@@ -85,10 +85,10 @@ that Phase 0 must confirm:
 
 | Item | Xbox | PS2 target | How |
 | --- | --- | --- | --- |
-| Code and constant data | 5.5 MB of EE objects at `-Os` (measured: 4.49 MB of code, 0.61 MB of constants, 0.38 MB of data); 2.8 MB on x86 | 5 MB | MIPS code is 2.4 times the size of x86 code. Leave out the editor, tools, libtiff, debug code and netcode extras, and the Xbox rasterizer (0.5 MB of code), which the PS2 renderer replaces. Without frame pointers the code is 0.6 MB smaller (3.87 MB), but the crash stack walker needs them. |
+| Code and constant data | 3.6 MB linked (measured: 3.44 MB of code and constants, 0.18 MB of data, at `-Os` with `--gc-sections`); 2.8 MB on x86 | 3.5 MB | `--gc-sections` drops the copies of the headers' inline functions each unit emits and what the PS2 never calls: it took the linked code from 6.42 MB to 3.44 MB. The Xbox rasterizer goes when the PS2 renderer replaces it. |
 | Static (`.bss`) data | 3.1 MB (measured) | 0.5 MB | Remove profiling and debug arrays, fix an oversized bit vector, size the netcode for 16 players. |
 | Game state | 3.2 MB (measured) | 2.5 MB | Xbox capacities, not the port's (`halo_port_capacity.h` has a 17 MB game state), then cut by measured peak use. |
-| Tag data (shared tags + the current BSP) | 21.3 to 22.0 MB on campaign levels (measured) | 14.5 MB (projected: 13.7 to 14.4 MB) | Converter: geometry in PS2 formats, no tangent space, keyframed animations, no super-high LOD, trimmed scripts; 16-bit collision. |
+| Tag data (shared tags + the current BSP) | 21.3 to 22.0 MB on campaign levels (measured) | 16 MB (projected: 13.7 to 14.4 MB) | Converter: geometry in PS2 formats, no tangent space, keyframed animations, no super-high LOD, trimmed scripts; 16-bit collision. |
 | Texture cache | 22 MB (DXT) | 4.8 MB | Half size; bump maps (13% of the textures) not loaded. |
 | Sound cache | 4 MB | 0.5 MB EE + 2 MB SPU2 + IOP stream buffers | Music and long dialogue are streamed from the disc on the IOP. |
 | Render packets | (in D3D) | 1.5 MB | Double-buffered VIF/GIF packet chains. |
@@ -99,33 +99,52 @@ The tag data line decides feasibility. Only one BSP is in memory at a time
 to it), so the number that matters is the shared tags plus the largest
 BSP.
 
-The plan first set the tag data at 16 MB, with code at 3.5 MB. The
-measured MIPS code (5 MB after the cuts) leaves 14.5 MB for the tag data:
-the table adds up to 30.8 MB of the 31 MB. The campaign levels project to
-13.7 to 14.4 MB with all the converter and game-code changes, so they fit,
-with little margin. If the margin runs out, the next steps are release
-builds without frame pointers (0.6 MB of code), the remaining static data,
-and smaller texture and render packet buffers.
+The measured MIPS code first looked like 5 MB (the objects, before the
+link), which would have left 14.5 MB for the tag data. Linked with
+`--gc-sections` it is 3.6 MB with its data, as the plan first assumed, so
+the tag data keeps its 16 MB: the campaign levels project to 13.7 to 14.4
+MB with all the converter and game-code changes, a margin of 1.6 MB or
+more.
 
 ### 2. Relocating the tag data
 
-The Xbox tag data is linked to `0x803A6000`, in kseg0, which a PS2 user
-program cannot use. The game also expects the game state at a fixed address
-(saved games are copies of it).
+The Xbox tag data is linked to `0x803A6000`, and each structure BSP to its
+own address at the top of the Xbox's 22 MB tag cache. Those addresses are
+the EE kernel's, which a PS2 program cannot use, and the PS2's tag cache is
+smaller. The game also expected the game state at a fixed address.
 
-- The converter rebases every pointer in the tag data to a fixed PS2 tag
-  base, for example `0x00E00000`. The tag schema lists every block and data
-  pointer. Fields that the schema does not cover (for example pointers
-  that the game sets at run time) must be found and added, and
-  `tag_validate.c` must accept the new base.
-- The game state moves to a fixed low address in PS2 RAM. The
-  `HALO_PORT_GAME_STATE_BASE_ADDRESS` mechanism already supports this.
-- The `0x80000000` physical/virtual arithmetic of `platform.h`
-  (`PLATFORM_PHYSICAL_TO_VIRTUAL`) is used only by D3D resources and the
-  caches, which the PS2 backend replaces.
-- Testability: Linux can also reserve the low PS2 tag address (the 32-bit
-  executable is above it), so the existing PC build can load converted maps
-  and verify the relocation before PS2 hardware is needed.
+Done (`port/linux/game/tag_relocate.c`, called by `cache_files.c` as the
+tags and each BSP load):
+
+- The PS2 reads the tags into its tag cache and moves every pointer they
+  hold: each word that points into the linked tags gets the difference
+  between where they are and where they were linked. Each BSP is read
+  after the tags (a page in) and moved the same way, with its pointers into
+  the tags. Where the tag cache is the Xbox's (every other port), nothing
+  is done.
+- The pointers are found where `tools/ps2/relocation_check.py` finds them:
+  the tag header and index, the buffer headers, each structure BSP's
+  header, every block, data and tag reference of the tag schema, a table
+  of the pointers the schema does not list (the models' and BSP materials'
+  buffer pointers, blocks the validator does not check: the scenario's
+  child scenarios, comments, decals and BSP references, the BSPs' markers
+  and a few more), and the names of the tag references the schema does not
+  list.
+- The check reads every other word of every map's tags and BSPs: on all 24
+  maps of the retail disc, nothing else points into them but known
+  numbers (datum indices, flags, colors, checksums), raw vertex and index
+  data, and a few bytes no pointer reaches at the end of some BSPs. It
+  relocates 6,465 (ui) to 55,862 (c10) pointers a map.
+- The C relocation, run in PCSX2 on the tags and BSPs of ui, bloodgulch and
+  a10 (14 buffers), gives the same bytes as the check's rules, word for
+  word (compared by hash).
+- The game state and the caches are wherever the PS2's heap puts them
+  (`port/ps2/src/ps2_memory.c`), the same each run of a build, which saved
+  games need. `physical_memory_map.c` asks without the Xbox's addresses on
+  the PS2.
+
+The map converter will do the same relocation once, on the PC, to the
+PS2's tag cache address; the PS2 then reads converted maps without it.
 
 ### 3. Compiler and ABI
 
@@ -668,6 +687,16 @@ Done so far:
   the PS2 does not have (Custom Edition maps 6.4 MB, the tag validator
   2.9 MB, the 128-player netcode 3.7 MB). They go next, with stubs in their
   place, before the game's memory map (`physical_memory_map.c`) can fit.
+- The memory map: the PS2's capacities are the Xbox's
+  (`halo_port_capacity.h`, `halo_port_limits.h`: 16 players on 4 machines)
+  and the Custom Edition maps' limits are 1 map, which took the ELF's
+  `.bss` from 18.5 MB to 5.6 MB. At start the game gets its game state
+  (3.3 MB), a 9 MB tag cache (the largest multiplayer map's tags and BSP:
+  the campaign's wait for the converter), a 2 MB texture cache and a 0.5 MB
+  sound cache, with about 5 MB of the 32 MB left. The map's tags and BSPs
+  are relocated to the tag cache as they load (above, "Relocating the tag
+  data"). In PCSX2 the game now stops at `config_string`, the port's
+  settings.
 - newlib names its system calls `_open`, `_close`, `_read`, `_write`,
   `_lseek`, `_stat`, `_fstat` and `_mkdir`, which `msvc_crt.c` also defined
   for MSVC; on the PS2 newlib's stay (`_close` calling `close` called

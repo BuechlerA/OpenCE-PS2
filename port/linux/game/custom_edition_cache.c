@@ -41,9 +41,13 @@ where its offset falls in their combined offset space.
 /* where a cache header keeps the file's length (cache_files.c) */
 #define CACHE_FILE_HEADER_FILE_LENGTH_OFFSET 0x08
 
-/* (the validator has room for the tag cache's tags) */
+/* (the validator has room for the tag cache's tags; the PS2's validator has
+room for its own tag cache only, and it loads no Custom Edition map: its
+validator refuses one) */
+#ifndef HALO_PS2
 typedef char verify_custom_edition_tag_cache_bytes[
 	CUSTOM_EDITION_TAG_CACHE_BYTES <= TAG_VALIDATE_MAXIMUM_TAG_CACHE_SIZE ? 1 : -1];
+#endif
 
 /* the combined offset space: the map (CUSTOM_EDITION_CACHE_FILE_MAXIMUM_BYTES
 at most), the Ogg Vorbis sounds decoded at load (custom_edition_sounds.c)

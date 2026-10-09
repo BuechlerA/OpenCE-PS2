@@ -21,6 +21,7 @@ repository.
 | `tag_schema.json` | The tag schema: each tag group and block definition, with the offsets and sizes of the Xbox ABI. Generated, committed. |
 | `compile_check.py` | Compiles each of the game's C files for the PS2's EE with ps2dev's GCC, and reports which fail and why, grouped by error. Also reports the size of the code and data. |
 | `pcsx2_run.py` | Boots a PS2 program in PCSX2 without its window, and prints what it writes to the console. Stops when a given text appears or after a timeout. |
+| `relocation_check.py` | Checks, on each map, that the PS2's tag relocation (`port/linux/game/tag_relocate.c`) knows every pointer in the tags and BSPs: it applies the same rules, then lists every other word that points into them. |
 | `semantics_header.py` | Makes the PS2 build's `halo_msvc_semantics.h` (used by `ninja ps2` and `compile_check.py`). |
 | `unimplemented_stubs.py` | Writes a stub for each function the PS2 build calls and nothing defines yet (used by `ninja ps2`). |
 
@@ -40,6 +41,13 @@ python tools/ps2/budget_projection.py build/ps2_budget.json build/ps2_prototype.
   Almost all of that is the animations.
 - `budget_projection.py --tolerance "0.5 deg, 3 mm"` uses another of the
   animation tolerances.
+
+To check the tag relocation on every map (about a minute; the exit status
+is 1 when a word that may be a missed pointer is found):
+
+```bash
+python tools/ps2/relocation_check.py --iso assets/halo.xiso.iso
+```
 
 The JSON files contain sizes and counts only, no game data. Keep them in
 `build/`, which git also ignores.
@@ -115,8 +123,10 @@ python tools/ps2/pcsx2_run.py program.elf --until "text to wait for" --timeout 3
 ```
 
 - The tool copies your PCSX2 configuration to a temporary folder and turns
-  on console logging there. Your own settings do not change.
-- The program's folder is PCSX2's `host:` device.
+  on console logging and the host filesystem there. Your own settings do
+  not change.
+- The program's folder is PCSX2's `host:` device: the program reads the
+  files beside it as `host:name`.
 - The exit status is 0 when the text appears, 1 at the timeout, and 2 when
   PCSX2 stops or does not start.
 - `--pcsx2 PATH` (or the `PCSX2` environment variable) selects the PCSX2

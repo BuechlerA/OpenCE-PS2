@@ -135,6 +135,7 @@ symbols in this file:
 #include "scenario/scenario_definitions.h"
 #include "sound/sound_manager.h"
 #include "tag_schema.h"
+#include "tag_relocate.h" /* port: port/linux/game/tag_relocate.c */
 #include "custom_edition_cache.h" /* port: port/linux/game/custom_edition_cache.c */
 #include "cache_file_formats.h" /* port: CUSTOM_EDITION_TAG_CACHE_BYTES */
 
@@ -483,6 +484,24 @@ static boolean cache_file_structure_bsp_tag_valid(
 its bytes lie in the map and fit the tag cache after the tag data, where
 they are read to (rounded up to whole sectors, as the read is), and it
 names a structure bsp tag */
+/* port: where a structure bsp is read: where the map links it (the top of
+the Xbox's tag cache) when the tag cache is the Xbox's; on the PS2, whose tag
+cache is elsewhere and smaller, after the tags, a page in, and it is moved
+there (port/linux/game/tag_relocate.c). The reference keeps the address the
+bsp is linked to, for each time it is read again. */
+static byte *cache_file_structure_bsp_load_address(
+	struct scenario_structure_bsp_reference const *reference)
+{
+	byte *tag_cache_base_address = physical_memory_get_tag_cache_base_address();
+
+	if ((unsigned long)tag_cache_base_address == TAG_RELOCATE_XBOX_TAG_CACHE_ADDRESS ||
+		custom_edition_cache_tags_loaded())
+	{
+		return reference->base_address;
+	}
+	return tag_cache_base_address + ((cache_file_globals.header.tag_data_size + 0xFFF) & ~0xFFF);
+}
+
 static boolean cache_file_structure_bsp_reference_verify(
 	struct scenario_structure_bsp_reference *reference)
 {
@@ -509,7 +528,7 @@ static boolean cache_file_structure_bsp_reference_verify(
 	if (!cache_file_region_contains(
 		tag_cache_base_address + tag_data_size,
 		TAG_CACHE_SIZE - tag_data_size,
-		reference->base_address,
+		cache_file_structure_bsp_load_address(reference),
 		read_size,
 		1))
 	{
@@ -518,7 +537,7 @@ static boolean cache_file_structure_bsp_reference_verify(
 			"a structure bsp is damaged: its %08x bytes at %08x would load to %08lx, outside the tag cache",
 			reference->file_size,
 			reference->file_offset,
-			(unsigned long)reference->base_address);
+			(unsigned long)cache_file_structure_bsp_load_address(reference));
 
 		return FALSE;
 	}
@@ -713,7 +732,8 @@ long tag_loaded(
 void cache_files_enable_writes(
 	void)
 {
-	XPhysicalProtect((void *)0x803A6000, 0x01600000, PAGE_READWRITE);
+	/* port: the tag cache, wherever it is (the PS2's is elsewhere) */
+	XPhysicalProtect(physical_memory_get_tag_cache_base_address(), TAG_CACHE_SIZE, PAGE_READWRITE);
 
 	return;
 }
@@ -721,7 +741,7 @@ void cache_files_enable_writes(
 void cache_files_disable_writes(
 	void)
 {
-	XPhysicalProtect((void *)0x803A6000, 0x01600000, PAGE_READONLY);
+	XPhysicalProtect(physical_memory_get_tag_cache_base_address(), TAG_CACHE_SIZE, PAGE_READONLY);
 	XPhysicalProtect(
 		cache_file_globals.tag_header->vertex_buffers,
 		cache_file_globals.tag_header->vertex_buffer_count * 12,
@@ -1210,7 +1230,8 @@ long scenario_tags_load(
 		tag_cache_base_address = physical_memory_get_tag_cache_base_address();
 		if (cache_file_header_verify(&cache_file_globals.header, scenario_name, TRUE))
 		{
-			csmemset(tag_cache_base_address, 0xCD, 0x01600000);
+			/* port: the tag cache's size, which may not be the Xbox's */
+			csmemset(tag_cache_base_address, 0xCD, TAG_CACHE_SIZE);
 			cache_file_read(
 				NONE,
 				cache_file_globals.header.tag_data_offset,
@@ -1229,6 +1250,20 @@ long scenario_tags_load(
 			if (read_complete != TRUE)
 			{
 				error(_error_silent, "the cache file '%s' could not be read", scenario_name);
+				cache_file_close();
+
+				return NONE;
+			}
+			/* port: tags read elsewhere than the Xbox's tag cache, which the
+			map is linked to (the PS2's), are moved to where they are, before
+			anything reads them (port/linux/game/tag_relocate.c); where they
+			were linked, nothing is done */
+			if (!tag_relocate_tags(
+				tag_cache_base_address,
+				cache_file_globals.header.tag_data_size,
+				TAG_RELOCATE_XBOX_TAG_CACHE_ADDRESS))
+			{
+				error(_error_silent, "the cache file '%s' could not be moved to the tag cache", scenario_name);
 				cache_file_close();
 
 				return NONE;
@@ -1328,6 +1363,8 @@ boolean scenario_structure_bsp_load(
 	byte *tag_cache_base_address;
 	/* port: the bsp's header, once read and checked */
 	struct cache_file_structure_bsp_header *structure_bsp_header;
+	/* port: where it is read (cache_file_structure_bsp_load_address) */
+	byte *load_address;
 
 	/* port: the tag data's size was checked as the map loaded
 	(cache_file_header_verify); the bsp's reference is the map's, and is
@@ -1357,16 +1394,17 @@ boolean scenario_structure_bsp_load(
 		csmemset(
 			tag_cache_base_address + cache_file_globals.header.tag_data_size,
 			0xCD,
-			0x01600000 - cache_file_globals.header.tag_data_size);
+			TAG_CACHE_SIZE - cache_file_globals.header.tag_data_size);
 	}
 	{
 		boolean read_complete;
 
+		load_address = cache_file_structure_bsp_load_address(reference);
 		cache_file_read(
 			NONE,
 			reference->file_offset,
 			reference->file_size,
-			reference->base_address,
+			load_address,
 			&read_complete,
 			TRUE);
 		while (!read_complete)
@@ -1378,25 +1416,41 @@ boolean scenario_structure_bsp_load(
 			}
 		}
 
+		/* port: a bsp read elsewhere than where it is linked (the PS2's)
+		is moved to where it is, with its pointers into the tags (moved as
+		they loaded: port/linux/game/tag_relocate.c) */
+		if (read_complete == TRUE &&
+			load_address != reference->base_address &&
+			!tag_relocate_structure_bsp(
+				load_address,
+				reference->file_size,
+				(unsigned long)reference->base_address,
+				cache_file_globals.tag_header,
+				cache_file_globals.header.tag_data_size,
+				TAG_RELOCATE_XBOX_TAG_CACHE_ADDRESS))
+		{
+			read_complete = FALSE;
+		}
+
 		/* port: a bsp that did not all read, or whose header's pointers
 		leave what was read, is not loaded */
-		structure_bsp_header = reference->base_address;
+		structure_bsp_header = (struct cache_file_structure_bsp_header *)load_address;
 		if (read_complete != TRUE ||
 			structure_bsp_header->signature != CACHE_FILE_STRUCTURE_BSP_HEADER_SIGNATURE ||
 			!cache_file_region_contains(
-				reference->base_address,
+				load_address,
 				reference->file_size,
 				structure_bsp_header->base_address,
 				1,
 				1) ||
 			!cache_file_region_contains(
-				reference->base_address,
+				load_address,
 				reference->file_size,
 				structure_bsp_header->vertex_buffers,
 				structure_bsp_header->vertex_buffer_count,
 				CACHE_FILE_BUFFER_SIZE) ||
 			!cache_file_region_contains(
-				reference->base_address,
+				load_address,
 				reference->file_size,
 				structure_bsp_header->index_buffers,
 				structure_bsp_header->index_buffer_count,
@@ -1417,7 +1471,7 @@ boolean scenario_structure_bsp_load(
 	(port/linux/game/tag_validate.c; a Custom Edition map's too) */
 	if (!tag_validate_structure_bsp(
 		reference->structure_bsp.index,
-		reference->base_address,
+		load_address,
 		reference->file_size))
 	{
 		return FALSE;

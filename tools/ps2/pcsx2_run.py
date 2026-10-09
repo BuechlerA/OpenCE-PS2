@@ -5,9 +5,9 @@ program writes to the EE and IOP consoles (printf), for automated checks:
     python tools/ps2/pcsx2_run.py PROGRAM.elf [--until TEXT] [--timeout SECONDS]
 
 PCSX2 runs with a copy of your own configuration (and so your BIOS) in a
-temporary folder, with its console logging turned on; your settings are not
-changed. The program's folder is PCSX2's host: device, so the program can
-read files beside it as host:name.
+temporary folder, with its console logging and its host filesystem turned
+on; your settings are not changed. The program's folder is PCSX2's host:
+device, so the program can read files beside it as host:name.
 
 PCSX2's log mixes the emulator's messages with the program's. What this
 prints is everything the log gets after PCSX2 has loaded the program, with
@@ -48,12 +48,14 @@ def default_config():
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "PCSX2/inis/PCSX2.ini"
 
 
-def logging_config(text):
-    """the configuration with the console logging on"""
-    for key in ("EnableFileLogging", "EnableEEConsole", "EnableIOPConsole"):
+def run_config(text):
+    """the configuration with the console logging on, and the host
+    filesystem (the program's own files, as host:name)"""
+    for section, key in (("Logging", "EnableFileLogging"), ("Logging", "EnableEEConsole"),
+                         ("Logging", "EnableIOPConsole"), ("EmuCore", "HostFs")):
         text, n = re.subn(rf'^{key}\s*=.*$', f'{key} = true', text, flags=re.M)
         if not n:
-            text = re.sub(r'^\[Logging\]\s*$', f'[Logging]\n{key} = true', text, count=1, flags=re.M)
+            text = re.sub(rf'^\[{section}\]\s*$', f'[{section}]\n{key} = true', text, count=1, flags=re.M)
     return text
 
 
@@ -81,7 +83,7 @@ def main():
         # PCSX2 keeps its data in a PCSX2 folder inside -datapath
         inis = work / 'PCSX2' / 'inis'
         inis.mkdir(parents=True)
-        (inis / 'PCSX2.ini').write_text(logging_config(args.config.read_text()))
+        (inis / 'PCSX2.ini').write_text(run_config(args.config.read_text()))
         log = work / 'pcsx2.log'
         command = [str(args.pcsx2), '-datapath', str(work), '-nogui', '-fastboot', '-logfile', str(log),
                    '-elf', str(elf)]

@@ -11,8 +11,9 @@ header included in hcex build.
 /* ---------- constants */
 
 /* port: the tag cache's size, which the loader checks a map's tag data and
-structure bsps against (cache_files.c) */
-#define TAG_CACHE_SIZE 0x1600000
+structure bsps against (cache_files.c): the Xbox's, but the PS2's
+(halo_port_capacity.h) */
+#define TAG_CACHE_SIZE HALO_PORT_TAG_CACHE_SIZE
 
 /* ---------- macros */
 

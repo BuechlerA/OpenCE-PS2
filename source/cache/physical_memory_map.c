@@ -74,6 +74,21 @@ static struct physical_memory_map_globals physical_memory_map_globals;
 void physical_memory_allocate(
 	void)
 {
+#ifdef HALO_PS2
+	/* port: a PS2 program cannot have the Xbox's addresses (they are the
+	kernel's): the game state and the caches are wherever the platform
+	layer puts them (port/ps2/src/ps2_memory.c), the same each run of a
+	build, and the map's tags are moved to the tag cache's
+	(port/linux/game/tag_relocate.c, cache_files.c) */
+	physical_memory_map_globals.game_state_base_address = XPhysicalAlloc(GAME_STATE_SIZE, -1, 0, PAGE_READWRITE);
+	match_assert(__FILE__, __LINE__, physical_memory_map_globals.game_state_base_address);
+	physical_memory_map_globals.tag_cache_base_address = XPhysicalAlloc(TAG_CACHE_SIZE, -1, 0, PAGE_READWRITE);
+	match_assert(__FILE__, __LINE__, physical_memory_map_globals.tag_cache_base_address);
+	physical_memory_map_globals.texture_cache_base_address = XPhysicalAlloc(TEXTURE_CACHE_SIZE, -1, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
+	match_assert(__FILE__, __LINE__, physical_memory_map_globals.texture_cache_base_address);
+	physical_memory_map_globals.sound_cache_base_address = XPhysicalAlloc(SOUND_CACHE_SIZE, -1, 0, PAGE_READWRITE);
+	match_assert(__FILE__, __LINE__, physical_memory_map_globals.sound_cache_base_address);
+#else
 	physical_memory_map_globals.game_state_base_address = XPhysicalAlloc(GAME_STATE_SIZE, GAME_STATE_BASE_ADDRESS & 0x7FFFFFFF, 0, PAGE_READWRITE);
 #line 46 "c:\\halo\\SOURCE\\cache\\physical_memory_map.c"
 	match_assert(__FILE__, __LINE__, (unsigned long)physical_memory_map_globals.game_state_base_address==GAME_STATE_BASE_ADDRESS);
@@ -89,6 +104,7 @@ void physical_memory_allocate(
 	physical_memory_map_globals.sound_cache_base_address = XPhysicalAlloc(SOUND_CACHE_SIZE, -1, 0, PAGE_READWRITE);
 #line 58 "c:\\halo\\SOURCE\\cache\\physical_memory_map.c"
 	match_assert(__FILE__, __LINE__, physical_memory_map_globals.sound_cache_base_address);
+#endif
 
 	return;
 }

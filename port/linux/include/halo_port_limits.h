@@ -18,8 +18,15 @@ a finishing place in 7 bits.
 
 /* ---------- session limits */
 
+#ifdef HALO_PS2
+/* the PS2's are the Xbox's: its memory has no room for more (it plays with
+no PC, whose sessions need every machine's capacities the same) */
+#define HALO_PORT_MAXIMUM_NETWORK_PLAYERS 16
+#define HALO_PORT_MAXIMUM_NETWORK_MACHINES 4
+#else
 #define HALO_PORT_MAXIMUM_NETWORK_PLAYERS 128
 #define HALO_PORT_MAXIMUM_NETWORK_MACHINES 128
+#endif
 
 /* a host polls its listening socket and one socket per machine; the Xbox's
 Winsock headers default to 64 (the prefix headers define FD_SETSIZE from

@@ -42,6 +42,11 @@ EE_FLAGS = [
     "-fno-strict-aliasing", "-fwrapv", "-fno-delete-null-pointer-checks",
     "-freg-struct-return", "-fno-omit-frame-pointer", "-ffp-contract=off",
     "-g",
+    # each function and variable in a section of its own, which the link
+    # drops when nothing uses it (--gc-sections): the copies of the headers'
+    # inline functions each unit emits, but one (halo_ps2_prefix.h), and
+    # what the PS2 never calls
+    "-ffunction-sections", "-fdata-sections",
 ]
 # memory is the PS2's limit (docs/ps2_port_plan.md, "Code and constant data")
 OPTIMISATION = "-Os"
@@ -175,7 +180,8 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
     n.build(outputs=stub_object, rule="ps2_cc", inputs=stubs,
             variables={"cflags": " ".join([*EE_FLAGS, "-std=gnu11", "-w", OPTIMISATION])})
 
-    ldflags = [f"-T{sdk / 'ee/startup/linkfile'}", OPTIMISATION, f"-L{sdk / 'ee/lib'}", "-Wl,-zmax-page-size=128"]
+    ldflags = [f"-T{sdk / 'ee/startup/linkfile'}", OPTIMISATION, f"-L{sdk / 'ee/lib'}", "-Wl,-zmax-page-size=128",
+               "-Wl,--gc-sections"]
     n.build(outputs=output, rule="ps2_link", inputs=[*objects, stub_object],
             variables={"ldflags": " ".join(ldflags)})
     n.build(outputs="ps2", rule="phony", inputs=[output])
