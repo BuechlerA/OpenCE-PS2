@@ -7,6 +7,9 @@ Xbox paths are translated below two roots. d:\ is the data root, the
 directory holding the game's maps/ folder: paths.data (port_config.c), else the current
 directory when it has maps/, else assets/ in the current directory or two
 levels above the executable (the repository root for build/linux/halo).
+The PS2 (port/ps2) has no path to its executable: paths.data, else the
+current directory (the ELF's, as ps2sdk sets it: host:build/ps2 in PCSX2),
+else assets/ there.
 h:\ is the Halo Custom Edition install paths.custom_edition names, if any
 (its maps folder holds the resource maps Custom Edition maps need, and more
 maps).
@@ -72,7 +75,11 @@ const char *platform_data_root(void)
 		{
 			char executable[MAX_PATH];
 			char executable_directory[MAX_PATH] = "";
+#ifdef HALO_PS2
+			ssize_t length = -1;
+#else
 			ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+#endif
 
 			if (length > 0)
 			{
@@ -111,7 +118,7 @@ const char *platform_data_root(void)
 						snprintf(root, sizeof(root), "%s", executable);
 				}
 			}
-#ifndef HALO_ANDROID
+#if !defined(HALO_ANDROID) && !defined(HALO_PS2)
 			if (!has_maps(root) && executable_directory[0] && platform_offer_game_data(executable_directory) &&
 				has_maps(executable_directory))
 			{
@@ -350,6 +357,11 @@ HANDLE WINAPI CreateFileA(LPCSTR file_name, DWORD desired_access, DWORD share_mo
 	descriptor = open(path, flags | O_CLOEXEC, 0644);
 	if (descriptor < 0)
 	{
+#ifdef HALO_PS2
+		/* the PS2's devices fail to open a missing file with EIO */
+		if (!existed)
+			errno = ENOENT;
+#endif
 		platform_set_last_error_from_errno(errno);
 		if (errno == ENOENT && !existed && (flags & O_CREAT))
 			SetLastError(ERROR_PATH_NOT_FOUND);
@@ -746,6 +758,19 @@ BOOL WINAPI DeleteFileA(LPCSTR file_name)
 	char path[1024];
 
 	platform_translate_path(file_name, path, sizeof(path));
+#ifdef HALO_PS2
+	/* PCSX2's host: device "removes" a missing file by making a directory
+	of its name */
+	{
+		struct posix_file_information information;
+
+		if (posix_stat(path, &information) != 0)
+		{
+			SetLastError(ERROR_FILE_NOT_FOUND);
+			return FALSE;
+		}
+	}
+#endif
 	if (unlink(path) != 0)
 	{
 		platform_set_last_error_from_errno(errno);

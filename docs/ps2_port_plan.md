@@ -701,11 +701,29 @@ Done so far:
   `_lseek`, `_stat`, `_fstat` and `_mkdir`, which `msvc_crt.c` also defined
   for MSVC; on the PS2 newlib's stay (`_close` calling `close` called
   itself).
+- Settings and files: `port_config.c` reads and writes `config.toml` as
+  on Android (stdio, no SDL or environment), and the file layer
+  (`xbox_files.c`, `posix_files.c`) runs on newlib and ps2sdk's devices,
+  with `pread`/`pwrite` and the atomic operations GCC calls for the EE
+  (which has no LL/SC) in `port/ps2/src`. The data root is the ELF's
+  folder. PCSX2's `host:` device differs from POSIX in three ways the
+  layer covers: a missing file fails with EPERM or EIO, not ENOENT;
+  removing one makes a directory of its name; and there is no
+  `ftruncate` (a file is made longer by writing its last byte). In
+  PCSX2 the game writes its settings, log and saves, makes the Xbox's six
+  map cache files, finds the maps, allocates its game state and stops in
+  the rasterizer's start: the heap's last 5 MB do not hold the debug
+  drawing's buffers (2 MB, not needed on the PS2). 140 stubs are left.
 
 Still to do:
 
-- The toolchain, `tools/ps2_build.py`, and the platform layer: memory,
-  files from `host:` or `mass:`, threads, timers.
+- The heap: the debug drawing's buffers and other allocations the PS2
+  does not need, until the game's start fits.
+- Maps without the cache files: the Xbox decompresses each map from the
+  DVD to its hard disk (`cache_files_windows.c`, six files of 730 MB in
+  all). A retail PS2 has no disk, so the PS2 reads the converter's
+  maps, already decompressed, straight from the disc. In PCSX2 for now
+  the cache files are on `host:`.
 - A first converter that only relocates the tag data. Test it on Linux
   first.
 - A null rasterizer and a null sound backend. Load a campaign level,

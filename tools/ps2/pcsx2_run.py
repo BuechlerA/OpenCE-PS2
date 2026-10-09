@@ -15,7 +15,8 @@ the timestamps taken out.
 
 Exit status: 0 when --until's text appears (or, without --until, when the
 timeout ends with PCSX2 still running), 1 when the timeout ends before the
-text appears, 2 when PCSX2 stops by itself or cannot start.
+text appears, 2 when PCSX2 stops by itself or cannot start, 3 when the
+program ends (the BIOS then loads its menu, OSDSYS).
 """
 
 import argparse
@@ -32,6 +33,8 @@ from pathlib import Path
 # PCSX2's line once the program starts ("ELF host:x.elf with entry point at 0x... is executing.")
 LOADED = re.compile(r'^\[\s*[\d.]+\] ELF .* is executing\.')
 TIMESTAMP = re.compile(r'^\[\s*[\d.]+\] ?')
+# and the BIOS's once the program has ended and it loads its menu
+EXITED = "Unknown device in ELF path 'rom0:OSDSYS'"
 
 
 def default_pcsx2():
@@ -105,6 +108,9 @@ def main():
                         print(text, flush=True)
                     if args.until and args.until in text:
                         status = 0
+                    elif status is None and EXITED in text:
+                        print('pcsx2_run: the program ended', file=sys.stderr)
+                        status = 3
                 seen = len(lines)
                 if status is None and process.poll() is not None:
                     print(f'pcsx2_run: PCSX2 stopped (status {process.returncode})', file=sys.stderr)

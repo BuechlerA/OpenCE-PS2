@@ -11,6 +11,8 @@
       "halo_linker_common.c",
       "msvc_crt.c",
       "msvc_wide.c",
+      "port_config.c",
+      "posix_files.c",
       "xbdm.c",
       "xbox_files.c",
       "xbox_kernel.c",

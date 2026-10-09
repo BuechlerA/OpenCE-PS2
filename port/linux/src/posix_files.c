@@ -3,14 +3,21 @@ POSIX_FILES.C
 
 glibc file system helpers for the platform layer (see posix.h). Built with
 the host ABI and _FILE_OFFSET_BITS=64.
+
+The PS2 build (port/ps2) has them over newlib and ps2sdk's file devices
+(host:, mc0:, cdrom0:), which keep times in whole seconds and have no
+statvfs or utimensat.
 */
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#ifndef HALO_PS2
 #include <sys/statvfs.h>
+#endif
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -27,9 +34,17 @@ static void fill_information(const struct stat *st, struct posix_file_informatio
 	memset(information, 0, sizeof(*information));
 	if (S_ISDIR(st->st_mode))
 		information->flags |= _posix_file_is_directory;
+	/* (the PS2's devices report every file read-only: none is) */
+#ifndef HALO_PS2
 	if (!(st->st_mode & S_IWUSR))
 		information->flags |= _posix_file_is_read_only;
+#endif
 	split64((unsigned long long)st->st_size, &information->size_low, &information->size_high);
+#ifdef HALO_PS2
+	information->modification_seconds = (posix_ulong)st->st_mtime;
+	information->access_seconds = (posix_ulong)st->st_atime;
+	information->creation_seconds = (posix_ulong)st->st_ctime;
+#else
 	information->modification_seconds = (posix_ulong)st->st_mtim.tv_sec;
 	information->modification_nanoseconds = (posix_ulong)st->st_mtim.tv_nsec;
 	information->access_seconds = (posix_ulong)st->st_atim.tv_sec;
@@ -37,6 +52,7 @@ static void fill_information(const struct stat *st, struct posix_file_informatio
 	/* Linux has no portable creation time; the change time is the closest */
 	information->creation_seconds = (posix_ulong)st->st_ctim.tv_sec;
 	information->creation_nanoseconds = (posix_ulong)st->st_ctim.tv_nsec;
+#endif
 }
 
 int posix_stat(const char *path, struct posix_file_information *information)
@@ -44,7 +60,13 @@ int posix_stat(const char *path, struct posix_file_information *information)
 	struct stat st;
 
 	if (stat(path, &st) != 0)
+	{
+#ifdef HALO_PS2
+		/* the PS2's devices fail on a missing file with EPERM or EIO */
+		errno = ENOENT;
+#endif
 		return -1;
+	}
 	fill_information(&st, information);
 	return 0;
 }
@@ -63,6 +85,16 @@ int posix_set_file_times(const char *path,
 	posix_ulong access_seconds, posix_ulong access_nanoseconds,
 	posix_ulong modification_seconds, posix_ulong modification_nanoseconds)
 {
+#ifdef HALO_PS2
+	/* the PS2's devices keep the times they keep; the game sets none it
+	reads back */
+	(void)path;
+	(void)access_seconds;
+	(void)access_nanoseconds;
+	(void)modification_seconds;
+	(void)modification_nanoseconds;
+	return 0;
+#else
 	struct timespec times[2];
 
 	times[0].tv_sec = (time_t)access_seconds;
@@ -70,6 +102,7 @@ int posix_set_file_times(const char *path,
 	times[1].tv_sec = (time_t)modification_seconds;
 	times[1].tv_nsec = modification_seconds ? (long)modification_nanoseconds : UTIME_OMIT;
 	return utimensat(AT_FDCWD, path, times, 0);
+#endif
 }
 
 int posix_seek(int descriptor, posix_long offset_low, posix_long offset_high, int whence,
@@ -86,13 +119,50 @@ int posix_seek(int descriptor, posix_long offset_low, posix_long offset_high, in
 
 int posix_truncate(int descriptor, posix_ulong size_low, posix_ulong size_high)
 {
+#ifdef HALO_PS2
+	/* the PS2's devices have no ftruncate: a file is made longer by writing
+	its last byte (the game only ever sizes new files), and not shorter */
+	off_t size = (off_t)size_low;
+	off_t position;
+	struct stat st;
+	int result = 0;
+
+	(void)size_high;
+	if (fstat(descriptor, &st) != 0)
+		return -1;
+	if (st.st_size == size)
+		return 0;
+	if (st.st_size > size)
+	{
+		errno = ENOSYS;
+		return -1;
+	}
+	position = lseek(descriptor, 0, SEEK_CUR);
+	if (position == (off_t)-1 || lseek(descriptor, size - 1, SEEK_SET) == (off_t)-1 ||
+		write(descriptor, "", 1) != 1)
+	{
+		result = -1;
+	}
+	if (position != (off_t)-1)
+		lseek(descriptor, position, SEEK_SET);
+	return result;
+#else
 	return ftruncate(descriptor, (off_t)(((unsigned long long)size_high << 32) | size_low));
+#endif
 }
 
 int posix_disk_space(const char *path,
 	posix_ulong *free_low, posix_ulong *free_high,
 	posix_ulong *total_low, posix_ulong *total_high)
 {
+#ifdef HALO_PS2
+	/* the Xbox's hard disk as the game expects it: its saves need far less
+	(a memory card's room is the save code's to check) */
+	(void)path;
+	split64(0x20000000ULL, free_low, free_high);
+	split64(0x40000000ULL, total_low, total_high);
+	return 0;
+#else
 	struct statvfs st;
 
 	if (statvfs(path, &st) != 0)
@@ -100,6 +170,7 @@ int posix_disk_space(const char *path,
 	split64((unsigned long long)st.f_bavail * st.f_frsize, free_low, free_high);
 	split64((unsigned long long)st.f_blocks * st.f_frsize, total_low, total_high);
 	return 0;
+#endif
 }
 
 int posix_set_read_only(const char *path, int read_only)

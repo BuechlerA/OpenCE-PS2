@@ -92,6 +92,17 @@ too), apart from the few the game defines on purpose.
 `port/ps2/port.json` lists the Linux platform layer's files that the PS2
 build compiles as they are. `port/ps2/src` holds the PS2's own files.
 
+The game reads its files from `host:`, the ELF's folder `build/ps2`:
+`config.toml` (the settings, written with the defaults when it is
+missing), the game's log `debug.txt`, and the saves and the Xbox's map
+cache files under `z/` (about 730 MB, mostly unwritten). The maps go in
+`build/ps2/maps`: link it to a folder of the disc's maps, such as the
+`assets/maps` the Linux build extracts.
+
+```bash
+ln -s ../../assets/maps build/ps2/maps
+```
+
 ## Check the compile for the PS2
 
 You need the ps2dev toolchain (<https://github.com/ps2dev/ps2dev>). Its
@@ -127,8 +138,9 @@ python tools/ps2/pcsx2_run.py program.elf --until "text to wait for" --timeout 3
   not change.
 - The program's folder is PCSX2's `host:` device: the program reads the
   files beside it as `host:name`.
-- The exit status is 0 when the text appears, 1 at the timeout, and 2 when
-  PCSX2 stops or does not start.
+- The exit status is 0 when the text appears, 1 at the timeout, 2 when
+  PCSX2 stops or does not start, and 3 when the program ends (a halt in the
+  game ends it: its reason is in `debug.txt` beside it).
 - `--pcsx2 PATH` (or the `PCSX2` environment variable) selects the PCSX2
   executable. The default is `/Applications/PCSX2.app` on macOS, and
   `pcsx2-qt` on the PATH elsewhere.

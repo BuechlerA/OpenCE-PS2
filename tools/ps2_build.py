@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tools.android_build import VARIADIC_PROTOTYPE_FILES
-from tools.linux_build import (MUSL_MATH_DIR, PORT_DIR as LINUX_DIR, XDK_INCLUDE, ZLIB_DEFINES, ZLIB_DIR,
-                               ZLIB_SOURCES, _load_port_config, game_sources, musl_math_sources)
+from tools.linux_build import (MUSL_MATH_DIR, PORT_DIR as LINUX_DIR, TOML_DIR, XDK_INCLUDE, ZLIB_DEFINES,
+                               ZLIB_DIR, ZLIB_SOURCES, _load_port_config, game_sources, musl_math_sources)
 from tools.ninja_syntax import Writer
 
 PS2_DIR = Path("port/ps2")
@@ -158,14 +158,20 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
     platform = [*EE_FLAGS, *PLATFORM_FLAGS, OPTIMISATION, *release,
                 "-include", str(PREFIX), "-include", str(platform_semantics_header),
                 f"-I{PS2_DIR / 'src'}", f"-I{LINUX_DIR / 'src'}", f"-I{LINUX_DIR / 'include'}",
-                "-Isource", "-Isource/cseries",
+                "-Isource", "-Isource/cseries", f"-I{TOML_DIR}",
                 f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}", "-idirafter", str(XDK_INCLUDE)]
+    # the posix_* files talk to the C library only, with its own headers (as
+    # the Linux build has them, tools/linux_build.py)
+    posix = [*EE_FLAGS, "-std=gnu11", "-D_GNU_SOURCE", "-DHALO_PS2", "-w", OPTIMISATION, *release,
+             f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}"]
     for name in config["linux_platform_sources"]["files"]:
-        add_object(LINUX_DIR / "src" / name, platform)
+        add_object(LINUX_DIR / "src" / name, posix if name.startswith("posix_") else platform)
     for source in sorted(Path(config["platform_sources"]).glob("*.c")):
         add_object(source, platform)
 
-    # the same maths and zlib as the other builds (tools/linux_build.py)
+    # the same maths, zlib and settings file parser as the other builds
+    # (tools/linux_build.py)
+    add_object(TOML_DIR / "tomlc17.c", [*EE_FLAGS, "-std=gnu11", "-w", OPTIMISATION])
     for name in ZLIB_SOURCES:
         add_object(ZLIB_DIR / name, [*EE_FLAGS, "-std=gnu11", *ZLIB_DEFINES, "-w", OPTIMISATION])
     for source in musl_math_sources():

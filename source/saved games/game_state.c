@@ -121,6 +121,9 @@ symbols in this file:
 #include "data.h"
 #include "lruv_cache.h"
 #include "memory_pool.h"
+#ifdef HALO_PS2
+#include "cache/physical_memory_map.h"
+#endif
 #include "cluster_partitions.h"
 /* port: object_bounds_cache.c's */
 void object_bounds_cache_invalidate(void);
@@ -1046,7 +1049,14 @@ void game_state_initialize(
 	crc_new(&game_state_globals.allocation_size_checksum);
 	/* the native builds place their larger game state above the tag cache
 	(halo_port_capacity.h, cache/physical_memory_map.c) */
+#ifdef HALO_PS2
+	/* port: and the PS2 wherever its heap put it, which is the same each run
+	of a build (port/ps2/src/ps2_memory.c) */
+	game_state_globals.base_address = game_state_allocate_buffer(
+		(unsigned long)physical_memory_get_game_state_base_address(), GAME_STATE_CPU_SIZE, GAME_STATE_GPU_SIZE);
+#else
 	game_state_globals.base_address = game_state_allocate_buffer(HALO_PORT_GAME_STATE_BASE_ADDRESS, GAME_STATE_CPU_SIZE, GAME_STATE_GPU_SIZE);
+#endif
 	game_state_create_or_open_file();
 	game_state_globals.header = game_state_malloc("header", NULL, sizeof(*game_state_globals.header));
 
