@@ -230,7 +230,7 @@ retail PS2:
 | Symbol | Size | Action |
 | --- | --- | --- |
 | `profile_globals` (`cseries/profile.c`) | 1,081 KB | Leave out profiling in the PS2 build. |
-| `render.environment_surface_flags` (`render/render.h`) | 512 KB | It is used as a bit vector (`BIT_VECTOR_SET_FLAG`) but declared with one `long` for each surface, not one bit. 16 KB is enough. This is 32 times too large on every platform. |
+| `render.environment_surface_flags` (`render/render.h`) | 512 KB | Done (090c8377): it was used as a bit vector (`BIT_VECTOR_SET_FLAG`) but declared with one `long` for each surface, not one bit. It is now 16 KB on every platform, and the `render` global went from 643,732 to 135,828 bytes. |
 | `ai_debug` (`ai/ai_debug.h`) | 534 KB | Leave out AI debugging. |
 | `update_client_globals`, `update_server_globals` (`game/player_queues_new.c`) | 656 KB | Size them for the PS2's player count. |
 | `late_joiner_players` (`networking/network_server_manager.c`) | 512 KB | Netcode for 128 machines. Size it for 16, or leave it out. |
@@ -534,8 +534,10 @@ object data into tag definitions (`tag_get`) many times each tick.
 3. Add the float fixes (`-fsingle-precision-constant`, float libm) to the
    Linux build first. They also make x86 slightly faster, and saved films
    show whether game behavior changes.
-4. Fix `render.environment_surface_flags`. This saves 496 KB on every
-   platform.
+
+Done: `render.environment_surface_flags` is a 16 KB bit vector, not 512 KB
+(090c8377). It compiles in all 505 game and port files. Play a level on
+Linux or Windows to confirm that the level geometry still draws.
 
 ## Scope
 
