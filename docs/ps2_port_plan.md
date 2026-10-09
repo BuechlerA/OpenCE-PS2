@@ -85,10 +85,10 @@ that Phase 0 must confirm:
 
 | Item | Xbox | PS2 target | How |
 | --- | --- | --- | --- |
-| Code and constant data | 2.8 MB on x86 at `-Os` (measured) | 3.5 MB | MIPS code is larger than x86 code. Leave out the editor, tools, libtiff, debug code and netcode extras. |
+| Code and constant data | 5.5 MB of EE objects at `-Os` (measured: 4.49 MB of code, 0.61 MB of constants, 0.38 MB of data); 2.8 MB on x86 | 5 MB | MIPS code is 2.4 times the size of x86 code. Leave out the editor, tools, libtiff, debug code and netcode extras, and the Xbox rasterizer (0.5 MB of code), which the PS2 renderer replaces. Without frame pointers the code is 0.6 MB smaller (3.87 MB), but the crash stack walker needs them. |
 | Static (`.bss`) data | 3.1 MB (measured) | 0.5 MB | Remove profiling and debug arrays, fix an oversized bit vector, size the netcode for 16 players. |
 | Game state | 3.2 MB (measured) | 2.5 MB | Xbox capacities, not the port's (`halo_port_capacity.h` has a 17 MB game state), then cut by measured peak use. |
-| Tag data (shared tags + the current BSP) | 21.3 to 22.0 MB on campaign levels (measured) | 16 MB (projected: 13.7 to 14.4 MB) | Converter: geometry in PS2 formats, no tangent space, keyframed animations, no super-high LOD, trimmed scripts; 16-bit collision. |
+| Tag data (shared tags + the current BSP) | 21.3 to 22.0 MB on campaign levels (measured) | 14.5 MB (projected: 13.7 to 14.4 MB) | Converter: geometry in PS2 formats, no tangent space, keyframed animations, no super-high LOD, trimmed scripts; 16-bit collision. |
 | Texture cache | 22 MB (DXT) | 4.8 MB | Half size; bump maps (13% of the textures) not loaded. |
 | Sound cache | 4 MB | 0.5 MB EE + 2 MB SPU2 + IOP stream buffers | Music and long dialogue are streamed from the disc on the IOP. |
 | Render packets | (in D3D) | 1.5 MB | Double-buffered VIF/GIF packet chains. |
@@ -97,7 +97,15 @@ that Phase 0 must confirm:
 The tag data line decides feasibility. Only one BSP is in memory at a time
 (`cache_files.c` loads each BSP into the tag cache when the level switches
 to it), so the number that matters is the shared tags plus the largest
-BSP. Phase 0 measures this for every map.
+BSP.
+
+The plan first set the tag data at 16 MB, with code at 3.5 MB. The
+measured MIPS code (5 MB after the cuts) leaves 14.5 MB for the tag data:
+the table adds up to 30.8 MB of the 31 MB. The campaign levels project to
+13.7 to 14.4 MB with all the converter and game-code changes, so they fit,
+with little margin. If the margin runs out, the next steps are release
+builds without frame pointers (0.6 MB of code), the remaining static data,
+and smaller texture and render packet buffers.
 
 ### 2. Relocating the tag data
 
@@ -125,9 +133,22 @@ Use ps2dev's GCC (`mips64r5900el-ps2-elf`) with ps2sdk. Clang has no
 supported R5900 target (the R5900 has no double-precision FPU and has CPU
 errata that GCC works around).
 
-- Flags: `-fms-extensions -fshort-wchar -fcommon`, and `-mlong32` if the EE
-  ABI has 64-bit `long` (check this first: the game requires a 32-bit
-  `long`).
+- ABI (measured with ps2dev v2.0.0, GCC 15.2): the EE's default ABI is
+  n32, with 32-bit `long` and pointers, 8-byte alignment of `double` and
+  `long long` (as `-malign-double` gives on x86), hardware single-precision
+  floats and software doubles. With `-fshort-wchar`, `wchar_t` is 16 bits.
+  So the game's structures keep their Xbox layout without `-mlong32` or
+  other options, and every layout assert in the game holds.
+- Flags: the Linux build's, less those of clang and x86:
+  `-fms-extensions -fshort-wchar -fcommon -fno-strict-aliasing -fwrapv
+  -fno-delete-null-pointer-checks -freg-struct-return -ffp-contract=off
+  -std=gnu89 -fpermissive` (`-fpermissive` makes GCC 14 and later treat
+  implicit declarations and pointer mismatches as warnings, as clang's
+  `-Wno-error=...` does), with `-D_EE -G0`.
+- `port/ps2/include/halo_ps2_prefix.h` adds what GCC does not take from
+  clang: `__int64`, the x86 calling conventions, `__declspec`, and MSVC's
+  COMDAT inline functions. Those become GNU89 inlines that each unit emits
+  and the generated `#pragma weak` makes weak.
 - Struct layout: x86 MSVC aligns 8-byte members to 8 (`-malign-double`).
   Write a layout manifest from the x86 build (`sizeof` and `offsetof` of
   every tag, game state and saved-game structure, using the tag schema and
@@ -135,9 +156,10 @@ errata that GCC works around).
   the same layout.
 - Stepping stone: build the Linux port with GCC (`--linux-cc gcc`) first.
   This separates compiler problems from platform problems.
-- Prototypes: apply the fixes from `tools/android_abi_check.py`, and run it
-  on the PS2 IR as well. MIPS EABI also passes floats in their own
-  registers.
+- Prototypes: the files the Android build gives the variadic prototypes
+  (`tools/android_abi_check.py` finds them) get them on the PS2 too,
+  because n32 also passes floats in their own registers. Run the check on
+  the PS2's code as well.
 - Unaligned access: x86 and AArch64 allowed it, so nothing has checked it
   yet. Run the Linux build with `-fsanitize=alignment` through the menus
   and every level, and fix each report (network bitstreams, packed
@@ -327,9 +349,10 @@ changes), with the animations at 0.25 degrees / 2 mm:
 | Multiplayer maps | 7.1 to 8.9 MB | 4.5 to 5.9 MB | 4.2 to 5.4 MB |
 
 - **With the game-code changes,** every campaign level comes to 13.7 to
-  14.4 MB. That is inside the 16 MB target with a margin of 1.6 MB or more.
+  14.4 MB. That is inside the 14.5 MB target ("Memory budget": the measured
+  MIPS code took 1.5 MB of the first 16 MB), with little margin.
 - **With the converter and the renderer alone,** they come to 15.5 to 16.3
-  MB, at the target, with no margin.
+  MB, over the target. The game-code changes are needed.
 - **Collision is the most valuable code change.** It saves 0.9 to 1.3 MB a
   level.
 - **Looser tolerances help a little.** At 0.5 degrees / 3 mm, the campaign
@@ -606,6 +629,16 @@ multiplayer maps need half the budget, so a multiplayer level is the
 natural first target for Phase 1 and the first renderer milestones.
 
 ### Phase 1: the simulation on hardware (2 to 3 months)
+
+Done so far:
+
+- The ps2dev toolchain (v2.0.0) runs on the development Mac, and PCSX2
+  runs programs from it (`tools/ps2/pcsx2_run.py`).
+- All 466 game files compile for the EE (`tools/ps2/compile_check.py`).
+  The objects have 4.49 MB of code at `-Os` (5.90 MB at `-O2`) and 3.39 MB
+  of `.bss`.
+
+Still to do:
 
 - The toolchain, `tools/ps2_build.py`, and the platform layer: memory,
   files from `host:` or `mass:`, threads, timers.

@@ -25,14 +25,19 @@ Measured on the 24 maps of a retail Xbox disc:
   (21.3 to 22.0 MB). A PS2 map converter and the PS2 renderer bring the
   levels to 15.5 to 16.3 MB. With 16-bit collision data and smaller sound,
   script and font records, they come to 13.7 to 14.4 MB, inside the PS2
-  budget of 16 MB. The multiplayer maps need 4.2 to 5.9 MB.
+  budget of 14.5 MB, with little margin. The multiplayer maps need 4.2 to
+  5.9 MB.
+- **Compiling.** All 466 C files of the game compile for the PS2's main
+  processor with ps2dev's GCC, and the game's structures keep their Xbox
+  layout. The PS2's code is 2.4 times the size of the Xbox's: about 5 MB of
+  the 32 MB.
 - **Main savings.** Smaller model and level vertices (the PS2 has no bump
   mapping), animations in the engine's own keyframe format, no
   super-high-detail models, and compact collision.
 - **Textures** stream from the disc: 35 to 49 MB for each campaign map,
   of which the PS2 does not need the bump maps.
 - **Not measured yet:** the cost of the game logic on the PS2's CPU. That
-  needs the game running on PS2 hardware (Phase 1 of the plan).
+  needs the game running on PS2 hardware (Phase 1 of the plan, under way).
 
 ## Game data
 

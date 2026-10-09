@@ -1,13 +1,16 @@
-# PS2 map tools
+# PS2 tools
 
-These tools measure the Xbox maps for the PS2 port's memory budget. Refer
-to [docs/ps2_port_plan.md](../../docs/ps2_port_plan.md), "Optimizing memory
-and game logic". They read the maps and write reports. They do not change
-or convert a map.
+These tools support the PS2 port ([docs/ps2_port_plan.md](../../docs/ps2_port_plan.md)):
 
-You need Python 3.9 or later and a disc image of Halo: Combat Evolved for
-the Xbox. Keep the image in `assets/` at the root of the repository, which
-git ignores. Do not put it anywhere else in the repository.
+- The map tools measure the Xbox maps for the PS2's memory budget. They
+  read the maps and write reports. They do not change or convert a map.
+- The build tools compile the game for the PS2 and run PS2 programs in
+  PCSX2.
+
+The tools need Python 3.9 or later. The map tools also need a disc image of
+Halo: Combat Evolved for the Xbox. Keep the image in `assets/` at the root
+of the repository, which git ignores. Do not put it anywhere else in the
+repository.
 
 | Tool | Function |
 | --- | --- |
@@ -16,6 +19,8 @@ git ignores. Do not put it anywhere else in the repository.
 | `budget_projection.py` | Combines the results of the two tools above into each map's projected PS2 peak. |
 | `export_tag_schema.py` | Makes `tag_schema.json` from the tag schema in `port/linux/game/tag_schema_*.c`. |
 | `tag_schema.json` | The tag schema: each tag group and block definition, with the offsets and sizes of the Xbox ABI. Generated, committed. |
+| `compile_check.py` | Compiles each of the game's C files for the PS2's EE with ps2dev's GCC, and reports which fail and why, grouped by error. Also reports the size of the code and data. |
+| `pcsx2_run.py` | Boots a PS2 program in PCSX2 without its window, and prints what it writes to the console. Stops when a given text appears or after a timeout. |
 
 ## Measure the maps
 
@@ -52,3 +57,42 @@ x86 C library's headers, for example musl's:
 
 1. In a musl source tree, enter `make ARCH=i386 prefix=DIR install-headers`.
 2. Enter `python tools/ps2/export_tag_schema.py --libc-include DIR/include`.
+
+## Compile the game for the PS2
+
+You need the ps2dev toolchain (<https://github.com/ps2dev/ps2dev>). Its
+prebuilt releases include macOS (Apple Silicon and Intel), Linux and
+Windows. Set `PS2DEV`, `PS2SDK` and `PATH` as its README says.
+
+```bash
+python tools/ps2/compile_check.py
+```
+
+- `--optimize "-O2"` uses other optimization options. The default is
+  `-Os`, because memory is the PS2's limit.
+- `--only source/ai` compiles only some files.
+- The objects go to `build/ps2/obj`, and the report to
+  `build/ps2/compile_check.json`.
+
+The PS2 build uses the Linux build's MSVC environment under
+`port/ps2/include/halo_ps2_prefix.h`. It adds what GCC does not take from
+clang: `__int64`, the x86 calling conventions, `__declspec`, and MSVC's
+inline functions as weak GNU89 inlines.
+
+## Run a PS2 program in PCSX2
+
+You need PCSX2, configured with a BIOS from your own console: start PCSX2
+once and choose the BIOS.
+
+```bash
+python tools/ps2/pcsx2_run.py program.elf --until "text to wait for" --timeout 30
+```
+
+- The tool copies your PCSX2 configuration to a temporary folder and turns
+  on console logging there. Your own settings do not change.
+- The program's folder is PCSX2's `host:` device.
+- The exit status is 0 when the text appears, 1 at the timeout, and 2 when
+  PCSX2 stops or does not start.
+- `--pcsx2 PATH` (or the `PCSX2` environment variable) selects the PCSX2
+  executable. The default is `/Applications/PCSX2.app` on macOS, and
+  `pcsx2-qt` on the PATH elsewhere.

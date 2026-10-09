@@ -59,10 +59,18 @@ symbols in this file:
 
 /* ---------- macros */
 
+#ifdef HALO_PS2
+/* port: GCC has no ui64 suffix, which clang takes with -fms-extensions */
+#define SWAP8(q) \
+	(((q)>>56) | (((q)>>40)&0xff00) | (((q)>>24)&0xff0000) | (((q)>>8)&0xff000000) | \
+	 (((q)<<8)&0xff00000000ULL) | (((q)<<24)&0xff0000000000ULL) | \
+	 (((q)<<40)&0xff000000000000ULL) | ((q)<<56))
+#else
 #define SWAP8(q) \
 	(((q)>>56) | (((q)>>40)&0xff00) | (((q)>>24)&0xff0000) | (((q)>>8)&0xff000000) | \
 	 (((q)<<8)&0xff00000000ui64) | (((q)<<24)&0xff0000000000ui64) | \
 	 (((q)<<40)&0xff000000000000ui64) | ((q)<<56))
+#endif
 
 /* ---------- structures */
 

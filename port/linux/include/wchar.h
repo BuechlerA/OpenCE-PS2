@@ -23,10 +23,16 @@ swprintf()/vswprintf() take no buffer size.
 #error the Linux build requires -fshort-wchar
 #endif
 
+#ifdef HALO_PS2
+/* newlib's wint_t (unsigned int, from its <sys/_types.h>) holds every
+16-bit character; WEOF is MSVC's, as on the other builds */
+#undef WEOF
+#else
 #ifndef __wint_t_defined
 #define __wint_t_defined 1
 #define _WINT_T 1
 typedef unsigned short wint_t;
+#endif
 #endif
 
 #ifndef WEOF
