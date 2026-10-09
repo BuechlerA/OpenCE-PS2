@@ -49,13 +49,16 @@ and the XDK declarations use */
 newlib's <sys/types.h> includes <limits.h>, which glibc's does not under
 __STRICT_ANSI__, and cseries.h declares LONG_MAX, LONG_MIN, CHAR_MAX and
 CHAR_MIN itself, as enum constants of the same values. Include it once here
-and give those names to cseries.h. */
+and give those names to cseries.h, in the game's units; the platform layer
+keeps <limits.h>'s. */
 
 #include <limits.h>
+#ifndef HALO_LINUX_PLATFORM_LAYER
 #undef LONG_MAX
 #undef LONG_MIN
 #undef CHAR_MAX
 #undef CHAR_MIN
+#endif
 
 /* ---------- MSVC inline semantics
 

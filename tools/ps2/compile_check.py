@@ -4,15 +4,16 @@ breaks (docs/ps2_port_plan.md, Phase 1):
 
     python tools/ps2/compile_check.py [--jobs N] [--only PATTERN ...] [--json OUT]
 
-Each file of the game (port/linux/port.json "game") is compiled to an object
-with ps2dev's GCC (mips64r5900el-ps2-elf-gcc, found through PS2DEV), with the
+Each file of the game (port/linux/port.json "game") and each of the port's
+game units (port/linux/game) that the PS2 build compiles is compiled to an
+object with ps2dev's GCC (mips64r5900el-ps2-elf-gcc, found through PS2DEV), with the
 Linux build's MSVC environment (port/linux/include, the XDK declarations,
-halo_msvc_semantics.h) under port/ps2/include/halo_ps2_prefix.h. Nothing is
-linked. The report lists the files that fail and the errors, grouped by
+halo_msvc_semantics.h) under port/ps2/include/halo_ps2_prefix.h, with the
+flags of tools/ps2_build.py. Nothing is linked (ninja ps2 links). The report lists the files that fail and the errors, grouped by
 message, most files first, so the work can be taken in order.
 
-The objects go to build/ps2/obj, the generated header and the report to
-build/ps2.
+The objects, the generated header and the report go to build/ps2/check,
+apart from ninja ps2's.
 """
 
 import argparse
@@ -28,30 +29,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.android_build import VARIADIC_PROTOTYPE_FILES  # noqa: E402
-from tools.linux_build import PORT_DIR, XDK_INCLUDE, _load_port_config, game_sources  # noqa: E402
+from tools.linux_build import _load_port_config, game_sources  # noqa: E402
+from tools.ps2_build import VARIADIC_PROTOTYPES, game_compile_flags, ps2_game_units  # noqa: E402
 
-BUILD = Path("build/ps2")
-PREFIX = Path("port/ps2/include/halo_ps2_prefix.h")
-# The files that call variadic functions without their prototype, which the
-# Android build gives them (tools/android_abi_check.py finds them): the EE's
-# n32 ABI passes floating-point arguments in their own registers too, so an
-# unprototyped variadic call would pass them where the callee does not look.
-VARIADIC_PROTOTYPES = Path("port/android/include/halo_android_variadic_prototypes.h")
-
-# The Linux build's ABI flags (tools/linux_build.py, LINUX_ABI_FLAGS) that
-# carry over: the EE's n32 ABI already aligns 8-byte members as MSVC does,
-# so -malign-double has no counterpart, and -m32 and --target are clang's.
-EE_FLAGS = [
-    "-D_EE", "-G0",
-    "-fms-extensions", "-fshort-wchar", "-fcommon", "-fno-pic",
-    "-fno-strict-aliasing", "-fwrapv", "-fno-delete-null-pointer-checks",
-    "-freg-struct-return", "-fno-omit-frame-pointer", "-ffp-contract=off",
-]
-# tools/linux_build.py GAME_FLAGS: C89 with MSVC's leniency. GCC 14 and later
-# make implicit declarations, implicit int and pointer/integer mismatches
-# errors; -fpermissive makes them warnings again, as -Wno-error=... does for
-# clang.
-GAME_FLAGS = ["-std=gnu89", "-D__STRICT_ANSI__", "-w", "-fpermissive"]
+# apart from ninja ps2's objects (build/ps2/obj), which may have other options
+BUILD = Path("build/ps2/check")
 
 ERROR = re.compile(r'^(?P<file>[^:\n]+):(?P<line>\d+):(?:\d+:)? (?:fatal )?error: (?P<message>.*)$', re.M)
 
@@ -66,27 +48,10 @@ def compiler():
     return cc
 
 
-# an inline function the source itself makes static (D3DINLINE is
-# `static __forceinline`, xdk_d3d8.h): GCC refuses `#pragma weak` on it
-STATIC_INLINE = re.compile(
-    r"(?:\bstatic\s+(?:__inline|_inline|__forceinline)|\bD3DINLINE)\b[^;{}()]*?\b([A-Za-z_]\w*)\s*\(")
-
-
 def semantics_header():
-    """tools/linux_msvc_semantics.py's header, without the `#pragma weak` of
-    the functions the source makes static (halo_ps2_prefix.h)"""
+    """the PS2 build's halo_msvc_semantics.h (tools/ps2/semantics_header.py)"""
     out = BUILD / "halo_msvc_semantics.h"
-    BUILD.mkdir(parents=True, exist_ok=True)
-    subprocess.run([sys.executable, "tools/linux_msvc_semantics.py", "--output", str(out), "--all-inlines",
-                    "--tags", "source", "--inlines", "source", "--inlines", str(XDK_INCLUDE)], check=True)
-    static = set()
-    for root in (Path("source"), XDK_INCLUDE):
-        for path in root.rglob("*"):
-            if path.suffix in (".c", ".h", ".inl") and path.is_file():
-                static.update(STATIC_INLINE.findall(path.read_text(encoding="latin-1")))
-    lines = out.read_text().splitlines(keepends=True)
-    out.write_text("".join(line for line in lines
-                           if not (line.startswith("#pragma weak ") and line.split()[2] in static)))
+    subprocess.run([sys.executable, "tools/ps2/semantics_header.py", "--output", str(out)], check=True)
     return out
 
 
@@ -126,14 +91,11 @@ def main():
     cc = compiler()
     sdk = Path(os.environ.get("PS2SDK", Path(os.environ["PS2DEV"]) / "ps2sdk"))
     config = _load_port_config()
-    flags = [*EE_FLAGS, *args.optimize.split(), *GAME_FLAGS,
-             "-include", str(PREFIX), "-include", str(semantics_header()),
-             f"-I{PORT_DIR / 'include'}", "-iquote", config["game_sources"],
-             *[f"-D{d}" for d in config["game"].get("defines", [])],
-             *[f"-I{d}" for d in config["game"]["include_dirs"]],
-             f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}",
-             "-idirafter", str(XDK_INCLUDE)]
-    sources = [s for s in game_sources(config) if not args.only or any(p in s.as_posix() for p in args.only)]
+    flags = [*game_compile_flags(sdk, semantics_header()), *args.optimize.split()]
+    # the game's files, and the port's own game units that the PS2 build
+    # compiles (port/linux/game, port/ps2/port.json)
+    sources = [*game_sources(config), *ps2_game_units()]
+    sources = [s for s in sources if not args.only or any(p in s.as_posix() for p in args.only)]
 
     def compile_one(source):
         obj = BUILD / "obj" / source.with_suffix(".o")

@@ -637,6 +637,21 @@ Done so far:
 - All 466 game files compile for the EE (`tools/ps2/compile_check.py`).
   The objects have 4.49 MB of code at `-Os` (5.90 MB at `-O2`) and 3.39 MB
   of `.bss`.
+- `ninja ps2` links `build/ps2/halo.elf` (`tools/ps2_build.py`), with the
+  game, the port's game units, seven files of the Linux platform layer
+  (`port/ps2/port.json`), musl's maths, zlib and `port/ps2/src`. 321
+  functions of the platform layer are still stubs that name themselves and
+  stop (`tools/ps2/unimplemented_stubs.py`). In PCSX2 the game runs from
+  `main` to its first stub, `Direct3DCreate8` (`rasterizer_preinitialize`).
+- The ELF loads 25.3 MB: 6.4 MB of code and constants, 0.4 MB of data and
+  18.5 MB of `.bss`, of which 13.5 MB is the port's game units for features
+  the PS2 does not have (Custom Edition maps 6.4 MB, the tag validator
+  2.9 MB, the 128-player netcode 3.7 MB). They go next, with stubs in their
+  place, before the game's memory map (`physical_memory_map.c`) can fit.
+- newlib names its system calls `_open`, `_close`, `_read`, `_write`,
+  `_lseek`, `_stat`, `_fstat` and `_mkdir`, which `msvc_crt.c` also defined
+  for MSVC; on the PS2 newlib's stay (`_close` calling `close` called
+  itself).
 
 Still to do:
 

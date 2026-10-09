@@ -21,6 +21,8 @@ repository.
 | `tag_schema.json` | The tag schema: each tag group and block definition, with the offsets and sizes of the Xbox ABI. Generated, committed. |
 | `compile_check.py` | Compiles each of the game's C files for the PS2's EE with ps2dev's GCC, and reports which fail and why, grouped by error. Also reports the size of the code and data. |
 | `pcsx2_run.py` | Boots a PS2 program in PCSX2 without its window, and prints what it writes to the console. Stops when a given text appears or after a timeout. |
+| `semantics_header.py` | Makes the PS2 build's `halo_msvc_semantics.h` (used by `ninja ps2` and `compile_check.py`). |
+| `unimplemented_stubs.py` | Writes a stub for each function the PS2 build calls and nothing defines yet (used by `ninja ps2`). |
 
 ## Measure the maps
 
@@ -58,7 +60,29 @@ x86 C library's headers, for example musl's:
 1. In a musl source tree, enter `make ARCH=i386 prefix=DIR install-headers`.
 2. Enter `python tools/ps2/export_tag_schema.py --libc-include DIR/include`.
 
-## Compile the game for the PS2
+## Build the game for the PS2
+
+`ninja ps2` builds `build/ps2/halo.elf` (`tools/ps2_build.py`). It needs the
+ps2dev toolchain (below). `configure.py` finds it through `PS2DEV`, or
+through `--ps2dev DIR`, and leaves the PS2 build out without it.
+
+```bash
+python configure.py
+ninja ps2
+python tools/ps2/pcsx2_run.py build/ps2/halo.elf --until unimplemented: --timeout 60
+```
+
+The PS2's platform layer is not complete. Every function that the game
+calls and that nothing defines yet is a stub: it prints
+`unimplemented: NAME` and stops. `build/ps2/unimplemented.txt` lists the
+stubs. A run in PCSX2 shows the next function to write. A missing data
+symbol (a table, a global) stops the build instead, because a stub cannot
+stand in for data.
+
+`port/ps2/port.json` lists the Linux platform layer's files that the PS2
+build compiles as they are. `port/ps2/src` holds the PS2's own files.
+
+## Check the compile for the PS2
 
 You need the ps2dev toolchain (<https://github.com/ps2dev/ps2dev>). Its
 prebuilt releases include macOS (Apple Silicon and Intel), Linux and
@@ -71,8 +95,8 @@ python tools/ps2/compile_check.py
 - `--optimize "-O2"` uses other optimization options. The default is
   `-Os`, because memory is the PS2's limit.
 - `--only source/ai` compiles only some files.
-- The objects go to `build/ps2/obj`, and the report to
-  `build/ps2/compile_check.json`.
+- The objects and the report (`compile_check.json`) go to
+  `build/ps2/check`, apart from the objects of `ninja ps2`.
 
 The PS2 build uses the Linux build's MSVC environment under
 `port/ps2/include/halo_ps2_prefix.h`. It adds what GCC does not take from

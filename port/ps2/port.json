@@ -1,0 +1,20 @@
+{
+  "comment": "The PS2 build's inputs (tools/ps2_build.py). The game's files and flags are the Linux build's (port/linux/port.json); these are what the PS2 build adds and leaves out.",
+  "port_game_units": {
+    "comment": "The port's game units (port/linux/game) the PS2 build leaves out; the game's calls to them are stubbed until the PS2 has them.",
+    "exclude": []
+  },
+  "linux_platform_sources": {
+    "comment": "The Linux platform layer's files (port/linux/src) that the PS2 build compiles as they are.",
+    "files": [
+      "bink_null.c",
+      "halo_linker_common.c",
+      "msvc_crt.c",
+      "msvc_wide.c",
+      "xbdm.c",
+      "xbox_files.c",
+      "xbox_xapi.c"
+    ]
+  },
+  "platform_sources": "port/ps2/src"
+}

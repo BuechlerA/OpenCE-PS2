@@ -351,6 +351,33 @@ unsigned int _clearfp(void)
 	__builtin_arm_wsr64("fpsr", __builtin_arm_rsr64("fpsr") & ~0x9fULL);
 	return status;
 }
+#elif defined(HALO_PS2)
+/* the EE's FPU (R5900 COP1) always rounds toward zero, has no precision
+control, no exceptions and no denormals: the MSVC control word is only
+remembered, and no exception is ever raised */
+static unsigned int msvc_control_word = CW_DEFAULT;
+
+unsigned int _control87(unsigned int new_value, unsigned int mask)
+{
+	msvc_control_word = (msvc_control_word & ~mask) | (new_value & mask);
+	return msvc_control_word;
+}
+
+unsigned int _controlfp(unsigned int new_value, unsigned int mask)
+{
+	/* _controlfp ignores the denormal mask */
+	return _control87(new_value, mask & ~_EM_DENORMAL);
+}
+
+unsigned int _statusfp(void)
+{
+	return 0;
+}
+
+unsigned int _clearfp(void)
+{
+	return 0;
+}
 #else
 /* x87: glibc's floating-point environment holds the control and status
 words (fegetenv and fesetenv save and load the whole x87 environment, and
@@ -593,12 +620,19 @@ int halo_linux_open(const char *path, int flags, ...)
 	return open(translated(path, host_path, sizeof(host_path)), flags | O_CLOEXEC, mode ? mode : 0644);
 }
 
+/* port: newlib (the PS2's C library) names its system calls _mkdir, _stat,
+_fstat, _open, _close, _read, _write and _lseek, and its own mkdir, stat,
+open and the rest call them: a definition here would replace them (and
+_close's close() would call itself). Nothing of the game calls these MSVC
+names on the PS2 but libtiff, which newlib's serve. */
+#ifndef HALO_PS2
 int _mkdir(const char *path)
 {
 	char host_path[1024];
 
 	return posix_make_directory(translated(path, host_path, sizeof(host_path)));
 }
+#endif
 
 int _rmdir(const char *path)
 {
@@ -633,6 +667,7 @@ static void stat_from_information(const struct posix_file_information *informati
 	buffer->st_ctime = (time_t)information->creation_seconds;
 }
 
+#ifndef HALO_PS2
 int _stat(const char *path, struct _stat *buffer)
 {
 	char host_path[1024];
@@ -653,6 +688,7 @@ int _fstat(int handle, struct _stat *buffer)
 	stat_from_information(&information, buffer);
 	return 0;
 }
+#endif
 
 long _filelength(int handle)
 {
@@ -680,6 +716,7 @@ int _fileno(FILE *stream)
 
 /* libtiff maps its POSIX calls onto the MSVC underscore names itself */
 
+#ifndef HALO_PS2
 int _open(const char *path, int flags, ...)
 {
 	int mode = 0;
@@ -714,3 +751,4 @@ long _lseek(int handle, long offset, int origin)
 {
 	return (long)lseek(handle, offset, origin);
 }
+#endif
