@@ -93,7 +93,9 @@ struct render_globals
 	unsigned long visible_cluster_flags[MAXIMUM_CLUSTERS_PER_STRUCTURE / LONG_BITS];
 	struct rendered_cluster rendered_clusters[MAXIMUM_RENDERED_CLUSTERS];
 	short rendered_cluster_count;
-	unsigned long environment_surface_flags[MAXIMUM_SURFACES_PER_STRUCTURE];
+	// Bitvector of the structure's surfaces, a bit set for each one drawn
+	// (port: one bit a surface, not one long: it was 512 KB)
+	unsigned long environment_surface_flags[BIT_VECTOR_SIZE_IN_LONGS(MAXIMUM_SURFACES_PER_STRUCTURE)];
 	short environment_surface_count;
 	long environment_surface_indices[MAXIMUM_RENDERED_ENVIRONMENT_SURFACES];
 };
