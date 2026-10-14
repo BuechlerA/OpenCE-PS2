@@ -29,6 +29,21 @@ PS2 status comes first) and [docs/ps2_port_plan.md](docs/ps2_port_plan.md).
   `make` ([README](port/ps2/samples/masterchief/README.md)). It needs
   `assets/maps/bloodgulch.map` and the ps2dev toolchain with gsKit.
 
+### Checking the Master Chief sample
+
+It draws, so it needs PCSX2's window (`tools/ps2/pcsx2_run.py` is for programs
+that only print):
+
+- `PCSX2 -nogui -batch -elf masterchief.elf`; then capture that window only
+  (`screencapture -l <window id>`, the id from `CGWindowListCopyWindowInfo`),
+  never the whole screen, and stop only the process you started.
+- It is time driven, so for a still frame add `EXTRA_CFLAGS="-DDEBUG_SECONDS=1.45f"`
+  to `make`; add `-DNO_SPECULAR_PASS` to compare a shading pass with and
+  without it (build both ELFs, capture both).
+- Video memory is nearly full (two 640x448 32-bit buffers, a 16-bit Z buffer
+  and five textures: about 3.8 of 4 MB). Work out what a new texture takes
+  before adding it; the rifle's mask is 256x256 for that reason.
+
 ## Rules
 
 - **Game data stays out of the repository.** Keep the maps and disc image in
@@ -39,6 +54,10 @@ PS2 status comes first) and [docs/ps2_port_plan.md](docs/ps2_port_plan.md).
   original with a comment that starts `port:`.
 - The Xbox SDK's headers are never read or copied (`port/include/xdk` was
   written without them).
+- Branches off `ps2` are made with `git switch -c <name> --no-track ps2/ps2`:
+  a branch that tracks `ps2/ps2` makes a plain `git push` land on `ps2`
+  itself. Push with an explicit refspec (`git push ps2 <name>:refs/heads/<name>`)
+  and never force-push `ps2`.
 - Commit subjects are plain sentences saying what changed; the body says why
   and what was checked. Say when something was checked only in PCSX2 and not
   on hardware.
