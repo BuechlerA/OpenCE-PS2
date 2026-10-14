@@ -74,7 +74,7 @@ materials: the terrain, the cliffs and the two round metal bases) and bakes:
   counter-clockwise from outside and sorted into spans by base map, then lightmap page;
 - the base maps the environment shaders use, as 8-bit palettised textures with mip levels (DXT
   decoded, cut to 256 pixels on a side unless 1,000 or more triangles use the map; the ground is
-  256x256, the cliff 256x512);
+  256x256, the cliff 128x256 (`CLIFF_SIZE=source` keeps the map's 256x512));
 - each shader's primary and micro detail maps as 8-bit grey textures, 128 pixels a side with mips, the last
   level their average (a detail map tiles visibly far away, so it fades out); 7 of them, 148 KB;
 - the lightmap pages (RGB565, swizzled; their unused texels are a red and yellow checker, filled in from the
@@ -107,7 +107,7 @@ planes below, and the distance a piece of scenery is drawn to), then takes the t
 span. A triangle facing away from the camera (a plane test in the world) is dropped without its vertices being
 touched. The others' vertices are transformed and projected on VU0 (one divide, then the screen position, the depth
 and the four texture-coordinate pairs in one block) the first time a visible triangle needs them, once a frame. A
-triangle with a vertex behind the near plane or more than 1400 pixels off the screen (the GS's coordinates are 2048
+triangle with a vertex behind the near plane or more than 64 pixels off the screen (the GS's coordinates are 2048
 pixels either side of its origin, and gsKit puts that at the screen's corner: more wraps) is clipped in view space
 before projection: the camera stands inside the map. Each span's vertices are kept as 64-byte records (the ST of the
 base map, the lightmap, each detail map and the bump map, the reflection's colour, RGBAQ, XYZ2, in four quadwords). The textures are perspective-correct (Q = 1 / z) and may tile
@@ -135,7 +135,7 @@ triangle).
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
   32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
-  Video memory: 2.43 MB of 4.19 MB in use (1.76 MB spare) with the Chief's and the map's textures (the program
+  Video memory: 2.30 MB of 4.19 MB in use (1.89 MB spare) with the Chief's and the map's textures (the program
   prints the budget at start-up, `VRAM: ...`, and stops if a texture did not fit: gsKit's failed allocation is
   address 0, the frame buffer, and the texture would draw from it). How it got there from 3.39 MB: the Chief's
   small textures, the mip levels the orbit never reads (`tools/mip_floor.json`), 512-wide buffers; see
