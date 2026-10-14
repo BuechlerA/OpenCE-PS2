@@ -45,6 +45,7 @@ data and which the game takes as models (tag_schema_custom_edition_groups).
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---------- constants */
@@ -72,14 +73,7 @@ enum
 
 	/* the claims: a bit for each byte of the largest tag cache */
 	CLAIM_BITS = 32,
-#ifdef HALO_PS2
-	/* the PS2 trusts its maps (they are the converter's) and has 1.2 MB less
-	to spare for each 9 MB of tag cache: it checks nothing, and keeps no
-	claims */
-	CLAIM_WORDS = 1,
-#else
 	CLAIM_WORDS = TAG_VALIDATE_MAXIMUM_TAG_CACHE_SIZE / CLAIM_BITS,
-#endif
 
 	/* a Custom Edition map's models (cache_file_formats.c) */
 	GBXMODEL_GROUP_TAG = 'mod2',
@@ -219,7 +213,15 @@ static struct
 
 /* a bit for each byte of the tag cache that a tag's root, block or data
 holds */
+#ifdef HALO_PS2
+/* port: held only while a map's tags or a bsp are checked (the PS2 has 1.2 MB
+for each 9 MB of tag cache only then): see claims_acquire */
+static unsigned long *tag_validate_claims;
+#define CLAIMS_SIZE (CLAIM_WORDS * sizeof(unsigned long))
+#else
 static unsigned long tag_validate_claims[CLAIM_WORDS];
+#define CLAIMS_SIZE sizeof(tag_validate_claims)
+#endif
 
 static char const tag_validate_empty_name[] = "";
 
@@ -1164,13 +1166,13 @@ static void validation_begin(
 	tag_validate_globals.tag_cache_size = tag_cache_size;
 	tag_validate_globals.custom_edition = custom_edition;
 	snprintf(tag_validate_globals.map_name, sizeof(tag_validate_globals.map_name), "%s", map_name);
-	memset(tag_validate_claims, 0, sizeof(tag_validate_claims));
+	memset(tag_validate_claims, 0, CLAIMS_SIZE);
 	validation_new(validation, tag_header, (unsigned long)tag_data_size);
 
 	return;
 }
 
-boolean tag_validate_tags(
+static boolean validate_tags(
 	void *tag_header,
 	long tag_data_size,
 	long file_length,
@@ -1179,9 +1181,6 @@ boolean tag_validate_tags(
 	struct tag_validate_header *header = tag_header;
 	struct tag_validation validation;
 
-#ifdef HALO_PS2
-	return TRUE;
-#endif
 	validation_begin(&validation, tag_header, tag_data_size, TAG_CACHE_SIZE, FALSE, map_name);
 	tag_validate_globals.file_ranges[0].offset = 0;
 	tag_validate_globals.file_ranges[0].size = file_length < 0 ? 0 : (unsigned long)file_length;
@@ -1211,6 +1210,45 @@ boolean tag_validate_tags(
 	}
 
 	return validate_tag_table(&validation, header->instances, header->tag_count);
+}
+
+#ifdef HALO_PS2
+static boolean claims_acquire(
+	void)
+{
+	/* (malloc and free are the game's, cseries.h) */
+	tag_validate_claims = malloc(CLAIMS_SIZE);
+	if (tag_validate_claims)
+		memset(tag_validate_claims, 0, CLAIMS_SIZE);
+	return tag_validate_claims != NULL;
+}
+
+static void claims_release(
+	void)
+{
+	free(tag_validate_claims);
+	tag_validate_claims = NULL;
+}
+#else
+#define claims_acquire() TRUE
+#define claims_release()
+#endif
+
+boolean tag_validate_tags(
+	void *tag_header,
+	long tag_data_size,
+	long file_length,
+	char const *map_name)
+{
+	boolean valid = FALSE;
+
+	if (claims_acquire())
+	{
+		valid = validate_tags(tag_header, tag_data_size, file_length, map_name);
+		claims_release();
+	}
+
+	return valid;
 }
 
 boolean tag_validate_custom_edition_tags(
@@ -1257,7 +1295,7 @@ boolean tag_validate_custom_edition_tags(
 	return validate_tag_table(&validation, header->instances, header->tag_count);
 }
 
-boolean tag_validate_structure_bsp(
+static boolean validate_structure_bsp(
 	long tag_index,
 	void *base,
 	long size)
@@ -1269,9 +1307,6 @@ boolean tag_validate_structure_bsp(
 	struct tag_validation validation;
 	unsigned long tag_cache_offset = (unsigned long)((byte *)base - (byte *)header);
 
-#ifdef HALO_PS2
-	return TRUE;
-#endif
 	validation_new(&validation, base, (unsigned long)size);
 	validation.tag_index = tag_index;
 	if (!header || !instance || instance->group_tag != STRUCTURE_BSP_GROUP_TAG ||
@@ -1313,6 +1348,22 @@ boolean tag_validate_structure_bsp(
 	return !validation.refused;
 }
 
+boolean tag_validate_structure_bsp(
+	long tag_index,
+	void *base,
+	long size)
+{
+	boolean valid = FALSE;
+
+	if (claims_acquire())
+	{
+		valid = validate_structure_bsp(tag_index, base, size);
+		claims_release();
+	}
+
+	return valid;
+}
+
 long tag_validate_corrections(
 	void)
 {
@@ -1326,7 +1377,8 @@ boolean tag_validate_claimed(
 {
 	unsigned long offset = (unsigned long)address - (unsigned long)tag_validate_globals.header;
 
-	if (!tag_validate_globals.header || (unsigned long)address < (unsigned long)tag_validate_globals.header ||
+	if (!tag_validate_claims || !tag_validate_globals.header ||
+		(unsigned long)address < (unsigned long)tag_validate_globals.header ||
 		offset >= tag_validate_globals.tag_cache_size)
 	{
 		return FALSE;
@@ -1345,7 +1397,8 @@ boolean tag_validate_any_claimed(
 	unsigned long offset = (unsigned long)address - (unsigned long)tag_validate_globals.header;
 	unsigned long bit;
 
-	if (!tag_validate_globals.header || (unsigned long)address < (unsigned long)tag_validate_globals.header ||
+	if (!tag_validate_claims || !tag_validate_globals.header ||
+		(unsigned long)address < (unsigned long)tag_validate_globals.header ||
 		offset > tag_validate_globals.tag_cache_size || size > tag_validate_globals.tag_cache_size - offset)
 	{
 		return TRUE;

@@ -717,8 +717,10 @@ Done so far:
   of each, shared by the actors and the paths (`ai_debug.h`,
   `ACTOR_DEBUG_INFO`: 10 MB, which only the debug rendering reads), the
   game's threads have 128 KB stacks, not 1 MB (`xbox_kernel.c`), the tag
-  validator keeps no claims and checks nothing (`tag_validate.c`: 1.2 MB;
-  the PS2 plays the converter's maps), the profile's history is 8 frames,
+  validator holds its claims (1.2 MB) only while it checks a map or a bsp
+  (`tag_validate.c`; without its corrections, which reset the Xbox maps'
+  runtime values, lights sample a lightmap at an address past the 32 MB),
+  the profile's history is 8 frames,
   not 256 (`profile.c`: 1.1 MB), and the null Direct3D's back and depth
   buffers share a page (`ps2_d3d_null.c`: 2.4 MB). A level (bloodgulch)
   leaves 6.5 MB of the 32 MB never taken.
@@ -755,10 +757,22 @@ only, so it leaves out the caches' and the memory's waits and reads low):
 
 | Level | Average tick | Longest | Ticks over 15 ms |
 | --- | --- | --- | --- |
-| bloodgulch | 14.95 ms | 36.9 ms | 94 of 300 |
-| sidewinder | 14.48 ms | 26.2 ms | 121 of 600 |
-| damnation | 6.13 ms | 29.2 ms | 9 of 600 |
-| wizard | 6.19 ms | 28.5 ms | 3 of 300 |
+| bloodgulch | 14.98 ms | 36.7 ms | 95 of 300 |
+| sidewinder | 14.84 ms | 25.1 ms | 81 of 300 |
+| carousel | 7.22 ms | 30.9 ms | 12 of 300 |
+| damnation | 6.32 ms | 32.4 ms | 5 of 300 |
+| wizard | 6.15 ms | 25.0 ms | 2 of 300 |
+| boardingaction | 5.78 ms | 29.6 ms | 4 of 300 |
+| beavercreek | 5.16 ms | 26.2 ms | 2 of 301 |
+| longest | 4.72 ms | 28.3 ms | 3 of 300 |
+| chillout | 4.26 ms | 15.8 ms | 2 of 300 |
+| hangemhigh | 4.13 ms | 28.0 ms | 2 of 300 |
+| ratrace | 4.05 ms | 18.8 ms | 2 of 300 |
+| prisoner | 3.92 ms | 33.3 ms | 2 of 301 |
+| putput | 3.85 ms | 29.2 ms | 2 of 300 |
+
+All 13 multiplayer levels load and play without a fault (`TLB Miss`, PCSX2's
+note of a load from an unmapped address, would show in the log).
 
 Bloodgulch and sidewinder, the two largest outdoor levels, already take the
 whole 15 ms on emulated cycles with nothing in them to fight. Phase 5
