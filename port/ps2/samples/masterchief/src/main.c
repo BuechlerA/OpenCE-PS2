@@ -162,21 +162,21 @@ static inline void vu0_view_point(const vec4 *p, vec4 *pv)
    and the four texture-coordinate pairs, each the static (u, v, ...) times Q (the details' times their scales).
    Constants in vf8-vf11: (focal, -focal), (cx + 2048, cy + 2048), k1, k2. Writes the two quads of ST registers
    into the vertex's record; out gets the screen position (floats), the fixed-point x and y, the depth and Q. */
-static inline void vu0_project(const vec4 *pv, const vec4 *uvlm, const vec4 *uv2, const vec4 *scale, vec4 *st, vec4 *d, vec4 *out)
+static inline void vu0_project(const vec4 *pv, const vec4 *uvlm, const vec4 *uv2, const vec4 *scale, const vec4 *bscale, vec4 *st, vec4 *d, vec4 *b, vec4 *out)
 {
 	__asm__ __volatile__(
 		"lqc2 $vf1, 0(%0)\n"
 		"vdiv $Q, $vf0w, $vf1z\n"
-		"lqc2 $vf12, 0(%1)\n" "lqc2 $vf13, 0(%2)\n" "lqc2 $vf14, 0(%3)\n"
+		"lqc2 $vf12, 0(%1)\n" "lqc2 $vf13, 0(%2)\n" "lqc2 $vf14, 0(%3)\n" "lqc2 $vf15, 0(%4)\n"
 		"vwaitq\n"
 		"vmulq.xy $vf2, $vf1, $Q\n" "vmul.xy $vf2, $vf2, $vf8\n" "vadd.xy $vf2, $vf2, $vf9\n"
 		"vftoi4.xy $vf3, $vf2\n"
 		"vmulq $vf5, $vf10, $Q\n" "vsub $vf5, $vf5, $vf11\n" "vftoi0.x $vf6, $vf5\n"
 		"vaddq.x $vf4, $vf0, $Q\n"
-		"vmulq $vf12, $vf12, $Q\n" "vmulq $vf13, $vf13, $Q\n" "vmul $vf13, $vf13, $vf14\n"
-		"sqc2 $vf12, 0(%4)\n" "sqc2 $vf13, 0(%5)\n"
-		"sqc2 $vf2, 0(%6)\n" "sqc2 $vf3, 16(%6)\n" "sqc2 $vf6, 32(%6)\n" "sqc2 $vf4, 48(%6)\n"
-		: : "r"(pv), "r"(uvlm), "r"(uv2), "r"(scale), "r"(st), "r"(d), "r"(out) : "memory");
+		"vmulq $vf12, $vf12, $Q\n" "vmulq $vf13, $vf13, $Q\n" "vmul $vf16, $vf13, $vf15\n" "vmul $vf13, $vf13, $vf14\n"
+		"sqc2 $vf12, 0(%5)\n" "sqc2 $vf13, 0(%6)\n" "sqc2 $vf16, 0(%7)\n"
+		"sqc2 $vf2, 0(%8)\n" "sqc2 $vf3, 16(%8)\n" "sqc2 $vf6, 32(%8)\n" "sqc2 $vf4, 48(%8)\n"
+		: : "r"(pv), "r"(uvlm), "r"(uv2), "r"(scale), "r"(bscale), "r"(st), "r"(d), "r"(b), "r"(out) : "memory");
 }
 
 /* a world position (w 1) all the way to the screen: the view matrix (vf20-vf23) and the constants (vf8-vf11);
@@ -408,7 +408,7 @@ static inline void light_sum(const float *n, float *sum)
 }
 
 /* what a cube map shows in direction r (given in the model's axes) */
-static inline void cube_sample(const unsigned char *cube, const float *r, float *rgb)
+static inline void cube_sample_res(const unsigned char *cube, int res, const float *r, float *rgb)
 {
 	float d[3], a[3], u, v, inv;
 	int k, o1, o2, face, c, px, py;
@@ -423,10 +423,15 @@ static inline void cube_sample(const unsigned char *cube, const float *r, float 
 	inv = a[k] > 1e-18f ? 1.f / a[k] : 0.f;
 	u = 0.5f * (d[o1] * inv + 1.f);
 	v = 0.5f * (d[o2] * inv + 1.f);
-	px = (int)(u * 64.f); if (px > 63) px = 63; if (px < 0) px = 0;
-	py = (int)(v * 64.f); if (py > 63) py = 63; if (py < 0) py = 0;
-	texel = cube + ((face * 64 + py) * 64 + px) * 3;
+	px = (int)(u * (float)res); if (px > res - 1) px = res - 1; if (px < 0) px = 0;
+	py = (int)(v * (float)res); if (py > res - 1) py = res - 1; if (py < 0) py = 0;
+	texel = cube + ((face * res + py) * res + px) * 3;
 	for (c = 0; c < 3; c++) rgb[c] = texel[c] * (1.f / 255.f);
+}
+
+static inline void cube_sample(const unsigned char *cube, const float *r, float *rgb)
+{
+	cube_sample_res(cube, 64, r, rgb);
 }
 
 /* a vertex's view of itself: n . v, the mirror direction, n . h for the key light */
@@ -735,12 +740,13 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 #define ATTRS 7                     /* what a vertex carries through the clip: r, g, b, u, v and the lightmap's u, v */
 
 typedef struct { float p[3]; float a[ATTRS]; } cvert;
-/* What the passes send for a vertex, six registers (48 bytes, three quadwords) in this order: ST for the base map, ST
-   for the lightmap, ST for each of the two detail maps (the base map's times the detail's scale), RGBAQ (the lightmap's
-   hue; Q = 1 / z, and alpha 0x80, which the blended passes read), and XYZ2, which kicks the vertex. A pass is
+/* What the passes send for a vertex, eight registers (64 bytes, four quadwords) in this order: ST for the base map, ST
+   for the lightmap, ST for each of the two detail maps and the bump map (the base map's times the map's scale), the
+   reflection's colour as RGBAQ, the lightmap's hue as RGBAQ (Q = 1 / z, and alpha 0x80, which the blended passes
+   read), and XYZ2, which kicks the vertex. A pass is
    this record sent whole with the registers it does not use listed as NOP, so a span's triangles are built
    once, whatever the number of passes. */
-typedef struct { u64 st, lmst, d0st, d1st, rgbaq, xyz2; } mapv;
+typedef struct { u64 st, lmst, d0st, d1st, bst, refl, rgbaq, xyz2; } mapv;
 typedef struct { mapv m; float x, y, pad[2]; } mvert __attribute__((aligned(16)));   /* and the screen position, for culling */
 
 static float clip_plane[CLIP_PLANES][4];   /* d = a x + b y + c z + e >= 0 is inside */
@@ -753,15 +759,15 @@ static unsigned char map_code[MAP_VERTS];
 static unsigned map_stamp[MAP_VERTS], map_frame;       /* a vertex is transformed, projected and given its registers when a visible triangle first needs it, once a frame */
 static unsigned char chunk_visible[MAP_CHUNKS];
 static xform sky_xform;                 /* the view without its translation, for the sky */
-static float detail_scale[MAP_TEXTURES + 1][2];        /* each base map's two detail scales (0: none; the last entry is for no texture) */
+static float detail_scale[MAP_TEXTURES + 1][3];        /* each base map's two detail scales and its bump scale (0: none; the last entry is for no texture) */
 static mapv map_out[MAP_TRIS * 3 + 4096] __attribute__((aligned(64)));
 static texture map_tex[MAP_TEXTURES], map_detail_tex[MAP_DETAILS], map_lm_tex[MAP_LIGHTMAPS];
 static int span_first[MAP_SPANS], span_verts[MAP_SPANS];   /* each span's vertices in map_out */
-static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2];   /* each pass's K for TEX1 (see map_lod_setup) */
+static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2], lod_k_bump[MAP_TEXTURES];   /* each pass's K for TEX1 (see map_lod_setup) */
 #ifndef NO_VU0
 static vec4 map_p4[MAP_VERTS];                         /* positions as quads, w 1, for the VU */
 static vec4 map_uvlm[MAP_VERTS], map_uv2[MAP_VERTS];   /* (u, v, lightmap u, v) and (u, v, u, v) */
-static vec4 detail_scale4[MAP_TEXTURES + 1];           /* (k0, k0, k1, k1) */
+static vec4 detail_scale4[MAP_TEXTURES + 1], bump_scale4[MAP_TEXTURES + 1];   /* (k0, k0, k1, k1) and (kb, kb, kb, kb) */
 static vec4 vu_const[4], vu_out[4];
 static float vu_band_x0, vu_band_x1, vu_band_y0, vu_band_y1;   /* the guard band, in the VU's shifted screen coordinates */
 #endif
@@ -801,7 +807,9 @@ static inline int outcode(const float *p)
 	return code;
 }
 
-static int clip_triangle(const cvert *tri, cvert *out)
+/* planes: the bits of the vertices' codes, OR-ed (bit 0 the near plane, 1 left, 2 right, 3 top, 4 bottom: the planes' order),
+   so that only the planes the triangle crosses are clipped against */
+static int clip_triangle(const cvert *tri, cvert *out, int planes)
 {
 	cvert a[CLIP_MAX], b[CLIP_MAX], *src = a, *dst = b, *swap;
 	float d[CLIP_MAX];
@@ -810,6 +818,7 @@ static int clip_triangle(const cvert *tri, cvert *out)
 	memcpy(a, tri, 3 * sizeof(cvert));
 	for (pl = 0; pl < CLIP_PLANES; pl++)
 	{
+		if (!(planes >> pl & 1)) continue;
 		for (i = 0, inside = 0; i < n; i++)
 		{
 			d[i] = plane_dist(pl, src[i].p);
@@ -882,7 +891,7 @@ static inline float screen_area(const mvert *a, const mvert *b, const mvert *c)
 	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
 }
 
-enum { PASS_BASE, PASS_LIGHTMAP, PASS_DETAIL0, PASS_DETAIL1 };
+enum { PASS_BASE, PASS_LIGHTMAP, PASS_DETAIL0, PASS_DETAIL1, PASS_BUMP, PASS_REFLECTION, PASS_COUNT };
 
 static void set_clamp_repeat(GSGLOBAL *gs)
 {
@@ -906,44 +915,39 @@ static void set_test_normal(GSGLOBAL *gs)
 	prim_test = -1;
 }
 
-/* a pass over a span's vertices: the records as they are, one REGLIST packet with six registers a vertex, of
-   which this pass reads RGBAQ, XYZ2 and the one ST it needs (the other three go to UV, which drawing with ST ignores) */
-/* a vertex record is three quadwords */
+/* a vertex record is four quadwords */
 static inline void copy_record(mapv *dst, const mapv *src)
 {
 	u128 *d = (u128 *)dst;
 	const u128 *sr = (const u128 *)src;
 
-	d[0] = sr[0]; d[1] = sr[1]; d[2] = sr[2];
+	d[0] = sr[0]; d[1] = sr[1]; d[2] = sr[2]; d[3] = sr[3];
 }
 
-/* 128-bit copies: the EE's memcpy moves less than a quadword at a time */
-static inline void copy_quads(void *dst, const void *src, int quads)
-{
-	u128 *d = (u128 *)dst;
-	const u128 *s = (const u128 *)src;
-
-	for (; quads >= 4; quads -= 4, d += 4, s += 4) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3]; }
-	for (; quads > 0; quads--) *d++ = *s++;
-}
-
+/* a pass over a span's vertices: each record's one ST (or, for the reflection, its colour as RGBAQ), its RGBAQ and its
+   XYZ2, three registers (24 bytes) a vertex as one REGLIST packet. The record has them all because the passes share it. */
 static void send_map_pass(GSGLOBAL *gs, const texture *x, int pass, int lod_k, const mapv *v, int n)
 {
-	static const u64 regs[4] = {
-		(u64)GS_ST | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20),
-		(u64)GS_UV | ((u64)GS_ST << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20),
-		(u64)GS_UV | ((u64)GS_UV << 4) | ((u64)GS_ST << 8) | ((u64)GS_UV << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20),
-		(u64)GS_UV | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_ST << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20) };
-	int qwords = n * 3;
+	/* the record's 64-bit words: st, lmst, d0st, d1st, bst, refl, rgbaq, xyz2 */
+	static const int field[PASS_COUNT] = { 0, 1, 2, 3, 4, 5 };
+	const u64 *rec = (const u64 *)v + field[pass];
+	int qwords = pass == PASS_REFLECTION ? n : (n * 3 + 1) / 2, i;
 	u64 *p;
 
 	prim_lod_k = lod_k;
 	prim_test = x && pass == PASS_BASE && x->alpha ? 1 : 0;
 	set_prim(gs, x, 0, pass == PASS_LIGHTMAP ? 1 : 0);
 	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
-	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 6);
-	*p++ = regs[pass];
-	copy_quads(p, v, qwords);
+	if (pass == PASS_REFLECTION)
+	{                                                                 /* a flat colour: RGBAQ, XYZ2 */
+		*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
+		*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
+		for (i = 0; i < n; i++, rec += 8) { *p++ = rec[0]; *p++ = rec[2]; }
+		return;
+	}
+	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
+	*p++ = (u64)GS_ST | ((u64)GS_RGBAQ << 4) | ((u64)GS_XYZ2 << 8);
+	for (i = 0; i < n; i++, rec += 8) { *p++ = rec[0]; *p++ = rec[6 - field[pass]]; *p++ = rec[7 - field[pass]]; }
 }
 
 /* the passes multiply by alpha: destination * source alpha / 128, so a grey of 128 leaves it as it is */
@@ -962,6 +966,35 @@ static void map_blend_end(GSGLOBAL *gs)
    guard band (the same planes the clipper uses, as bounds on the screen position), onto the screen with its
    registers. One divide: q = 1 / z gives the position, the depth and every texture coordinate. The registers'
    floats are stored straight into the record. */
+
+/* The colour a shader's reflection adds at a vertex: its cube map (16x16 faces) in the direction the view mirrors
+   about the normal, weighted between the strengths head-on and at a graze by 1 - n.v squared. It follows the camera, so
+   a vertex has it worked out again every REFLECT_REFRESH frames (a degree and a half a frame, as the Chief's
+   specular colour). */
+#define REFLECT_REFRESH 4
+static u64 refl_cache[MAP_VERTS];
+static unsigned refl_stamp[MAP_VERTS];
+
+static u64 map_reflect(int i, int tex)
+{
+	const signed char *nn = &map_normals[i * 4];
+	float n[3] = { nn[0] * (1.f / 127.f), nn[1] * (1.f / 127.f), nn[2] * (1.f / 127.f) };
+	float v[3] = { cam_pos[0] - map_pos[i * 3], cam_pos[1] - map_pos[i * 3 + 1], cam_pos[2] - map_pos[i * 3 + 2] };
+	float nv, r[3], rgb[3], f, w;
+	int c;
+
+	if (refl_stamp[i] && map_frame - refl_stamp[i] < REFLECT_REFRESH) return refl_cache[i];
+	normalise(v);
+	nv = dot(n, v);
+	if (nv < 0.f) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; nv = -nv; }
+	for (c = 0; c < 3; c++) r[c] = 2.f * nv * n[c] - v[c];
+	cube_sample_res(map_cubes[map_reflection_of[tex].cube], 16, r, rgb);
+	f = 1.f - nv;
+	w = map_reflection_of[tex].perpendicular + (map_reflection_of[tex].parallel - map_reflection_of[tex].perpendicular) * f * f;
+	refl_stamp[i] = map_frame;
+	refl_cache[i] = GS_SETREG_RGBAQ(to_byte(rgb[0] * w), to_byte(rgb[1] * w), to_byte(rgb[2] * w), 0x80, 0x00);
+	return refl_cache[i];
+}
 
 /* the screen position, depth and registers of a vertex at view position pv in front of the near plane; a vertex
    outside the guard band is left alone and its code returned, unless force (a vertex the clipper made lies on the
@@ -992,6 +1025,8 @@ static inline int fill_vertex(mvert *o, const float *pv, unsigned rgb32, float u
 	f[2] = lu * q; f[3] = lv * q;                          /* lmst */
 	f[4] = s * scale[0]; f[5] = t * scale[0];              /* d0st */
 	f[6] = s * scale[1]; f[7] = t * scale[1];              /* d1st */
+	f[8] = s * scale[2]; f[9] = t * scale[2];              /* bst */
+	o->m.refl = 0;
 	return 0;
 }
 
@@ -1015,7 +1050,7 @@ static inline void map_vertex(int i, int tex, const xform *view)
 		vu0_view_point(&map_p4[i], (vec4 *)map_view[i]);
 		map_stamp[i] = map_frame;
 		if (pv[2] < z_near) { map_code[i] = 1; return; }
-		vu0_project((const vec4 *)map_view[i], &map_uvlm[i], &map_uv2[i], &detail_scale4[tex], (vec4 *)&o->m.st, (vec4 *)&o->m.d0st, vu_out);
+		vu0_project((const vec4 *)map_view[i], &map_uvlm[i], &map_uv2[i], &detail_scale4[tex], &bump_scale4[tex], (vec4 *)&o->m.st, (vec4 *)&o->m.d0st, (vec4 *)&o->m.bst, vu_out);
 		{
 			float sx = vu_out[0].v[0], sy = vu_out[0].v[1];
 			int code = (sx < vu_band_x0 ? 2 : 0) | (sx > vu_band_x1 ? 4 : 0) | (sy < vu_band_y0 ? 8 : 0) | (sy > vu_band_y1 ? 16 : 0);
@@ -1028,6 +1063,7 @@ static inline void map_vertex(int i, int tex, const xform *view)
 			iz = iz < 1 ? 1 : (iz > 65535 ? 65535 : iz);
 			o->m.xyz2 = ((u64)(((int *)vu_out)[4] & 0xFFFF)) | ((u64)(((int *)vu_out)[5] & 0xFFFF) << 16) | ((u64)iz << 32);
 			o->m.rgbaq = (u64)map_rgb32[i] | ((u64)qbits << 32);
+			if (tex < MAP_TEXTURES && map_reflection_of[tex].cube >= 0) o->m.refl = map_reflect(i, tex);
 		}
 #ifdef PROFILE
 		prof_map_vertices++;
@@ -1134,7 +1170,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 						in[v].a[3] = map_uv[ids[v] * 2]; in[v].a[4] = map_uv[ids[v] * 2 + 1];
 						in[v].a[5] = map_lmuv[ids[v] * 2]; in[v].a[6] = map_lmuv[ids[v] * 2 + 1];
 					}
-					m = clip_triangle(in, poly);
+					m = clip_triangle(in, poly, (ca | cb | cc) & 1 ? 0x1F : (ca | cb | cc));       /* a vertex behind the near plane has no side bits: the cut may land outside any */
 					for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v], ts);
 					for (k = 1; k + 1 < m; k++)
 					{
@@ -1173,6 +1209,10 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 			for (d = 0; d < 2; d++)
 				if (map_detail_of[tex].detail[d] >= 0)
 					send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[d]], PASS_DETAIL0 + d, lod_k_detail[tex][d], v, span_verts[sp]);
+#ifndef NO_BUMP_PASS
+			if (map_detail_of[tex].detail[2] >= 0)
+				send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[2]], PASS_BUMP, lod_k_bump[tex], v, span_verts[sp]);
+#endif
 			map_blend_end(gs);
 		}
 #endif
@@ -1185,6 +1225,19 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 		sp = map_lm_order[i];
 		if (!span_verts[sp]) continue;
 		send_map_pass(gs, &map_lm_tex[map_spans[sp * 6 + 1]], PASS_LIGHTMAP, 0, &map_out[span_first[sp]], span_verts[sp]);
+	}
+	map_blend_end(gs);
+#endif
+	/* what the shiny surfaces reflect, added on top: a flat colour a vertex */
+#ifndef NO_REFLECTION_PASS
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 2, 2, 1, 0x80), 0);
+	for (sp = 0; sp < MAP_SPANS; sp++)
+	{
+		int tex = map_spans[sp * 6];
+
+		if (tex >= 0 && map_reflection_of[tex].cube >= 0 && span_verts[sp])
+			send_map_pass(gs, NULL, PASS_REFLECTION, 0, &map_out[span_first[sp]], span_verts[sp]);
 	}
 	map_blend_end(gs);
 #endif
@@ -1230,11 +1283,13 @@ static void map_lod_setup(void)
 	for (t = 0; t < MAP_TEXTURES; t++)
 		for (d = 0; d < 2; d++)
 			detail_scale[t][d] = map_detail_of[t].detail[d] < 0 ? 0.f : map_detail_of[t].scale[d];
+	for (t = 0; t < MAP_TEXTURES; t++) detail_scale[t][2] = map_detail_of[t].detail[2] < 0 ? 0.f : map_detail_of[t].scale[2];
 #ifndef NO_VU0
 	for (t = 0; t <= MAP_TEXTURES; t++)
 	{
 		detail_scale4[t].v[0] = detail_scale4[t].v[1] = detail_scale[t][0];
 		detail_scale4[t].v[2] = detail_scale4[t].v[3] = detail_scale[t][1];
+		bump_scale4[t].v[0] = bump_scale4[t].v[1] = bump_scale4[t].v[2] = bump_scale4[t].v[3] = detail_scale[t][2];
 	}
 #endif
 
@@ -1247,6 +1302,7 @@ static void map_lod_setup(void)
 
 			lod_k_detail[t][d] = id < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[id].width, map_detail_of[t].scale[d]);
 		}
+		lod_k_bump[t] = map_detail_of[t].detail[2] < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[map_detail_of[t].detail[2]].width, map_detail_of[t].scale[2]);
 	}
 }
 

@@ -49,7 +49,7 @@ that only print):
   vsync (60 fps, NTSC). `-DNO_VU0` keeps the transforms on the FPU.
 - Video memory is full. The map scene (the default build) has two 640x448
   16-bit buffers with dithering, a 16-bit Z buffer, the Chief's five textures
-  and the map's: about 3.98 of 4.19 MB, and the sample prints what it allocated at
+  and the map's: about 4.04 of 4.19 MB, and the sample prints what it allocated at
   start-up (`VRAM: ...`; gsKit prints "Not enough VRAM" when an allocation
   fails, and goes on). Work out what a new texture takes before adding it.
 - gsKit sizes its buffers from the console's own video mode (PAL: 512 lines)

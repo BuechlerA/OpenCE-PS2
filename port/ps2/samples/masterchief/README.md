@@ -81,6 +81,12 @@ materials: the terrain, the cliffs and the two round metal bases) and bakes:
   that follows its size;
 - **the sky**: the sky model's dome (60 triangles) with its gradient as a 64x64 texture, drawn first, its vertices
   transformed by the view without its translation, so that it surrounds the camera at any distance;
+- **bump**: each environment shader's bump map (8 bits indexing the engine's table of normals, read from
+  `source/bitmaps/bitmaps.c`) as a grey "emboss" texture, 128 pixels a side with mips: the normal against a light
+  from the upper left in the texture's own space (`EMBOSS_GAIN`), 3 maps for the cliffs and the metal. The GS has no
+  per-pixel lighting, so the relief is fixed in the texture's space, not in the world's;
+- **reflection**: for the shaders with a reflection cube map (the metal: 3 cube maps, 16x16 a face) a normal for each
+  vertex, and the strength head-on and at a graze;
 - the texture repeats a world unit of surface, per base map, for the mip level;
 - a plane for each triangle, so that the EE can drop the ones facing away before transforming their vertices;
 - the ground under the Chief: he stands on open ground among the shrubs and boulders of the valley's west side
@@ -94,30 +100,37 @@ touched. The others' vertices are transformed and projected on VU0 (one divide, 
 and the four texture-coordinate pairs in one block) the first time a visible triangle needs them, once a frame. A
 triangle with a vertex behind the near plane or more than 1400 pixels off the screen (the GS's coordinates are 2048
 pixels either side of its origin, and gsKit puts that at the screen's corner: more wraps) is clipped in view space
-before projection: the camera stands inside the map. Each span's vertices are kept as 48-byte records (the ST of the
-base map, the lightmap and each detail map, RGBAQ, XYZ2, in three quadwords), and each pass is those records sent
-whole, as one REGLIST packet with six registers a vertex of which the pass uses RGBAQ, XYZ2 and one ST; the others
-go to UV, which perspective-correct drawing ignores. The textures are perspective-correct (Q = 1 / z) and may tile
+before projection: the camera stands inside the map. Each span's vertices are kept as 64-byte records (the ST of the
+base map, the lightmap, each detail map and the bump map, the reflection's colour, RGBAQ, XYZ2, in four quadwords). The textures are perspective-correct (Q = 1 / z) and may tile
 beyond the 1024 texels UV allows. The passes:
 
 1. the base map times the lightmap's hue (the GS multiplies the texel by colour / 128);
 2. the primary and micro detail maps: the destination times the texture's alpha / 128 (`ALPHA(1, 2, 0, 2, 0)`),
    the alpha taken from a palette whose entry i has alpha i, so a detail map's grey d multiplies by 2 d (the
    shader's "double biased multiply"); the detail's ST is the base map's times the shader's scale;
-3. after all spans, the lightmap pages the same way (the brightness x 2, clamped to the page).
+3. after all spans, the lightmap pages the same way (the brightness x 2, clamped to the page);
+4. the bump maps multiply like the detail maps (the emboss grey x 2, the bump map's scale on the base map's ST),
+   after them, so they act on the picture before the lightmap;
+5. last, what the shiny surfaces reflect, added as a flat colour a vertex: the cube map in the direction the view
+   mirrors about the vertex's normal, weighted by 1 - n.v squared between the head-on and the graze strength.
+   The colour follows the camera, so a vertex has it worked out again every 4 frames (a degree and a half a frame).
+
+Each pass sends only what it reads of the 64-byte record (its ST, RGBAQ and XYZ2: 24 bytes a vertex), so a pass is a
+quarter of the record's bytes on the GIF. `-DNO_DETAIL_PASS`, `-DNO_LIGHTMAP_PASS`, `-DNO_BUMP_PASS` and
+`-DNO_REFLECTION_PASS` leave a pass out, to compare.
 
 The GS picks a mip level from Q alone (log2 (1 / Q) + K), so K is worked out for each pass from the exporter's
 texture repeats a world unit, the texture's size and its scale. The Z value is `k1 / z - k2`, so it is affine
 in screen space as the GS interpolates it (the linear Z the Chief-only scene used bends across a large
-triangle). `-DNO_DETAIL_PASS` and `-DNO_LIGHTMAP_PASS` leave a pass out, to compare.
+triangle).
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
   32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
-  Video memory: 3.98 MB of 4.19 MB in use with the Chief's and the map's textures.
+  Video memory: 4.04 MB of 4.19 MB in use with the Chief's and the map's textures.
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
-- In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.7 to 12.5 ms of the
-  16.7 ms frame (its worst frame 14 ms), by where the camera points. PCSX2 does not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
+- In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.9 to 13.3 ms of the
+  16.7 ms frame (its worst frame 15.2 ms), by where the camera points. PCSX2 does not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
   - The Chief's 20 animation frames are skinned and lit once at the start (his pose only changes 30 times a
     second and only the camera moves: `cached_pose`); a frame projects the cached positions, and gives each
     vertex its view-dependent specular colour once in 3 frames (the visor's, 69 vertices, every frame).
@@ -129,4 +142,4 @@ triangle). `-DNO_DETAIL_PASS` and `-DNO_LIGHTMAP_PASS` leave a pass out, to comp
   pixel shaders; shadowed ground comes out dark. `LM_SCALE` in the exporter's environment scales the
   pages' brightness (default 1).
 
-Not yet: the shader's bump and reflection, the lights' glow, the vehicles.
+Not yet: the lights' glow, the sky's clouds, the vehicles.

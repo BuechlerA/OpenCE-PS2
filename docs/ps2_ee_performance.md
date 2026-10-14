@@ -128,6 +128,13 @@ from 24 ms of EE time to 8.6 to 13.4 ms. The order they paid off in:
   the report. Per-vertex `cpu_ticks()` calls cost more than the work they
   timed. Report the worst frame, not just the mean: a window averaging 14 ms
   dropped frames.
+- **Send each pass only what it reads.** A vertex record kept for several
+  passes (64 bytes) copied whole into every pass's packet cost about 1 ms and
+  four times the GIF's bytes; copying only the pass's ST, RGBAQ and XYZ2 (24
+  bytes) was cheaper in PCSX2 and on the bus.
+- **Clip only against the planes a triangle crosses.** The OR of its vertices'
+  outside-codes says which; but a vertex behind the near plane has no side
+  codes, so a near-plane cut needs all the planes.
 - **Compiler flags matter more than expected.** `-O3 -ffast-math
   -funroll-loops` took 1.7 ms off the heaviest view (the EE's FPU has no IEEE
   behaviour to give up). Compare stills afterwards.

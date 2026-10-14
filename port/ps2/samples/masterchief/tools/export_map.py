@@ -19,6 +19,10 @@
     base maps are cut to 64 pixels (128 for the biggest rock), foliage cut out by a palette entry of alpha 0
   - a plane for each triangle (its normal and offset), so that the EE can drop the triangles that face away from the
     camera before it transforms their vertices; the sky's planes always face it
+  - bump: each environment shader's bump map (a palette of normals) as a grey "emboss" texture, 128 pixels a side: the
+    normal against a light from the upper left in the texture's own space, so that the pass that multiplies by it (as
+    a detail map does) gives the relief; and, for shaders with a reflection cube map, the cube (16x16 a face) and a
+    normal for each vertex, for the colour the EE works out per vertex and adds
   - the sky: the sky model's dome with its gradient as a 64x64 texture, drawn first around the camera (its vertices
     are transformed by the view without its translation: they come last, from MAP_SKY_FIRST_VERT on)
   - where the Chief stands: the ground height under MAP_CHIEF_X/Y
@@ -32,7 +36,8 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from bsp import MapFile, load_bsp, oriented, ground_height
+from bsp import MapFile, load_bsp, oriented, ground_height, unswizzle
+from dxt import decode_dxt1
 
 MAP = os.environ.get('HALO_MAP', os.path.join(HERE, '..', '..', '..', '..', '..', 'assets', 'maps', 'bloodgulch.map'))
 OUT = os.path.join(HERE, '..', 'src')
@@ -49,6 +54,9 @@ DETAIL_SIZE = int(os.environ.get('DETAIL_SIZE', 128))
 SCENERY_SIZE = int(os.environ.get('SCENERY_SIZE', 64))      # a scenery base map's longest side, at most
 GROUND_SIZE = int(os.environ.get('GROUND_SIZE', 256))
 SUN = None
+EMBOSS_LIGHT = (-0.45, -0.45, 0.77)       # in the bump map's tangent space
+EMBOSS_GAIN = float(os.environ.get('EMBOSS_GAIN', 2.4))
+BUMP_SCALE_AT, BUMP_MAP_AT, REFLECTION_CUBE_AT = 0x124, 0x128, 0x324    # in a shader_environment
 CHUNK_CELL = float(os.environ.get('CHUNK_CELL', 12))
 BIG_TRIANGLES = 1000               # a base map under this many triangles is cut to 256 pixels
 
@@ -269,9 +277,50 @@ def scenery_pieces(mf, lit_xy, lit_rgb):
             light = np.clip(Nw @ sun, 0, 1)
             col = 128 * 2 * ambient[None, :] * (0.45 + 0.8 * light)[:, None]
             if flat is not None: col = np.tile(np.array(flat) * 255, (len(P), 1))
-            pieces.append(dict(P=Pw, UV=part['uv'] * np.array(part['scale']) * uvs, C=np.clip(col, 0, 255), T=T, bitmap=bitmap, alpha=alpha, factor=factor,
+            pieces.append(dict(P=Pw, N=Nw, UV=part['uv'] * np.array(part['scale']) * uvs, C=np.clip(col, 0, 255), T=T, bitmap=bitmap, alpha=alpha, factor=factor,
                                name='%s #%d' % (palette[t], i)))
     return pieces
+
+_VECTORS = None
+def vector_palette():
+    """the engine's table of normals the bump maps' bytes index (source/bitmaps/bitmaps.c), as (256, 3) floats"""
+    global _VECTORS
+    if _VECTORS is None:
+        import re
+        src = open(os.path.join(HERE, '..', '..', '..', '..', '..', 'source', 'bitmaps', 'bitmaps.c')).read()
+        body = src[src.index('global_vector_palette[NUMBER_OF_ENTRIES_IN_PALETTE]'):]
+        body = body[:body.index('};')]
+        words = [int(w, 16) for w in re.findall(r'0x[0-9A-Fa-f]{8}', body)]
+        assert len(words) == 256, len(words)
+        a = np.array(words, dtype=np.int64)
+        _VECTORS = np.stack([(a >> 16) & 255, (a >> 8) & 255, a & 255], 1) / 255.0 * 2 - 1
+    return _VECTORS
+
+def emboss_map(mf, name, size):
+    """a bump map (8 bits, indexing the table of normals) as the grey a multiply pass turns into relief: 0.5 * (n . L) / L.z,
+    stretched by EMBOSS_GAIN about 1 (flat), with its mip levels"""
+    info = mf.bitmaps(name)[0]
+    w, h = info['w'], info['h']
+    raw = np.frombuffer(mf.full, dtype=np.uint8, count=w * h, offset=info['pixoff']).astype(np.uint32)
+    if info['flags'] & 8: raw = unswizzle(raw, w, h)
+    n = vector_palette()[raw.reshape(h, w).astype(np.int64)]
+    light = np.array(EMBOSS_LIGHT) / np.linalg.norm(EMBOSS_LIGHT)
+    e = (n @ light) / light[2]
+    e = 1 + EMBOSS_GAIN * (e - 1)
+    d = np.clip(e / 2, 0.1, 0.95)
+    return grey(np.stack([d, d, d], -1), size)
+
+def cube_faces(mf, name, res=16):
+    """a cube map (six DXT1 faces) as (6, res, res, 3) bytes"""
+    info = mf.bitmaps(name)[0]
+    w, h = info['w'], info['h']
+    stride = info['pixsize'] // 6
+    faces = []
+    for f in range(6):
+        face = decode_dxt1(mf.full[info['pixoff'] + f * stride:info['pixoff'] + f * stride + w * h // 2], w, h)[..., :3]
+        im = Image.fromarray(face).resize((res, res), Image.BOX)
+        faces.append(np.asarray(im))
+    return np.stack(faces)
 
 def flat_color(shader):
     s = shader.lower()
@@ -342,11 +391,11 @@ def main():
     tex_id = {n: i for i, n in enumerate(names)}
 
     # the detail maps of each base map's shader: (map id or -1, scale) for the primary and the micro
-    detail_names, detail_of = [], []
+    detail_names, detail_of, bump_names, cubes, cube_names, refl_of = [], [], [], [], [], []
     for name in names:
         shader = next((m['shader'] for m, b in zip(mats, base_of) if b == name), None)
         if shader is None:
-            detail_of.append([(-1, 0.0), (-1, 0.0)]); continue
+            detail_of.append([(-1, 0.0), (-1, 0.0), (-1, 0.0)]); refl_of.append((-1, 0.0, 0.0)); continue
         so = mf.tags[(b'senv', shader)] - TAG_BASE
         entry = []
         for off in (PRIMARY_DETAIL, MICRO_DETAIL):
@@ -354,12 +403,30 @@ def main():
             scale = float(np.frombuffer(mf.td, dtype='<f4', count=1, offset=so + off)[0])
             if d and d not in detail_names: detail_names.append(d)
             entry.append((detail_names.index(d) if d else -1, scale))
+        bump = mf.ref(so + BUMP_MAP_AT)
+        bscale = float(np.frombuffer(mf.td, dtype='<f4', count=1, offset=so + BUMP_SCALE_AT)[0])
+        if bump and mf.bitmaps(bump)[0]['fmt'] == 17:
+            if bump not in bump_names: bump_names.append(bump)
+            entry.append((-2 - bump_names.index(bump), bscale))                   # resolved below, once the details are counted
+        else:
+            entry.append((-1, 0.0))
         detail_of.append(entry)
-        print('  %-34s detail %s' % (name.split('\\')[-1], ', '.join('%s x%g' % (detail_names[i].split('\\')[-1], sc) if i >= 0 else '-' for i, sc in entry)))
+        cube = mf.ref(so + REFLECTION_CUBE_AT)
+        if cube:
+            if cube not in cube_names: cube_names.append(cube); cubes.append(cube_faces(mf, cube))
+            refl_of.append((cube_names.index(cube), 0.20, 0.80))
+        else:
+            refl_of.append((-1, 0.0, 0.0))
+        print('  %-34s detail %s; bump %s; reflects %s' % (name.split('\\')[-1], ', '.join('%s x%g' % (detail_names[i].split('\\')[-1], sc) if i >= 0 else '-' for i, sc in entry[:2]),
+              bump.split('\\')[-1] if bump else '-', cube.split('\\')[-1] if cube else '-'))
     details = [grey(mf.rgb(mf.bitmaps(n)[0]), DETAIL_SIZE) for n in detail_names]      # (pixels with their mips, levels)
+    for n in bump_names:
+        details.append(emboss_map(mf, n, DETAIL_SIZE)); detail_names.append(n + ' (emboss)')
+    ndetail = len(detail_names) - len(bump_names)
+    detail_of = [[(i if i >= -1 else ndetail + (-2 - i), sc) for i, sc in e] for e in detail_of]
     pages, page_id = [], {}          # lightmap pages in use: grey, padded; the scale from the page's own to the padded UV
 
-    P, UV, LMUV, C, T, TEX, PAGE, base, flipped = [], [], [], [], [], [], [], 0, 0
+    P, UV, LMUV, C, T, TEX, PAGE, NRM, base, flipped = [], [], [], [], [], [], [], [], 0, 0
     for m, name in zip(mats, base_of):
         v = m['verts']; n = m['normals']
         n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
@@ -386,12 +453,12 @@ def main():
         else:
             col = np.tile(np.array(flat_color(m['shader'])) * 255, (len(v), 1))
         tris, nf = oriented(v[:, :3].astype(np.float64), n, m['tris']); flipped += nf
-        P.append(v[:, :3]); UV.append(v[:, 6:8]); LMUV.append(lmuv); C.append(col); T.append(tris + base)
+        P.append(v[:, :3]); UV.append(v[:, 6:8]); LMUV.append(lmuv); C.append(col); T.append(tris + base); NRM.append(n)
         TEX += [tex_id[name] if name else -1] * len(tris); PAGE += [page] * len(tris)
         base += len(v)
     PIECE = [-1] * len(TEX)                                              # which piece of scenery a triangle belongs to
     for k, q in enumerate(pieces):
-        P.append(q['P']); UV.append(q['UV']); LMUV.append(np.zeros((len(q['P']), 2))); C.append(q['C']); T.append(q['T'] + base)
+        P.append(q['P']); UV.append(q['UV']); LMUV.append(np.zeros((len(q['P']), 2))); C.append(q['C']); T.append(q['T'] + base); NRM.append(q['N'])
         TEX += [tex_id[q['bitmap']] if q['bitmap'] else -1] * len(q['T']); PAGE += [-1] * len(q['T']); PIECE += [k] * len(q['T'])
         base += len(q['P'])
     # the sky, last: a texture of its own, no lightmap, neutral colour
@@ -399,14 +466,16 @@ def main():
     sky_idx, sky_pal, sky_levels = quantise(sky_img, (64, 64), mips=False)
     sky_tex = len(textures)
     textures.append(dict(name='sky gradient', w=64, h=64, pixels=sky_idx, clut=gs_palette(sky_pal), levels=sky_levels, alpha=0))
-    detail_of.append([(-1, 0.0), (-1, 0.0)])
+    detail_of.append([(-1, 0.0), (-1, 0.0), (-1, 0.0)]); refl_of.append((-1, 0.0, 0.0))
     sky_first_vertex = base
-    P.append(sky_p); UV.append(sky_uv); LMUV.append(np.zeros((len(sky_p), 2))); C.append(np.full((len(sky_p), 3), 128.0)); T.append(sky_t + base)
+    P.append(sky_p); UV.append(sky_uv); LMUV.append(np.zeros((len(sky_p), 2))); C.append(np.full((len(sky_p), 3), 128.0)); T.append(sky_t + base); NRM.append(np.zeros((len(sky_p), 3)))
     TEX += [sky_tex] * len(sky_t); PAGE += [-1] * len(sky_t); PIECE += [-1] * len(sky_t)
     base += len(sky_p)
     SKYTRI = np.zeros(len(TEX), bool); SKYTRI[len(TEX) - len(sky_t):] = True
     P = np.concatenate(P).astype(np.float32); UV = np.concatenate(UV).astype(np.float32); LMUV = np.concatenate(LMUV).astype(np.float32)
     C = np.concatenate(C); T = np.concatenate(T); TEX = np.array(TEX); PAGE = np.array(PAGE); PIECE = np.array(PIECE)
+    NRM = np.concatenate(NRM)
+    nrm8 = np.zeros((len(NRM), 4), np.int8); nrm8[:, :3] = np.round(np.clip(NRM, -1, 1) * 127)
     assert base < 65536
     # chunks: the cell of a grid its centre falls in, numbered from 0
     terrain = ~SKYTRI & (PIECE < 0)
@@ -481,6 +550,7 @@ def main():
     c.write(cstr_array('map_spans', spans, 'int', 16))
     c.write(cstr_array('map_batches', batches, 'int', 16))
     c.write(cstr_array('map_planes', flat(planes.astype(np.float32)), 'float', 16))
+    c.write(cstr_array('map_normals', flat(nrm8), 'signed char', 16))
     c.write(cstr_array('map_chunks', bounds, 'float', 16))
     c.write(cstr_array('map_lm_order', lm_order, 'int', 16))
     c.write(cstr_array('map_gray_clut', flat(gs_gray_clut()), 'unsigned int', 64))
@@ -496,8 +566,13 @@ def main():
         c.write('\t{ map_page%d_pixels, %d, %d, 1 },\n' % (i, pg['w'], pg['h']))
     c.write('};\nconst map_detail_data map_detail_of[MAP_TEXTURES] = {\n')
     for e in detail_of:
-        c.write('\t{ { %d, %d }, { %rf, %rf } },\n' % (e[0][0], e[1][0], e[0][1], e[1][1]))
+        c.write('\t{ { %d, %d, %d }, { %rf, %rf, %rf } },\n' % (e[0][0], e[1][0], e[2][0], e[0][1], e[1][1], e[2][1]))
     c.write('};\n')
+    c.write('const map_reflection_data map_reflection_of[MAP_TEXTURES] = {\n')
+    for cube, perp, par in refl_of: c.write('\t{ %d, %rf, %rf },\n' % (cube, perp, par))
+    c.write('};\n')
+    for i, cb in enumerate(cubes): c.write(cstr_array('map_cube%d' % i, flat(cb), 'unsigned char', 16))
+    c.write('const unsigned char *const map_cubes[%d] = { %s };\n' % (max(len(cubes), 1), ', '.join('map_cube%d' % i for i in range(len(cubes))) or '0'))
     c.write(cstr_array('map_tex_density', densities, 'float', 16))
     for i, t in enumerate(textures):
         c.write(cstr_array('map_tex%d_pixels' % i, flat(t['pixels']), 'unsigned char', 64))
@@ -527,7 +602,8 @@ def main():
 #define MAP_CHIEF_Z %rf
 typedef struct { const unsigned char *pixels; const unsigned int *clut; int width, height, levels, alpha; } map_texture_data;   /* the mip levels follow one another; alpha: palette entry 255 is cut out */
 typedef struct { const unsigned char *pixels; int width, height, levels; } map_gray_texture;   /* 8-bit grey, its value the alpha of map_gray_clut */
-typedef struct { int detail[2]; float scale[2]; } map_detail_data;                    /* primary and micro detail map of a base map */
+typedef struct { int detail[3]; float scale[3]; } map_detail_data;                    /* primary and micro detail map and bump (emboss) map of a base map, and their scales */
+typedef struct { int cube; float perpendicular, parallel; } map_reflection_data;       /* the cube map a base map's shader reflects (-1: none) and its strength head-on and at a graze */
 extern const float map_pos[], map_uv[];
 extern const unsigned char map_color[];
 extern const unsigned short map_tri[];
@@ -540,6 +616,9 @@ extern const int map_lm_order[];             /* the spans that have a lightmap p
 extern const unsigned int map_gray_clut[];
 extern const map_gray_texture map_details[], map_lightmaps[];
 extern const map_detail_data map_detail_of[];
+extern const map_reflection_data map_reflection_of[];
+extern const signed char map_normals[];       /* x, y, z (x 127) and a pad, for each vertex */
+extern const unsigned char *const map_cubes[];   /* the reflected cube maps: six faces of 16x16 RGB */
 extern const map_texture_data map_textures[];
 #endif
 ''' % (len(P), len(T), len(textures), nspans, len(lm_order), sky_first_vertex, sky_chunk, nchunks, len(batches) // 3, len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb)))
