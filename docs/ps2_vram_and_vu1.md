@@ -16,9 +16,9 @@ documents this builds on: [ps2_blood_gulch_map.md](ps2_blood_gulch_map.md) (the 
 | Video memory used | 3,385,088 of 4,194,304 bytes | **2,434,816** (free: 809,216 -> **1,759,488**, 928 KB gained) |
 | Frame buffers | two 640x448 16-bit + 16-bit Z: 1,720,320 | two 512x448 + Z: 1,376,256 |
 | Textures | 1,664,768 | 1,058,560 |
-| EE busy, mean over the 4 s orbit | 11.40 ms (worst frame 15.50) | **10.09 ms** (worst frame 14.48), with fog |
+| EE busy, mean over the 4 s orbit | 11.40 ms (worst frame 15.50) | **9.42 ms** (worst frame 13.81), with fog |
 | Fog | none | GS fog from the sky tag, +0.5 ms |
-| The Chief's textured passes | on the EE (3.5 ms) | VU1 (1.5 ms left: the specular colours) |
+| The Chief's textured passes | on the EE (3.5 ms) | VU1; their specular colours on VU0 (0.8 ms left, the cube lookup and the scatter) |
 | Picture | | the same, but fog; and 512 wide is a little soft across (below) |
 
 How each step moved video memory:
@@ -173,11 +173,40 @@ with culling on to 0.005 to 0.007/255 at three angles; the output buffers hold 1
 of 36 (a third faces the camera); 60 fps in the profile. The EE's fallback and the other variants
 (`NO_MAP`, 640 wide, no fog, the exact fog pass) still build and boot.
 
-**Left on the EE, and the next steps:** the specular colours (a normalise, a cube-map lookup and n.h^18 for a
-quarter of the vertices a frame: 1.5 ms) could go to VU0 in macro mode (`vrsqrt`, the products) or to VU1
-with a sphere-map lookup; the map's 8 ms (culling, VU0 vertices, 64-byte records, four passes) is the
+**Left on the EE, and the next steps:** the specular colours were 1.5 ms of it (a normalise, a cube-map lookup and
+n.h^18 for a quarter of the vertices a frame): they are on VU0 now, next section; the map's 8 ms (culling, VU0 vertices, 64-byte records, four passes) is the
 real cost and would want VU1 with a vertex cache and clipping; the double-buffered input leaves room for
 more triangles a batch.
+
+## 6. The specular colours on VU0
+
+What the VU1 Chief left on the EE was the specular colour of a quarter of his and the rifle's vertices each frame
+(1.5 ms, 580 EE cycles a vertex). Measured by stage: the vector maths (two normalises, the mirror direction, n.h^18)
+197 cycles, the cube-map lookup 116, the gamma colour assembly 213. Now (`-DNO_VU0_SPEC` keeps the FPU's):
+
+| Stage | Cycles a vertex | |
+| --- | --- | --- |
+| A, VU0: v, n.v, mirror direction, half vector, n.h^18 | 58 (was 197) | |
+| cube lookup, EE | 117 | 73 KB of cube: it does not fit VU0's 4 KB |
+| C, VU0: the colour from cube, fres, spec, the lit sum, the gamma curves | 49 (was 213) | |
+| packing the colour and writing it to each of the vertex's slots, EE | 75 | scattered stores into a 22 KB array |
+
+EE busy over the orbit: 10.09 -> **9.42 ms** (worst frame 14.48 -> 13.81); the pictures are identical (0.001/255);
+the colour bytes agree with the FPU function to a mean of 0.05 levels, worst 1 of 128 (`-DSPEC_CHECK` prints it).
+
+- **Macro mode needs three vertices at once.** VU0 in macro mode stalls the EE on every dependent instruction, so
+  one vertex alone (45 operations and two reciprocal square roots in a chain) costs as much as the FPU did. The
+  code works on three, instruction by instruction, with the divide unit's waits filled with the next lane's
+  products; `tools/gen_spec_vu0.py` writes it (`src/spec_vu0.h`) with the three lanes' registers spelt out, and the
+  constants in vf25 to vf28. The batches are 48 vertices: the A stage, the cube lookups and the C stage each run
+  over a batch, so that their arrays stay in the 8 KB data cache.
+- **The gamma curve has no table on VU0:** x^(1/2.2) is a cubic in sqrt (x), 0.21 of the 128 levels at worst over
+  [0.03, 3] (the sample's arguments are 0.035 to 2.4); `vsqrt` is 7 cycles against `vrsqrt`'s 13. The static half,
+  the curve of a quarter of the lit sum (which is exactly 0.25^(1/2.2) times the curve of the sum), is a per-vertex
+  array made with the poses (`chief_ge`, `rifle_ge`: 950 KB), so each vertex takes three square roots, not six.
+- **Next:** the cube lookup (a divide, a branchy face choice) and the scatter are what is left; a coarser cube
+  or choosing the face in stage A would cut the first, a vertex-ordered colour array that VU1 reads by index the
+  second.
 
 ## Pitfalls (each cost real time)
 
@@ -224,9 +253,11 @@ rm tools/mip_floor.json && python3 tools/export_map.py
 make EXTRA_CFLAGS=-DMIP_AUDIT
 python3 ../../../../tools/ps2/pcsx2_run.py masterchief.elf --until "MIPAUDIT done" > audit.log
 python3 tools/mip_audit.py audit.log && python3 tools/export_map.py
+# the specular code on VU0 (src/spec_vu0.h is checked in); make EXTRA_CFLAGS=-DSPEC_CHECK compares it with the FPU's
+python3 tools/gen_spec_vu0.py > src/spec_vu0.h
 ```
 
-Switches: `NO_FOG`, `FOG_EXACT_PASS`, `FOG_HAZE_GAIN=0.5f`, `SCREEN_WIDTH`, `NO_CHIEF_VU1` (make variable),
+Switches: `NO_VU0_SPEC`, `SPEC_CHECK`, `NO_FOG`, `FOG_EXACT_PASS`, `FOG_HAZE_GAIN=0.5f`, `SCREEN_WIDTH`, `NO_CHIEF_VU1` (make variable),
 `MIP_FLOOR=0` (exporter), `DETAIL_SIZE`, `RIFLE_TEX_SIZE`, `MASK_TEX_SIZE`, `DISPLAY_TEX_SIZE`,
 `BASE_TEX_SIZE` (exporters). Compare stills pixel by pixel after cropping the window's content area: a
 change that is meant to move nothing should move less than 0.01/255 on average.

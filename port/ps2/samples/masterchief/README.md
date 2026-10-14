@@ -143,8 +143,9 @@ triangle).
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
 - In PCSX2 (`-DPROFILE`, which steps the orbit by frame so that builds see the same views): 60 fps through the whole
-  4-second orbit; the EE is busy 7.8 to 12.4 ms of the 16.7 ms frame by where the camera points (10.1 ms on average,
-  its worst frame 14.5 ms) with the Chief on VU1 and the fog on (the EE's path: 9.6 to 14.2, mean 11.9). PCSX2 does
+  4-second orbit; the EE is busy 7.1 to 11.7 ms of the 16.7 ms frame by where the camera points (9.4 ms on average,
+  its worst frame 13.8 ms) with the Chief on VU1, his specular colours on VU0 and the fog on (the EE's path: 9.6 to
+  14.2, mean 11.9). PCSX2 does
   not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
   - The Chief's 20 animation frames are skinned and lit once at the start (his pose only changes 30 times a
     second and only the camera moves: `cached_pose`); a frame projects the cached positions, and gives each
@@ -171,7 +172,9 @@ All in [docs/ps2_vram_and_vu1.md](../../../../docs/ps2_vram_and_vu1.md), with th
   `MIP_FLOOR=0 python3 tools/export_map.py` keeps every level.
 - **The Chief on VU1** (`src/chief_vu1.vsm`, the map scene's default; needs `dvp-as` from the ps2dev toolchain on PATH):
   his armour and rifle, each two textured passes, are transformed, culled and drawn by a VU1 microprogram from a
-  prebuilt VIF1 chain per animation frame; the EE keeps the specular colours, the visor and the ammo display. The
-  picture equals the EE path's to 0.007/255; the EE saves 1.8 ms a frame.
+  prebuilt VIF1 chain per animation frame; the EE keeps the visor and the ammo display, and the cube-map lookups of the
+  specular colours, whose other work (the mirror direction, n.h^18, the gamma curves) runs on VU0 in macro mode,
+  three vertices at a time (`tools/gen_spec_vu0.py` writes `src/spec_vu0.h`; `-DNO_VU0_SPEC` keeps the FPU's). The
+  picture equals the EE path's to 0.007/255; the EE saves 1.8 ms a frame with VU1 and 0.7 with VU0.
 
 Not yet: the lights' glow, the sky's clouds, the vehicles.
