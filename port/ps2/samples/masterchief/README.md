@@ -20,9 +20,13 @@ matrices (with the left-hand adjustment) so the PS2 only blends two bones per ve
 
 The armour's reflection and highlight are a second pass: each vertex gets the armour cube map's colour
 (times 0.5 + fresnel) and the key light's n.h^18 on the EE, and the GS adds that over the lit armour
-through the specular mask (multipurpose red) as an 8-bit texture, so only the masked panels shine.
-The rifle gets the same pass with its own specular mask (256x256, to spare video memory) and its two
-reflection cube maps (grip, gun). The visor's gold reflection and highlight are computed per vertex
+through the specular mask (multipurpose red) as a 4-bit grey texture (16 levels, error diffused: it
+looks the same as 8-bit and takes half the video memory), so only the masked panels shine. The rifle
+gets the same pass with its own specular mask and its two reflection cube maps (grip, gun). A mask
+is the size of the base map it is drawn with, because the pass reuses the base map's UV registers
+(texels). The base maps are exported at 256x256, half their sources: the Chief is about 250 pixels
+tall in the map scene (`BASE_TEX_SIZE=512 python3 tools/export_assets.py` keeps them full size, for
+384 KB more). The visor's gold reflection and highlight are computed per vertex
 on the EE.
 
 The rifle's ammo display (its own 256x256 map, the shader's blue self-illumination baked in) is drawn
@@ -129,7 +133,9 @@ triangle).
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
   32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
-  Video memory: 4.04 MB of 4.19 MB in use with the Chief's and the map's textures.
+  Video memory: 3.39 MB of 4.19 MB in use with the Chief's and the map's textures (the program prints
+  the budget at start-up, `VRAM: ...`, and stops if a texture did not fit: gsKit's failed allocation is
+  address 0, the frame buffer, and the texture would draw from it).
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
 - In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.9 to 13.3 ms of the

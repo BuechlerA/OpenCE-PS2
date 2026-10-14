@@ -8,7 +8,8 @@ adjustment, and writes src/assets.c + src/assets.h:
   - the Chief's armour and visor meshes, the rifle mesh (positions, normals, UVs, nodes, weights)
   - 20 frames of skinning matrices (one 4x3 per node) and the rifle's matrix per frame
   - the Chief's colour-changed base map and the rifle's base map, each as an 8-bit palettised
-    512x512 texture (the GS has no DXT), palettes already in the GS's CSM1 order
+    256x256 texture (the GS has no DXT; BASE_TEX_SIZE=512 keeps the sources' size), palettes
+    already in the GS's CSM1 order; the two specular masks as 4-bit greys (16 levels, error diffused)
   - the visor's gold reflection cube map (CPU-lit at run time)
 """
 import math, os, struct, sys
@@ -62,10 +63,11 @@ def mesh_blob(parts, with_nodes):
     if with_nodes: r['ND'] = np.concatenate(ND); r['WG'] = np.concatenate(WG)
     return r
 
-def gs_palette(pal):          # pal: (256,3) uint8 -> RGBA words in CSM1 order, alpha 0x80 (opaque)
-    out = np.zeros(256, dtype='<u4')
-    for i in range(256):
-        j = (i & 0xE7) | ((i & 0x08) << 1) | ((i & 0x10) >> 1)
+def gs_palette(pal):          # pal: (256,3) or (16,3) uint8 -> RGBA words in CSM1 order, alpha 0x80 (opaque)
+    out = np.zeros(len(pal), dtype='<u4')
+    for i in range(len(pal)):
+        # a 256-entry CLUT is read in 8x2 blocks of its 16x16 layout (bits 3 and 4 swap); a 16-entry one is a single block
+        j = (i & 0xE7) | ((i & 0x08) << 1) | ((i & 0x10) >> 1) if len(pal) == 256 else i
         r, g, b = (int(x) for x in pal[i])
         out[j] = r | (g << 8) | (b << 16) | (0x80 << 24)
     return out
@@ -78,9 +80,11 @@ def quantise(rgb01):
     if len(pal) < 256: pal = np.vstack([pal, np.zeros((256 - len(pal), 3), np.uint8)])
     return np.array(q, dtype=np.uint8), pal
 
+BASE_TEX_SIZE = int(os.environ.get('BASE_TEX_SIZE', '256'))   # the Chief's and the rifle's base maps (the sources are 512)
+
 def chief_texture():
     m = H.MATS[H.M_ARMOR]
-    n = 512
+    n = BASE_TEX_SIZE
     uu = (np.arange(n) + 0.5) / n
     u, v = np.meshgrid(uu, uu)
     base = H.sample(m['base'], u, v); mp = H.sample(m['multi'], u, v)
@@ -94,31 +98,38 @@ def chief_texture():
 
 def rifle_texture():
     m = H.MATS[H.M_GUN]
-    return quantise(m['base'])
+    n = BASE_TEX_SIZE
+    uu = (np.arange(n) + 0.5) / n
+    u, v = np.meshgrid(uu, uu)
+    return quantise(H.sample(m['base'], u, v))
 
-def mask_texture():
-    """the armour's specular mask (multipurpose red), as the 8-bit grey the second pass modulates: the
-    shader's reflection weight 0.06 + 0.40 m and specular weight 0.15 + 1.1 m are both close to
-    k (0.14 + m), so one map, (0.14 + m) / 1.14, serves both"""
-    m = H.MATS[H.M_ARMOR]
-    n = 512
+def grey4(t):
+    """t in 0..1 -> 4-bit texels (two per byte, the left one in the low nibble, as the GS's PSMT4 keeps
+    them) with a 16-entry grey palette; Floyd-Steinberg keeps the mask's gradients from banding"""
+    im = Image.fromarray(np.round(np.clip(t, 0, 1) * 255).astype(np.uint8), 'L')
+    q = im.quantize(16, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG)
+    pal = np.array(q.getpalette()[:48], dtype=np.uint8).reshape(-1, 3)
+    if len(pal) < 16: pal = np.vstack([pal, np.zeros((16 - len(pal), 3), np.uint8)])
+    idx = np.array(q, dtype=np.uint8)
+    assert idx.max() < 16
+    return idx[:, 0::2] | (idx[:, 1::2] << 4), pal
+
+def spec_mask(m, n):
+    """a part's specular mask (multipurpose red), as the grey the second pass modulates: the shader's
+    reflection weight 0.06 + 0.40 m and specular weight 0.15 + 1.1 m are both close to k (0.14 + m),
+    so one map, (0.14 + m) / 1.14, serves both; 4-bit, to spare video memory"""
     uu = (np.arange(n) + 0.5) / n
     u, v = np.meshgrid(uu, uu)
     sm = H.sample(m['multi'], u, v)[..., 0]
-    t = np.clip((0.14 + sm) / 1.14, 0, 1)
-    pal = np.stack([np.arange(256)] * 3, 1).astype(np.uint8)
-    return np.round(t * 255).astype(np.uint8), pal
+    return grey4((0.14 + sm) / 1.14)
 
-def rifle_mask_texture():
-    """the rifle's specular mask, 256x256 to spare video memory, in the same form as the armour's"""
-    m = H.MATS[H.M_GUN]
-    n = 256
-    uu = (np.arange(n) + 0.5) / n
-    u, v = np.meshgrid(uu, uu)
-    sm = H.sample(m['multi'], u, v)[..., 0]
-    t = np.clip((0.14 + sm) / 1.14, 0, 1)
-    pal = np.stack([np.arange(256)] * 3, 1).astype(np.uint8)
-    return np.round(t * 255).astype(np.uint8), pal
+# the masks are the size of the base maps they are drawn with: the second pass reuses the first's UV
+# registers, which are in texels
+MASK_TEX_SIZE = BASE_TEX_SIZE
+RIFLE_MASK_SIZE = BASE_TEX_SIZE
+
+def mask_texture(): return spec_mask(H.MATS[H.M_ARMOR], MASK_TEX_SIZE)
+def rifle_mask_texture(): return spec_mask(H.MATS[H.M_GUN], RIFLE_MASK_SIZE)
 
 def display_texture():
     """the rifle's ammo display: its base map plus the self-illumination (multipurpose green) in the
@@ -128,6 +139,8 @@ def display_texture():
     so = H.TAGS[(b'soso', 'weapons\\assault rifle\\fp\\shaders\\display')] - H.B
     upper = np.array(struct.unpack_from('<3f', H.td, so + 0x84))
     return quantise(m['base'] + glow * upper * 0.9)
+
+DISPLAY_TEX_SIZE = 256       # its source's size
 
 def visor_spec():
     m = H.MATS[H.M_VISOR]
@@ -164,6 +177,7 @@ def main():
     disp = [p for p in H.rifle if p['mat'] == H.M_DISP][0]
     dT, _ = oriented(disp['P'], disp['N'], disp['T'])
     di, dpal = display_texture()
+    assert di.shape == (DISPLAY_TEX_SIZE, DISPLAY_TEX_SIZE), di.shape
     ci, cpal = chief_texture(); ri, rpal = rifle_texture(); mi, mpal = mask_texture(); rmi, rmpal = rifle_mask_texture()
     cube = (H.MATS[H.M_VISOR]['cube'] * 255).astype(np.uint8)       # (6,64,64,3)
     tint = np.array([H.MATS[H.M_VISOR]['perp'], H.MATS[H.M_VISOR]['par']], np.float32)
@@ -224,6 +238,11 @@ def main():
 #define RIFLE_GRIP_VERTS %d
 #define RIFLE_GRIP_TRIS %d
 #define ANIM_FRAMES %d
+#define CHIEF_TEX_SIZE %d
+#define RIFLE_TEX_SIZE %d
+#define MASK_TEX_SIZE %d
+#define RIFLE_MASK_SIZE %d
+#define DISPLAY_TEX_SIZE %d
 #define NODE_COUNT 19
 #define ANIM_STRIDE %rf
 #define MODEL_CENTER_X %rf
@@ -245,7 +264,7 @@ extern const unsigned int chief_tex_clut[], rifle_tex_clut[], mask_tex_clut[], r
 extern const float visor_tint[], visor_spec[];
 #endif
 ''' % (len(chief['P']), a_first, a_count, v_first, v_count, len(rifle['P']), len(rifle['T']), len(disp['P']), len(dT), len(H.rifle[0]['P']), rifle['spans'][0][1],
-       skin.shape[0], float(H.STRIDE), float(H.center[0]), float(H.center[1]), float(H.center[2]),
+       skin.shape[0], BASE_TEX_SIZE, BASE_TEX_SIZE, MASK_TEX_SIZE, RIFLE_MASK_SIZE, DISPLAY_TEX_SIZE, float(H.STRIDE), float(H.center[0]), float(H.center[1]), float(H.center[2]),
        float(H.radius), float(lo[2])))
     h.close()
     print('wrote', os.path.abspath(OUT))

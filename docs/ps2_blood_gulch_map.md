@@ -19,7 +19,7 @@ document is about the data and the design.
 | Geometry in the frame | 10,765 triangles and 11,498 vertices of map (5,503 and 5,790 of them the BSP, 5,202 triangles of scenery, 60 of sky), 26 base textures, 53 spans, 152 chunks |
 | Frame rate | 60 fps (one NTSC vsync) through the whole orbit |
 | EE time (PCSX2) | 8.9 to 13.3 ms of the 16.7 ms frame, by where the camera points; the worst single frame 15.2 ms |
-| Video memory | 4.04 of 4.19 MB, about 150 KB spare |
+| Video memory | 3.39 of 4.19 MB, about 790 KB spare |
 | Left out | The vehicles, the sky's clouds, the lights' glow, fog, shadows of objects (see "Not done") |
 
 ## What the map is made of
@@ -163,8 +163,8 @@ Reads the map, writes `src/map_assets.[ch]` (gitignored: they are the game's dat
 | The map's 26 base textures with their mips (pixel data) | 968 |
 | 10 detail and emboss maps with mips | 212 |
 | 15 lightmap pages | 127 |
-| The Chief's five textures, all the palettes and the allocator's alignment (the rest) | about 960 |
-| Allocated in all (`VRAM: 4041984 bytes` at start-up) | 3,947 of 4,096 KB, about 150 spare |
+| The Chief's five textures (256x256: two 8-bit base maps, two 4-bit masks, the display), all the palettes and the allocator's alignment (the rest) | about 320 |
+| Allocated in all (`VRAM: 3385088 bytes` at start-up) | 3,306 of 4,096 KB, about 790 spare |
 
 Findings:
 
@@ -172,8 +172,15 @@ Findings:
   buffers (1.2 MB less), which the GS dithers.
 - gsKit sizes its buffers for the console's own mode (PAL: 512 lines) before the
   program forces NTSC, so the sample's buffers were 640x512 and the 32-bit build
-  overflowed 4 MB with only a console message ("Not enough VRAM"). Set
-  `gs->Height` with `gs->Mode`.
+  overflowed 4 MB with only a console message ("Not enough VRAM"): the failed
+  allocation is address 0, the frame buffer, and the texture still draws from
+  it. Set `gs->Height` with `gs->Mode`; the sample now stops when a texture
+  does not fit.
+- The Chief's textures were 960 KB at 512x512: at 256 (he is about 250
+  pixels tall in this scene) with 4-bit specular masks they are 320 KB and look
+  the same. The masks must be the size of the base maps: the second pass
+  reuses the first's UV registers, which are in texels (the rifle's 256 mask
+  under 512 UVs tiled twice before).
 - To fit the map: the ground's base map from 512 to 256 (colour from one
   texture across 145 units of terrain is low-frequency; the detail map supplies
   the grain), scenery at 64 pixels, details at 128.

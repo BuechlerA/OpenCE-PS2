@@ -281,31 +281,41 @@ typedef struct { GSTEXTURE t; int tw, th, levels, alpha; unsigned mip_tbp[7], mi
 
 static texture chief_tex, rifle_tex, mask_tex, rifle_mask_tex, display_tex;
 
-/* shared_clut: the video memory address of a palette already uploaded (the grey ones), or 0 to allocate */
-static void texture_setup_clut(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
+static int vram_failed;
+
+/* shared_clut: the video memory address of a palette already uploaded (the grey ones), or 0 to allocate.
+   psm: GS_PSM_T8 (256 colours) or GS_PSM_T4 (16: the specular masks, whose palette gsKit sends as the
+   8x2 block the GS reads it as) */
+static void texture_setup_psm(GSGLOBAL *gs, texture *x, int width, int height, int psm, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
 {
 	GSTEXTURE *t = &x->t;
 
 	memset(x, 0, sizeof(*x));
 	t->Width = width;
 	t->Height = height;
-	t->PSM = GS_PSM_T8;
+	t->PSM = psm;
 	t->ClutPSM = GS_PSM_CT32;
 	t->TBW = width / 64;
 	t->Mem = (u32 *)pixels;
 	t->Clut = (u32 *)clut;
 	t->Filter = GS_FILTER_LINEAR;
 	t->Vram = gsKit_vram_alloc(gs, gsKit_texture_size(t->Width, t->Height, t->PSM), GSKIT_ALLOC_USERBUFFER);
-	t->VramClut = shared_clut ? shared_clut : gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, t->ClutPSM), GSKIT_ALLOC_USERBUFFER);
-	gsKit_texture_upload(gs, t);
-	if (t->Vram == GSKIT_ALLOC_ERROR || t->VramClut == GSKIT_ALLOC_ERROR) printf("texture %dx%d: out of video memory\n", width, height);
+	t->VramClut = shared_clut ? shared_clut
+	            : gsKit_vram_alloc(gs, psm == GS_PSM_T4 ? gsKit_texture_size(8, 2, t->ClutPSM) : gsKit_texture_size(16, 16, t->ClutPSM), GSKIT_ALLOC_USERBUFFER);
+	/* a failed allocation is 0 (GSKIT_ALLOC_ERROR): the frame buffer's address, so the texture would draw from it */
+	if (t->Vram == GSKIT_ALLOC_ERROR || t->VramClut == GSKIT_ALLOC_ERROR)
+	{
+		printf("texture %dx%d: out of video memory\n", width, height);
+		vram_failed = 1;
+	}
+	else gsKit_texture_upload(gs, t);
 	for (x->tw = 0; (1 << x->tw) < width; x->tw++) ;   /* log2, for TEX0 */
 	for (x->th = 0; (1 << x->th) < height; x->th++) ;
 }
 
-static void texture_setup_wh(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut)
+static void texture_setup_clut(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
 {
-	texture_setup_clut(gs, x, width, height, pixels, clut, 0);
+	texture_setup_psm(gs, x, width, height, GS_PSM_T8, pixels, clut, shared_clut);
 }
 
 #ifndef NO_MAP
@@ -322,17 +332,17 @@ static void texture_setup_mips(GSGLOBAL *gs, texture *x, int width, int height, 
 		int w = width >> l, h = height >> l, tbw = (w + 63) / 64;
 		u32 vram = gsKit_vram_alloc(gs, gsKit_texture_size(w, h, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
 
-		if (vram == GSKIT_ALLOC_ERROR) printf("mip level %dx%d: out of video memory\n", w, h);
-		gsKit_texture_send((u32 *)pixels, w, h, vram, GS_PSM_T8, tbw, GS_CLUT_TEXTURE);
+		if (vram == GSKIT_ALLOC_ERROR) { printf("mip level %dx%d: out of video memory\n", w, h); vram_failed = 1; }
+		else gsKit_texture_send((u32 *)pixels, w, h, vram, GS_PSM_T8, tbw, GS_CLUT_TEXTURE);
 		x->mip_tbp[l] = vram / 256; x->mip_tbw[l] = tbw;
 		pixels += w * h;
 	}
 }
 #endif
 
-static void texture_setup(GSGLOBAL *gs, texture *x, int size, const unsigned char *pixels, const unsigned int *clut)
+static void texture_setup(GSGLOBAL *gs, texture *x, int size, int psm, const unsigned char *pixels, const unsigned int *clut)
 {
-	texture_setup_wh(gs, x, size, size, pixels, clut);
+	texture_setup_psm(gs, x, size, size, psm, pixels, clut, 0);
 }
 
 /* ---------- the slow functions, tabulated ---------- */
@@ -1353,7 +1363,7 @@ static void skin_chief(const mat4 *bone_world, const mat4 *view, int visor_first
 		else
 			vu0_skin(b0, b1, &chief_p4[i], &chief_n4[i], &chief_w4[i], &pw, &nw, &pv);
 		project(pv.v, 0, o);
-		o->uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], 512.f);
+		o->uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], (float)CHIEF_TEX_SIZE);
 		if (i >= visor_first_vert)
 			o->rgbaq = visor_color(nw.v, pw.v, visor_spec[i - visor_first_vert]);
 		else
@@ -1389,7 +1399,7 @@ static void skin_chief(const xform *bone_world, const xform *view, int visor_fir
 		}
 		apply_point(view, pw, pv);
 		project(pv, 0, o);
-		o->uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], 512.f);
+		o->uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], (float)CHIEF_TEX_SIZE);
 		if (i >= visor_first_vert)
 			o->rgbaq = visor_color(nw, pw, visor_spec[i - visor_first_vert]);
 		else
@@ -1476,11 +1486,11 @@ static void pose_cache_build(void)
 		}
 	}
 	/* what a frame never changes: each vertex's texture coordinates */
-	for (i = 0; i < CHIEF_VERTS; i++) chief_v[i].uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], 512.f);
-	for (i = 0; i < RIFLE_VERTS; i++) rifle_v[i].uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], 512.f);
+	for (i = 0; i < CHIEF_VERTS; i++) chief_v[i].uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], (float)CHIEF_TEX_SIZE);
+	for (i = 0; i < RIFLE_VERTS; i++) rifle_v[i].uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], (float)RIFLE_TEX_SIZE);
 	for (i = 0; i < DISPLAY_VERTS; i++)
 	{
-		display_v[i].uv = uv_reg(display_uv[i * 2], display_uv[i * 2 + 1], 256.f);
+		display_v[i].uv = uv_reg(display_uv[i * 2], display_uv[i * 2 + 1], (float)DISPLAY_TEX_SIZE);
 		display_v[i].rgbaq = GS_SETREG_RGBAQ(128, 128, 128, 0x80, 0x00);
 	}
 }
@@ -1671,7 +1681,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 
 		vu0_transform(&rifle_world4, &rifle_p4[i], &rifle_n4[i], &pw, &nn, &pp);
 		project(pp.v, 0, o);
-		o->uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], 512.f);
+		o->uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], (float)RIFLE_TEX_SIZE);
 		lit_colors(i < RIFLE_GRIP_VERTS ? rifle_grip_cube : rifle_gun_cube, nn.v, pw.v, &o->rgbaq, &rifle_spec_rgbaq[i]);
 	}
 #else
@@ -1687,7 +1697,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 		apply_vector(&rifle_world, &rifle_nrm[i * 3], nn);
 		normalise(nn);
 		project(pp, 0, o);
-		o->uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], 512.f);
+		o->uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], (float)RIFLE_TEX_SIZE);
 		lit_colors(i < RIFLE_GRIP_VERTS ? rifle_grip_cube : rifle_gun_cube, nn, pw, &o->rgbaq, &rifle_spec_rgbaq[i]);
 	}
 #endif
@@ -1700,7 +1710,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 
 		apply_point(&rifle_view, &display_pos[i * 3], pp);
 		project(pp, DISPLAY_NUDGE, o);
-		o->uv = uv_reg(display_uv[i * 2], display_uv[i * 2 + 1], 256.f);
+		o->uv = uv_reg(display_uv[i * 2], display_uv[i * 2 + 1], (float)DISPLAY_TEX_SIZE);
 		o->rgbaq = GS_SETREG_RGBAQ(128, 128, 128, 0x80, 0x00);
 	}
 	PROF_MARK(P_RIFLE);
@@ -1755,11 +1765,12 @@ int main(void)
 	gs_offset_y = gs->OffsetY;
 
 	FlushCache(0);
-	texture_setup(gs, &chief_tex, 512, chief_tex_pixels, chief_tex_clut);
-	texture_setup(gs, &rifle_tex, 512, rifle_tex_pixels, rifle_tex_clut);
-	texture_setup(gs, &mask_tex, 512, mask_tex_pixels, mask_tex_clut);
-	texture_setup(gs, &rifle_mask_tex, 256, rifle_mask_pixels, rifle_mask_clut);
-	texture_setup(gs, &display_tex, 256, display_tex_pixels, display_tex_clut);
+	/* the masks are the size of the base maps: the second pass reuses the first's UV registers */
+	texture_setup(gs, &chief_tex, CHIEF_TEX_SIZE, GS_PSM_T8, chief_tex_pixels, chief_tex_clut);
+	texture_setup(gs, &rifle_tex, RIFLE_TEX_SIZE, GS_PSM_T8, rifle_tex_pixels, rifle_tex_clut);
+	texture_setup(gs, &mask_tex, MASK_TEX_SIZE, GS_PSM_T4, mask_tex_pixels, mask_tex_clut);
+	texture_setup(gs, &rifle_mask_tex, RIFLE_MASK_SIZE, GS_PSM_T4, rifle_mask_pixels, rifle_mask_clut);
+	texture_setup(gs, &display_tex, DISPLAY_TEX_SIZE, GS_PSM_T8, display_tex_pixels, display_tex_clut);
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
 	{
@@ -1773,7 +1784,9 @@ int main(void)
 	for (i = 0; i < MAP_LIGHTMAPS; i++) map_lm_tex[i].t.Filter = GS_FILTER_LINEAR;
 #endif
 
-	printf("VRAM: %u of 4194304 bytes allocated\n", (unsigned)gs->CurrentPointer);
+	printf("VRAM: %u of 4194304 bytes allocated (buffers %u, textures %u, free %u)\n", (unsigned)gs->CurrentPointer,
+	       (unsigned)gs->TexturePointer, (unsigned)(gs->CurrentPointer - gs->TexturePointer), (unsigned)(4194304 - gs->CurrentPointer));
+	if (vram_failed) { printf("VRAM: a texture did not fit; stopping\n"); return 1; }
 	tables_setup();
 #ifndef NO_VU0
 	pack_vertices();
