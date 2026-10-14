@@ -29,10 +29,14 @@
 #include "map_assets.h"
 #endif
 
+#if RIFLE_MASK_SIZE != RIFLE_TEX_SIZE
+#error "the rifle's second pass shares its UV registers with the first: its mask must be as big as its base map"
+#endif
+
 #ifdef PROFILE                      /* -DPROFILE: time the frame's phases with the EE's cycle counter */
 #include <timer.h>
-enum { P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
-static const char *prof_name[P_COUNT] = { "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
+enum { P_VU1, P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
+static const char *prof_name[P_COUNT] = { "vu1 kick", "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
 static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled, prof_frame_start, prof_busy_max;
 static u32 prof_max[P_COUNT];
 static void prof_mark(int phase) { u32 t = cpu_ticks(); u32 d = t - prof_last; prof_sum[phase] += d; if (d > prof_max[phase]) prof_max[phase] = d; prof_last = t; }
@@ -265,7 +269,19 @@ static void pack_vertices(void)
 #endif
 
 static float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
-static float focal;                 /* pixels per unit of x/z */
+/* The frame buffers are SCREEN_WIDTH pixels wide and 448 high; the display stretches them over the same 640x448 picture
+   (gsKit sets the horizontal magnification from the width), so at 512 each pixel is 1.25 times as wide as it is high
+   and the horizontal focal length is 512 / 640 of the vertical one: the field of view and the aspect do not change.
+   A buffer is 573,440 bytes at 640 and 458,752 at 512, and the Z buffer the same: 344 KB less video memory in all. */
+#ifndef SCREEN_WIDTH
+#ifdef NO_MAP
+#define SCREEN_WIDTH 640
+#else
+#define SCREEN_WIDTH 512
+#endif
+#endif
+
+static float focal, focal_x;        /* pixels per unit of x/z, up and across */
 static float screen_cx, screen_cy;
 static float z_near, z_far, z_k1, z_k2; /* the 16-bit Z value is z_k1 / z - z_k2: affine in screen space, as the GS interpolates it */
 static float light_dir[3][3];
@@ -295,7 +311,7 @@ static void texture_setup_psm(GSGLOBAL *gs, texture *x, int width, int height, i
 	t->Height = height;
 	t->PSM = psm;
 	t->ClutPSM = GS_PSM_CT32;
-	t->TBW = width / 64;
+	t->TBW = (width + 63) / 64;     /* the buffer width is in units of 64 texels: at least one, for a 32-texel map */
 	t->Mem = (u32 *)pixels;
 	t->Clut = (u32 *)clut;
 	t->Filter = GS_FILTER_LINEAR;
@@ -534,6 +550,7 @@ typedef struct { float x, y; u64 rgbaq, uv, xyz2; } svert;
 
 static svert chief_v[MAX_VERTS], rifle_v[MAX_VERTS], display_v[DISPLAY_VERTS];
 static u64 chief_spec_rgbaq[MAX_VERTS], rifle_spec_rgbaq[MAX_VERTS];
+static u64 chief_mask_uv[MAX_VERTS];   /* the Chief's mask is smaller than his base map, so its pass has its own UV registers (texels of the mask) */
 static int gs_offset_x, gs_offset_y;   /* the GS's coordinate origin, in its 12.4 fixed point */
 static unsigned short visible[MAX_TRIS * 3];
 
@@ -560,7 +577,7 @@ static inline void project_xy(const float *p, float z_add, float *x, float *y, u
 	float zc = p[2] < 0.01f ? 0.01f : p[2], inv = 1.f / zc, zd = zc - z_add;
 	int iz = (int)(z_k1 / (zd < z_near ? z_near : zd) - z_k2);
 
-	*x = screen_cx + p[0] * inv * focal;
+	*x = screen_cx + p[0] * inv * focal_x;
 	*y = screen_cy - p[1] * inv * focal;
 	*xyz2 = GS_SETREG_XYZ2(to_gs_xy(*x, gs_offset_x), to_gs_xy(*y, gs_offset_y), iz < 1 ? 1 : (iz > 65534 ? 65534 : iz));
 }
@@ -636,8 +653,8 @@ static void set_prim(GSGLOBAL *gs, const texture *x, int fst, int clamp)
 
 /* the mesh's front-facing triangles as one REGLIST packet: RGBAQ, UV and XYZ2 per vertex (the GS
    reads 64 bits per register in this mode). rgbaq, when given, replaces the vertices' own colour
-   (the second pass). */
-static void draw_textured(GSGLOBAL *gs, const texture *x, const svert *v, const u64 *rgbaq, const unsigned short *tri, int first, int count)
+   (the second pass), and uv the same for the texture coordinates (a mask of another size than the base map). */
+static void draw_textured(GSGLOBAL *gs, const texture *x, const svert *v, const u64 *rgbaq, const u64 *uv, const unsigned short *tri, int first, int count)
 {
 	int n = cull(v, tri, first, count), i, qwords;
 	u64 *p;
@@ -653,7 +670,7 @@ static void draw_textured(GSGLOBAL *gs, const texture *x, const svert *v, const 
 		const svert *s = &v[visible[i]];
 
 		*p++ = rgbaq ? rgbaq[visible[i]] : s->rgbaq;
-		*p++ = s->uv;
+		*p++ = uv ? uv[visible[i]] : s->uv;
 		*p++ = s->xyz2;
 	}
 }
@@ -774,6 +791,16 @@ static mapv map_out[MAP_TRIS * 3 + 4096] __attribute__((aligned(64)));
 static texture map_tex[MAP_TEXTURES], map_detail_tex[MAP_DETAILS], map_lm_tex[MAP_LIGHTMAPS];
 static int span_first[MAP_SPANS], span_verts[MAP_SPANS];   /* each span's vertices in map_out */
 static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2], lod_k_bump[MAP_TEXTURES];   /* each pass's K for TEX1 (see map_lod_setup) */
+#ifdef MIP_AUDIT
+/* -DMIP_AUDIT: which mip levels does the orbit ever sample? The level is log2 (z) + K / 16 (z the depth of the pixel),
+   so a texture whose lowest requested level is N never reads the N levels above it, and they can be left out of
+   video memory without changing the picture. audit_lod[pass][texture] is the lowest level any vertex that is drawn
+   asks for (a pass is a base map, its two detail maps, its bump map); audit_detail_lod[map] the lowest over every
+   base map that uses a detail map. tools/mip_audit.py turns the report into tools/mip_floor.json. */
+#define AUDIT_BIG 99.f
+static float audit_lod[4][MAP_TEXTURES], audit_detail_lod[MAP_DETAILS];
+static unsigned audit_drawn[MAP_TEXTURES];
+#endif
 #ifndef NO_VU0
 static vec4 map_p4[MAP_VERTS];                         /* positions as quads, w 1, for the VU */
 static vec4 map_uvlm[MAP_VERTS], map_uv2[MAP_VERTS];   /* (u, v, lightmap u, v) and (u, v, u, v) */
@@ -792,8 +819,8 @@ static void clip_setup(const GSGLOBAL *gs)
 	int i;
 
 	q[0][2] = 1.f; q[0][3] = -z_near;                                    /* near */
-	q[1][0] = focal; q[1][2] = screen_cx + CLIP_MARGIN;                  /* left */
-	q[2][0] = -focal; q[2][2] = w + CLIP_MARGIN - screen_cx;             /* right */
+	q[1][0] = focal_x; q[1][2] = screen_cx + CLIP_MARGIN;                /* left */
+	q[2][0] = -focal_x; q[2][2] = w + CLIP_MARGIN - screen_cx;           /* right */
 	q[3][1] = -focal; q[3][2] = screen_cy + CLIP_MARGIN;                 /* top */
 	q[4][1] = focal; q[4][2] = h + CLIP_MARGIN - screen_cy;              /* bottom */
 	memcpy(clip_plane, q, sizeof(q));
@@ -896,6 +923,43 @@ static inline void set_attrs(mvert *o, float r, float g, float b, float u, float
 	o->m.d1st = scale_st(o->m.st, detail_scale[tex][1]);
 }
 
+/* Fog. The Xbox fogs the environment per vertex by the view depth, linearly between the sky's start and opaque distances up to
+   its maximum density, toward the sky's fog colour (rasterizer_xbox.c, the fog constants), in every pass. The GS's fog does the
+   same with a coefficient F per vertex, which it interpolates and blends as F * colour + (1 - F) * FOGCOL (F 255: none). F rides
+   in the top byte of a vertex's XYZF2 (bits 56 to 63, free: the depth is 16 bits), so every pass reads its vertices as XYZF2
+   and ignores F unless the pass turns the fog on (PRIM's FGE).
+   Fog belongs after what multiplies the picture (the detail maps, the lightmap's brightness). By default the base pass is fogged
+   (it costs the EE only F, 0.5 ms) and the passes that follow multiply the haze with the surface: the lightmap's brightness runs
+   up to twice the base pass's, so the haze comes out brighter in the sun and darker in a shadow, and FOG_HAZE_GAIN scales
+   FOGCOL down to the average. -DFOG_EXACT_PASS does it as the Xbox does instead: one pass over the map's triangles, last, with
+   per pixel dest * F + (1 - F) * FOGCOL (the GS's fog gives (1 - F) * FOGCOL for a black vertex, and the alpha F scales what
+   is there already); it costs about 1.6 ms of the EE's frame. The reflection, added after the base pass, is scaled by F at its
+   vertices either way. -DNO_FOG leaves the fog out. */
+#ifndef FOG_HAZE_GAIN
+#define FOG_HAZE_GAIN 0.5f
+#endif
+#define MAP_SKY_TEXTURE (MAP_TEXTURES - 1)       /* the exporter adds the sky's gradient last: the sky is not fogged */
+#define FOG_SLOPE (MAP_FOG_DENSITY / (MAP_FOG_OPAQUE - MAP_FOG_START))
+
+/* F / 255 at view depth z */
+static inline float fog_factor(float z)
+{
+#ifdef NO_FOG
+	(void)z;
+	return 1.f;
+#else
+	float t = (z - MAP_FOG_START) * FOG_SLOPE;
+
+	if (t < 0.f) t = 0.f; else if (t > MAP_FOG_DENSITY) t = MAP_FOG_DENSITY;
+	return 1.f - t;
+#endif
+}
+
+static inline u64 fog_bits(float z)
+{
+	return (u64)(int)(255.f * fog_factor(z) + 0.5f) << 56;
+}
+
 static inline float screen_area(const mvert *a, const mvert *b, const mvert *c)
 {
 	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
@@ -951,14 +1015,79 @@ static void send_map_pass(GSGLOBAL *gs, const texture *x, int pass, int lod_k, c
 	if (pass == PASS_REFLECTION)
 	{                                                                 /* a flat colour: RGBAQ, XYZ2 */
 		*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
-		*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
+		*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZF2 << 4);
 		for (i = 0; i < n; i++, rec += 8) { *p++ = rec[0]; *p++ = rec[2]; }
 		return;
 	}
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
-	*p++ = (u64)GS_ST | ((u64)GS_RGBAQ << 4) | ((u64)GS_XYZ2 << 8);
+	*p++ = (u64)GS_ST | ((u64)GS_RGBAQ << 4) | ((u64)GS_XYZF2 << 8);
 	for (i = 0; i < n; i++, rec += 8) { *p++ = rec[0]; *p++ = rec[6 - field[pass]]; *p++ = rec[7 - field[pass]]; }
 }
+
+#ifdef FOG_EXACT_PASS
+/* The fog, last of all: every vertex black with the alpha F / 255 (128 is 1), through the GS's fog unit (FGE, FOGCOL), which makes
+   the fragment (1 - F) * FOGCOL; the blend (Cd * As) + Cs is then dest * F + (1 - F) * FOGCOL. A packet is two registers a
+   vertex, RGBAQ and XYZF2, like the flat Gouraud one; the sky is left out. NLOOP is 15 bits, so a long span goes in pieces. */
+#define FOG_PIECE 30000                          /* vertices a packet, a multiple of 3 */
+
+static void fog_pass(GSGLOBAL *gs)
+{
+	u64 *p;
+	int sp, i, n, done;
+
+	gs->PrimFogEnable = GS_SETTING_ON;
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(1, 2, 0, 0, 0), 0);        /* (Cd - 0) * As + Cs */
+	prim_test = 0;
+	set_prim(gs, NULL, 0, -1);
+	for (sp = 0; sp < MAP_SPANS; sp++)
+	{
+		const u64 *rec = (const u64 *)&map_out[span_first[sp]];
+
+		if (!span_verts[sp] || map_spans[sp * 6] == MAP_SKY_TEXTURE) continue;
+		for (done = 0; done < span_verts[sp]; done += n, rec += 8 * n)
+		{
+			n = span_verts[sp] - done < FOG_PIECE ? span_verts[sp] - done : FOG_PIECE;
+			p = gsKit_heap_alloc(gs, n, n * 16, GIF_AD);
+			*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
+			*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZF2 << 4);
+			for (i = 0; i < n; i++)
+			{
+				u64 xyzf = rec[i * 8 + 7];
+
+				*p++ = (u64)(((unsigned)(xyzf >> 56) + 1u) >> 1) << 24;   /* black, alpha F / 255 (128 is 1; (F + 1) / 2, no divide) */
+				*p++ = xyzf;
+			}
+		}
+	}
+	gs->PrimFogEnable = GS_SETTING_OFF;
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+}
+#endif
+
+#ifndef NO_FOG
+/* FOGCOL's value: the sky's fog colour, scaled for the haze the later passes multiply (not in the exact pass) */
+static inline u64 fog_color_word(void)
+{
+#ifdef FOG_EXACT_PASS
+	const float g = 1.f;
+#else
+	const float g = FOG_HAZE_GAIN;
+#endif
+	return (u64)(int)(MAP_FOG_R * g + 0.5f) | ((u64)(int)(MAP_FOG_G * g + 0.5f) << 8) | ((u64)(int)(MAP_FOG_B * g + 0.5f) << 16);
+}
+
+/* FOGCOL, once a frame: what the fogged passes blend toward */
+static void fog_color_setup(GSGLOBAL *gs)
+{
+	u64 *p = gsKit_heap_alloc(gs, 1, 16, GIF_AD);
+
+	*p++ = GIF_TAG_AD(1);
+	*p++ = GIF_AD;
+	*p++ = fog_color_word();
+	*p++ = GS_FOGCOL;
+}
+#endif
 
 /* the passes multiply by alpha: destination * source alpha / 128, so a grey of 128 leaves it as it is */
 static void map_blend_begin(GSGLOBAL *gs)
@@ -985,7 +1114,7 @@ static void map_blend_end(GSGLOBAL *gs)
 static u64 refl_cache[MAP_VERTS];
 static unsigned refl_stamp[MAP_VERTS];
 
-static u64 map_reflect(int i, int tex)
+static u64 map_reflect(int i, int tex, float z)
 {
 	const signed char *nn = &map_normals[i * 4];
 	float n[3] = { nn[0] * (1.f / 127.f), nn[1] * (1.f / 127.f), nn[2] * (1.f / 127.f) };
@@ -1002,6 +1131,7 @@ static u64 map_reflect(int i, int tex)
 	f = 1.f - nv;
 	w = map_reflection_of[tex].perpendicular + (map_reflection_of[tex].parallel - map_reflection_of[tex].perpendicular) * f * f;
 	refl_stamp[i] = map_frame;
+	w *= fog_factor(z);                                   /* the fog's share of what is added: F * (lit + reflection) */
 	refl_cache[i] = GS_SETREG_RGBAQ(to_byte(rgb[0] * w), to_byte(rgb[1] * w), to_byte(rgb[2] * w), 0x80, 0x00);
 	return refl_cache[i];
 }
@@ -1009,9 +1139,9 @@ static u64 map_reflect(int i, int tex)
 /* the screen position, depth and registers of a vertex at view position pv in front of the near plane; a vertex
    outside the guard band is left alone and its code returned, unless force (a vertex the clipper made lies on the
    band's edge, give or take rounding: its position is clamped into it) */
-static inline int fill_vertex(mvert *o, const float *pv, unsigned rgb32, float u, float v, float lu, float lv, const float *scale, int force)
+static inline int fill_vertex(mvert *o, const float *pv, unsigned rgb32, float u, float v, float lu, float lv, const float *scale, int force, int fog)
 {
-	float q = 1.f / pv[2], k = q * focal, sx = screen_cx + pv[0] * k, sy = screen_cy - pv[1] * k, s, t, *f = (float *)&o->m.st;
+	float q = 1.f / pv[2], k = q * focal, sx = screen_cx + pv[0] * q * focal_x, sy = screen_cy - pv[1] * k, s, t, *f = (float *)&o->m.st;
 	int code = (sx < clip_x_min ? 2 : 0) | (sx > clip_x_max ? 4 : 0) | (sy < clip_y_min ? 8 : 0) | (sy > clip_y_max ? 16 : 0);
 	int ix, iy, iz;
 	u32 qbits;
@@ -1027,7 +1157,7 @@ static inline int fill_vertex(mvert *o, const float *pv, unsigned rgb32, float u
 	iy = (int)(sy * 16.f) + gs_offset_y;
 	iz = (int)(z_k1 * q - z_k2);
 	iz = iz < 1 ? 1 : (iz > 65534 ? 65534 : iz);
-	o->m.xyz2 = GS_SETREG_XYZ2(ix & 0xFFFF, iy & 0xFFFF, iz);
+	o->m.xyz2 = GS_SETREG_XYZ2(ix & 0xFFFF, iy & 0xFFFF, iz) | (fog ? fog_bits(pv[2]) : (u64)255 << 56);
 	memcpy(&qbits, &q, 4);
 	o->m.rgbaq = (u64)rgb32 | ((u64)qbits << 32);
 	s = u * q; t = v * q;
@@ -1046,7 +1176,7 @@ static inline void project_cvert(const cvert *v, mvert *o, int tex)
 	float pv[3] = { v->p[0], v->p[1], v->p[2] < z_near ? z_near : v->p[2] };
 	unsigned rgb32 = (unsigned)(v->a[0] + 0.5f) | ((unsigned)(v->a[1] + 0.5f) << 8) | ((unsigned)(v->a[2] + 0.5f) << 16) | (0x80u << 24);
 
-	fill_vertex(o, pv, rgb32, v->a[3], v->a[4], v->a[5], v->a[6], detail_scale[tex], 1);
+	fill_vertex(o, pv, rgb32, v->a[3], v->a[4], v->a[5], v->a[6], detail_scale[tex], 1, tex != MAP_SKY_TEXTURE);
 }
 
 static inline void map_vertex(int i, int tex, const xform *view)
@@ -1071,9 +1201,9 @@ static inline void map_vertex(int i, int tex, const xform *view)
 			if (code) return;
 			o->x = sx; o->y = sy;
 			iz = iz < 1 ? 1 : (iz > 65535 ? 65535 : iz);
-			o->m.xyz2 = ((u64)(((int *)vu_out)[4] & 0xFFFF)) | ((u64)(((int *)vu_out)[5] & 0xFFFF) << 16) | ((u64)iz << 32);
+			o->m.xyz2 = ((u64)(((int *)vu_out)[4] & 0xFFFF)) | ((u64)(((int *)vu_out)[5] & 0xFFFF) << 16) | ((u64)iz << 32) | fog_bits(pv[2]);
 			o->m.rgbaq = (u64)map_rgb32[i] | ((u64)qbits << 32);
-			if (tex < MAP_TEXTURES && map_reflection_of[tex].cube >= 0) o->m.refl = map_reflect(i, tex);
+			if (tex < MAP_TEXTURES && map_reflection_of[tex].cube >= 0) o->m.refl = map_reflect(i, tex, pv[2]);
 		}
 #ifdef PROFILE
 		prof_map_vertices++;
@@ -1087,7 +1217,7 @@ static inline void map_vertex(int i, int tex, const xform *view)
 #endif
 	map_stamp[i] = map_frame;
 	if (pv[2] < z_near) { map_code[i] = 1; return; }
-	map_code[i] = (unsigned char)fill_vertex(o, pv, map_rgb32[i], map_uv[i * 2], map_uv[i * 2 + 1], map_lmuv[i * 2], map_lmuv[i * 2 + 1], detail_scale[tex], 0);
+	map_code[i] = (unsigned char)fill_vertex(o, pv, map_rgb32[i], map_uv[i * 2], map_uv[i * 2 + 1], map_lmuv[i * 2], map_lmuv[i * 2 + 1], detail_scale[tex], 0, tex != MAP_SKY_TEXTURE);
 #ifdef PROFILE
 	prof_map_vertices++;
 #endif
@@ -1202,6 +1332,46 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 #endif
 	}
 	PROF_MARK(P_MAPT);
+#ifndef NO_FOG
+	fog_color_setup(gs);
+#endif
+#ifdef MIP_AUDIT
+	for (sp = 0; sp < MAP_SPANS; sp++)
+	{
+		int tex = map_spans[sp * 6], d;
+		float zmin = 1e9f, lz;
+
+		if (tex < 0 || !span_verts[sp]) continue;
+		for (i = 0; i < span_verts[sp]; i++)
+		{
+			const u64 *rec = (const u64 *)&map_out[span_first[sp] + i];
+			u32 qbits = (u32)(rec[6] >> 32);
+			float q;
+
+			memcpy(&q, &qbits, 4);
+			if (q > 0.f && 1.f / q < zmin) zmin = 1.f / q;
+		}
+		if (zmin > 1e8f) continue;
+		lz = log2f(zmin);
+		audit_drawn[tex]++;
+		if (lz + lod_k_base[tex] / 16.f < audit_lod[0][tex]) audit_lod[0][tex] = lz + lod_k_base[tex] / 16.f;
+		for (d = 0; d < 2; d++)
+			if (map_detail_of[tex].detail[d] >= 0)
+			{
+				float l = lz + lod_k_detail[tex][d] / 16.f;
+
+				if (l < audit_lod[1 + d][tex]) audit_lod[1 + d][tex] = l;
+				if (l < audit_detail_lod[map_detail_of[tex].detail[d]]) audit_detail_lod[map_detail_of[tex].detail[d]] = l;
+			}
+		if (map_detail_of[tex].detail[2] >= 0)
+		{
+			float l = lz + lod_k_bump[tex] / 16.f;
+
+			if (l < audit_lod[3][tex]) audit_lod[3][tex] = l;
+			if (l < audit_detail_lod[map_detail_of[tex].detail[2]]) audit_detail_lod[map_detail_of[tex].detail[2]] = l;
+		}
+	}
+#endif
 	/* each span's base map lit with the lightmap's hue, then its detail maps multiplied in */
 	for (sp = 0; sp < MAP_SPANS; sp++)
 	{
@@ -1209,7 +1379,11 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 		const mapv *v = &map_out[span_first[sp]];
 
 		if (!span_verts[sp]) continue;
+#if !defined(NO_FOG) && !defined(FOG_EXACT_PASS)
+		gs->PrimFogEnable = GS_SETTING_ON;                   /* the base pass is fogged by the GS: F rides in each vertex's XYZF2 */
+#endif
 		send_map_pass(gs, tex < 0 ? NULL : &map_tex[tex], PASS_BASE, tex < 0 ? 0 : lod_k_base[tex], v, span_verts[sp]);
+		gs->PrimFogEnable = GS_SETTING_OFF;
 #ifndef NO_DETAIL_PASS
 		if (tex >= 0)
 		{
@@ -1251,6 +1425,9 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 	}
 	map_blend_end(gs);
 #endif
+#ifdef FOG_EXACT_PASS
+	fog_pass(gs);
+#endif
 	set_clamp_repeat(gs);                                        /* the Chief's draws expect the repeat */
 	set_test_normal(gs);
 }
@@ -1282,7 +1459,7 @@ static void map_lod_setup(void)
 	{
 		float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
 
-		vu_const[0].v[0] = focal; vu_const[0].v[1] = -focal; vu_const[0].v[2] = vu_const[0].v[3] = 0.f;
+		vu_const[0].v[0] = focal_x; vu_const[0].v[1] = -focal; vu_const[0].v[2] = vu_const[0].v[3] = 0.f;
 		vu_const[1].v[0] = screen_cx + ox; vu_const[1].v[1] = screen_cy + oy; vu_const[1].v[2] = vu_const[1].v[3] = 0.f;
 		for (i = 0; i < 4; i++) { vu_const[2].v[i] = z_k1; vu_const[3].v[i] = z_k2; }
 		vu_band_x0 = clip_x_min + ox; vu_band_x1 = clip_x_max + ox; vu_band_y0 = clip_y_min + oy; vu_band_y1 = clip_y_max + oy;
@@ -1526,6 +1703,19 @@ static void cached_pose(int frame, const xform *view)
 	const int visor_first = CHIEF_VERTS - 69, full = !spec_primed;
 	int i, k = spec_phase;
 
+#ifdef CHIEF_VU1                     /* VU1 draws the armour and the rifle (and keeps their specular colours): the visor and the display are left */
+	(void)k; (void)full;
+	for (i = visor_first; i < CHIEF_VERTS; i++)
+	{
+		svert *o = &chief_v[i];
+
+		view_project(&chief_wp[frame][i], 0.f, view, o);
+		o->rgbaq = visor_color(chief_wn[frame][i].v, chief_wp[frame][i].v, visor_spec[i - visor_first]);
+	}
+	PROF_MARK(P_SKIN);
+	for (i = 0; i < DISPLAY_VERTS; i++) view_project(&display_wp[frame][i], DISPLAY_NUDGE, view, &display_v[i]);
+	return;
+#endif
 	for (i = 0; i < CHIEF_VERTS; i++)
 	{
 		svert *o = &chief_v[i];
@@ -1557,6 +1747,342 @@ static void cached_pose(int frame, const xform *view)
 	spec_primed = 1;
 	if (++spec_phase == SPEC_SPREAD) spec_phase = 0;
 }
+
+#ifdef CHIEF_VU1
+/* ---------- the Chief's textured passes on VU1 ----------
+   -DCHIEF_VU1 (make CHIEF_VU1=1) draws the armour and the rifle, each its base map and then its specular mask added over it, with a
+   VU1 microprogram (chief_vu1.vsm) instead of the EE: what the EE did a frame for them (projecting 3,000 vertices, culling, building
+   four REGLIST packets, 3.5 ms) is now a few matrices and the specular colours of a quarter of the vertices. His animation is cached
+   (every vertex's world position and diffuse colour for each of the 20 frames), so everything the VU1 reads is static except the
+   view matrix and those specular colours, and a frame's whole VIF1 DMA chain (its batches of 12 triangles, each an UNPACK of
+   positions, UVs and both passes' colours and an MSCAL) is built once, at the start. The triangles are listed out, three vertices
+   each (VU1 has no use for a shared vertex), and the program culls the back faces itself.
+   The VU1's draws go down GIF path 1, past gsKit's queue (path 3), so the frame is ordered: the queue's clear goes first and the EE
+   waits for its FINISH; then the VU1 stream, which ends with a FINISH of its own, is started; the EE builds the map meanwhile; the
+   map's queue (gsKit_queue_exec waits for that FINISH, too) goes last, and the Z buffer sorts the two out: nothing the map draws is
+   in front of the Chief, and what it draws behind him fails the depth test. The visor and the ammo display, a few dozen vertices,
+   stay on the EE, drawn with the map. */
+#include <dma.h>
+
+extern u32 ChiefVU1_CodeStart __attribute__((section(".vudata")));
+extern u32 ChiefVU1_CodeEnd __attribute__((section(".vudata")));
+
+#define VU_V 36                          /* vertices (12 triangles) a batch */
+#define VU_T (VU_V / 3)
+/* VU1's data memory, in quadwords, as chief_vu1.vsm has it */
+#define VU_M 0
+#define VU_SCALE 4
+#define VU_TOGGLE 5
+#define VU_PTRS 6
+#define VU_IN_BASE 16
+#define VU_IN_OFFSET 152
+#define VU_IN_POS 3
+#define VU_IN_UV (VU_IN_POS + VU_V)
+#define VU_IN_DIF (VU_IN_UV + VU_V)
+#define VU_IN_SPEC (VU_IN_DIF + VU_V)
+#define VU_O1_SIZE (6 + 3 * VU_V)
+#define VU_O2_SIZE (5 + 3 * VU_V)
+#define VU_O1A 320
+#define VU_O1B (VU_O1A + VU_O1_SIZE)
+#define VU_O2A (VU_O1B + VU_O1_SIZE)
+#define VU_O2B (VU_O2A + VU_O2_SIZE)
+#if VU_IN_SPEC + VU_V + 3 > VU_IN_OFFSET
+#error "a VU1 input buffer outgrows its half of the memory"
+#endif
+
+/* VIF codes and DMA tags */
+#define VIF_NOP 0u
+#define VIF_STCYCL(cl, wl) (0x01000000u | ((wl) << 8) | (cl))
+#define VIF_BASE(a) (0x03000000u | (a))
+#define VIF_OFFSET(a) (0x02000000u | (a))
+#define VIF_FLUSH 0x11000000u
+#define VIF_MSCAL(a) (0x14000000u | (a))
+#define VIF_DIRECT(qwc) (0x50000000u | (qwc))
+#define VIF_MPG(num, a) (0x4A000000u | ((num) << 16) | (a))
+#define VIF_UNPACK_V4_32 0x6C
+#define VIF_UNPACK_V4_8 0x6E
+#define VIF_UNPACK(fmt, num, tops, usn, a) (((u32)(fmt) << 24) | ((u32)(num) << 16) | ((u32)(tops) << 15) | ((u32)(usn) << 14) | (u32)(a))
+enum { DMA_ID_CNT = 1, DMA_ID_NEXT = 2, DMA_ID_REF = 3, DMA_ID_END = 7 };
+
+#define VU_PAD(n) (((n) + VU_V - 1) / VU_V * VU_V)
+#define CHIEF_SLOTS (CHIEF_ARMOR_TRIS * 3)
+#define RIFLE_SLOTS (RIFLE_TRIS * 3)
+
+typedef struct
+{
+	int tris, slots, pad, batches, verts;
+	const unsigned short *tri;       /* the triangle list: three vertex indices each */
+	qvec *pos;                       /* [ANIM_FRAMES][pad] world positions of the listed vertices (w 1) */
+	u32 *dif;                        /* [ANIM_FRAMES][pad] their diffuse colour (RGBA bytes) */
+	qvec *uv;                        /* [pad] base-map UV in texels (u, v, 0, 0) */
+	u32 *spec;                       /* [pad] pass 2's colour: the specular colour of the vertex, kept up to date by the EE */
+	int *slot_first, *slot_list;     /* the slots of each vertex (a vertex is listed once for each triangle that uses it) */
+	qvec hdr_full[3], hdr_last[3];   /* the GIF tags of pass 1's and pass 2's draws and the batch's triangle count */
+	qvec scale;
+	u64 s1[10], s2[8];               /* the GS state each pass starts with (a GIF A+D packet) */
+	const texture *base, *mask;
+	u64 *chain[ANIM_FRAMES];
+} vu_object;
+
+static qvec chief_vu_pos[ANIM_FRAMES][VU_PAD(CHIEF_SLOTS)], rifle_vu_pos[ANIM_FRAMES][VU_PAD(RIFLE_SLOTS)];
+static u32 chief_vu_dif[ANIM_FRAMES][VU_PAD(CHIEF_SLOTS)] __attribute__((aligned(16))), rifle_vu_dif[ANIM_FRAMES][VU_PAD(RIFLE_SLOTS)] __attribute__((aligned(16)));
+static qvec chief_vu_uv[VU_PAD(CHIEF_SLOTS)], rifle_vu_uv[VU_PAD(RIFLE_SLOTS)];
+static u32 chief_vu_spec[VU_PAD(CHIEF_SLOTS)] __attribute__((aligned(16))), rifle_vu_spec[VU_PAD(RIFLE_SLOTS)] __attribute__((aligned(16)));
+static int chief_slot_first[CHIEF_VERTS + 1], chief_slot_list[CHIEF_SLOTS], rifle_slot_first[RIFLE_VERTS + 1], rifle_slot_list[RIFLE_SLOTS];
+static vu_object vu_chief, vu_rifle;
+static int vu_cursor[CHIEF_VERTS];
+static u64 vu_chain_pool[ANIM_FRAMES * (2 * (VU_PAD(CHIEF_SLOTS) + VU_PAD(RIFLE_SLOTS)) / VU_V * 6 + 64) * 2 + 256] __attribute__((aligned(64)));
+static u64 *vu_cp;                                   /* the chain being built */
+static u64 vu_dyn[2][14] __attribute__((aligned(64)));   /* a frame's first packet: a tag, the matrix (4 quadwords), a tag that goes on to the frame's chain */
+static int vu_dyn_toggle;
+static u32 vu_ptrs[12] __attribute__((aligned(16)));
+
+/* a DMA tag carries two VIF codes, sent before its data: an UNPACK or MPG goes second, so that its data follows it directly */
+static inline void vu_tag(int id, int qwc, const void *data, u32 vif0, u32 vif1)
+{
+	vu_cp[0] = (u64)qwc | ((u64)id << 28) | ((u64)((u32)data & 0x0FFFFFFF) << 32);
+	vu_cp[1] = (u64)vif0 | ((u64)vif1 << 32);
+	vu_cp += 2;
+}
+
+static u64 tex0_of(const texture *x, int tcc)       /* what set_prim writes */
+{
+	return GS_SETREG_TEX0(x->t.Vram / 256, x->t.TBW, x->t.PSM, x->tw, x->th, tcc, 0, x->t.VramClut / 256, x->t.ClutPSM, x->t.ClutStorageMode, 0, GS_CLUT_STOREMODE_LOAD);
+}
+
+static u64 tex1_of(const texture *x)
+{
+	return GS_SETREG_TEX1(0, 0, x->t.Filter, x->t.Filter, 0, 0, 0);
+}
+
+/* the object's streams from the cached poses: listed out by triangle, the UVs (in the texels of the base map, clamped as uv_reg does), which
+   slots each vertex has */
+static void vu_object_build(vu_object *o, const unsigned short *tri, int tris, int pad, int verts, const qvec *wp, const u64 *dif, const float *uv, int uv_size,
+                            qvec *pos, u32 *dif_out, qvec *uv_out, u32 *spec, int *slot_first, int *slot_list, const texture *base, const texture *mask)
+{
+	int f, s, v;
+
+	memset(o, 0, sizeof(*o));
+	o->tris = tris; o->slots = tris * 3; o->pad = pad; o->batches = (o->slots + VU_V - 1) / VU_V; o->verts = verts;
+	o->tri = tri; o->pos = pos; o->dif = dif_out; o->uv = uv_out; o->spec = spec; o->slot_first = slot_first; o->slot_list = slot_list;
+	o->base = base; o->mask = mask;
+	for (v = 0; v <= verts; v++) slot_first[v] = 0;
+	for (s = 0; s < o->slots; s++) slot_first[tri[s] + 1]++;
+	for (v = 0; v < verts; v++) slot_first[v + 1] += slot_first[v];
+	for (v = 0; v < verts; v++) vu_cursor[v] = slot_first[v];
+	for (s = 0; s < o->slots; s++) slot_list[vu_cursor[tri[s]]++] = s;
+	for (s = 0; s < pad; s++)
+	{
+		float u = 0.f, w = 0.f;
+
+		if (s < o->slots) { u = uv[tri[s] * 2] * (float)uv_size; w = uv[tri[s] * 2 + 1] * (float)uv_size; }
+		if (u < 0.f) u = 0.f; else if (u > (float)uv_size) u = (float)uv_size;
+		if (w < 0.f) w = 0.f; else if (w > (float)uv_size) w = (float)uv_size;
+		uv_out[s].v[0] = u; uv_out[s].v[1] = w; uv_out[s].v[2] = uv_out[s].v[3] = 0.f;
+	}
+	for (f = 0; f < ANIM_FRAMES; f++)
+		for (s = 0; s < pad; s++)
+		{
+			int sv = s < o->slots ? tri[s] : 0;
+
+			pos[f * pad + s] = wp[f * verts + sv];
+			dif_out[f * pad + s] = s < o->slots ? (u32)dif[f * verts + sv] : 0;     /* the padding after the last vertex must be 0: the VIF reads the rest of a quadword of 8-bit data as a command */
+		}
+	for (s = 0; s < pad; s++) spec[s] = 0;
+}
+
+/* the GIF tags and the GS state of an object's passes, from its two textures */
+static void vu_object_state(vu_object *o, int mask_vs_base_uv_num, int mask_vs_base_uv_den)
+{
+	const u64 prim1 = GS_SETREG_PRIM(GS_PRIM_PRIM_TRIANGLE, 1, 1, 0, 0, 0, 1, 0, 0);
+	const u64 prim2 = GS_SETREG_PRIM(GS_PRIM_PRIM_TRIANGLE, 1, 1, 0, 1, 0, 1, 0, 0);
+	const u64 regs = (u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_XYZ2 << 8);        /* RGBAQ, UV, XYZ2 as PACKED qwords */
+	u64 *h;
+	int k;
+
+	for (k = 0; k < 2; k++)
+	{
+		int tris = k == 0 ? VU_T : (o->slots - (o->batches - 1) * VU_V) / 3;
+
+		h = (u64 *)(k == 0 ? o->hdr_full : o->hdr_last);
+		h[0] = GIF_TAG(0, 1, 1, prim1, GSKIT_GIF_FLG_PACKED, 3); h[1] = regs;       /* NLOOP is the program's to patch */
+		h[2] = GIF_TAG(0, 1, 1, prim2, GSKIT_GIF_FLG_PACKED, 3); h[3] = regs;
+		h[4] = (u64)tris; h[5] = 0;
+	}
+	o->scale.v[0] = (float)mask_vs_base_uv_num / (float)mask_vs_base_uv_den; o->scale.v[1] = o->scale.v[0]; o->scale.v[2] = o->scale.v[3] = 0.f;
+	o->s1[0] = GIF_TAG(4, 0, 0, 0, GSKIT_GIF_FLG_PACKED, 1); o->s1[1] = GIF_AD;
+	o->s1[2] = tex0_of(o->base, 0); o->s1[3] = GS_TEX0_1;
+	o->s1[4] = tex1_of(o->base);    o->s1[5] = GS_TEX1_1;
+	o->s1[6] = GS_SETREG_CLAMP(0, 0, 0, 0, 0, 0); o->s1[7] = GS_CLAMP_1;
+	o->s1[8] = GS_SETREG_TEST(0, 1, 0, 0, 0, 0, 1, 2); o->s1[9] = GS_TEST_1;
+	o->s2[0] = GIF_TAG(3, 0, 0, 0, GSKIT_GIF_FLG_PACKED, 1); o->s2[1] = GIF_AD;
+	o->s2[2] = tex0_of(o->mask, 1); o->s2[3] = GS_TEX0_1;
+	o->s2[4] = tex1_of(o->mask);    o->s2[5] = GS_TEX1_1;
+	o->s2[6] = GS_SETREG_ALPHA(0, 2, 2, 1, 0x80); o->s2[7] = GS_ALPHA_1;
+}
+
+/* one object's part of a frame's chain: the output state (once the previous object's draws are done with the output buffers), and
+   a batch a time: the three-quadword header, positions, UVs and the two colour lists into the half of the input memory VU1 is not
+   reading, then the microprogram */
+static void vu_chain_object(const vu_object *o, int f)
+{
+	int b;
+
+	vu_tag(DMA_ID_CNT, 0, 0, VIF_FLUSH, VIF_NOP);
+	vu_tag(DMA_ID_REF, 1, &o->scale, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 1, 0, 0, VU_SCALE));
+	vu_tag(DMA_ID_REF, 5, o->s1, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 5, 0, 0, VU_O1A));
+	vu_tag(DMA_ID_REF, 5, o->s1, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 5, 0, 0, VU_O1B));
+	vu_tag(DMA_ID_REF, 4, o->s2, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 4, 0, 0, VU_O2A));
+	vu_tag(DMA_ID_REF, 4, o->s2, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 4, 0, 0, VU_O2B));
+	for (b = 0; b < o->batches; b++)
+	{
+		int so = b * VU_V, v = o->slots - so < VU_V ? o->slots - so : VU_V, last = b == o->batches - 1;
+
+		vu_tag(DMA_ID_REF, 3, last ? o->hdr_last : o->hdr_full, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 3, 1, 0, 0));
+		vu_tag(DMA_ID_REF, v, &o->pos[f * o->pad + so], VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, v, 1, 0, VU_IN_POS));
+		vu_tag(DMA_ID_REF, v, &o->uv[so], VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, v, 1, 0, VU_IN_UV));
+		vu_tag(DMA_ID_REF, (v + 3) / 4, &o->dif[f * o->pad + so], VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_8, v, 1, 1, VU_IN_DIF));
+		vu_tag(DMA_ID_REF, (v + 3) / 4, &o->spec[so], VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_8, v, 1, 1, VU_IN_SPEC));
+		vu_tag(DMA_ID_CNT, 0, 0, VIF_MSCAL(0), VIF_NOP);
+	}
+}
+
+static void vu_wait_vif1(void)
+{
+	dma_channel_wait(DMA_CHANNEL_VIF1, 0);
+}
+
+static void chief_vu1_init(void)
+{
+	static u64 init_chain[16 * 2 + 8] __attribute__((aligned(64)));
+	const u32 *code = &ChiefVU1_CodeStart;
+	int f, n = (int)(&ChiefVU1_CodeEnd - &ChiefVU1_CodeStart) / 2, off;     /* instructions: two words each */
+
+	/* the streams (the poses are cached): the chief's armour triangles, the rifle's */
+	vu_object_build(&vu_chief, &chief_tri[CHIEF_ARMOR_FIRST_TRI * 3], CHIEF_ARMOR_TRIS, VU_PAD(CHIEF_SLOTS), CHIEF_VERTS,
+		&chief_wp[0][0], &chief_dif[0][0], chief_uv, CHIEF_TEX_SIZE, &chief_vu_pos[0][0], &chief_vu_dif[0][0], chief_vu_uv, chief_vu_spec,
+		chief_slot_first, chief_slot_list, &chief_tex, &mask_tex);
+	vu_object_build(&vu_rifle, rifle_tri, RIFLE_TRIS, VU_PAD(RIFLE_SLOTS), RIFLE_VERTS,
+		&rifle_wp[0][0], &rifle_dif[0][0], rifle_uv, RIFLE_TEX_SIZE, &rifle_vu_pos[0][0], &rifle_vu_dif[0][0], rifle_vu_uv, rifle_vu_spec,
+		rifle_slot_first, rifle_slot_list, &rifle_tex, &rifle_mask_tex);
+	vu_object_state(&vu_chief, MASK_TEX_SIZE, CHIEF_TEX_SIZE);
+	vu_object_state(&vu_rifle, RIFLE_MASK_SIZE, RIFLE_TEX_SIZE);
+	/* the frames' chains */
+	vu_cp = vu_chain_pool;
+	for (f = 0; f < ANIM_FRAMES; f++)
+	{
+		u64 *start = vu_cp;
+
+		vu_chief.chain[f] = start;
+		vu_chain_object(&vu_chief, f);
+		vu_chain_object(&vu_rifle, f);
+		vu_tag(DMA_ID_CNT, 2, 0, VIF_FLUSH, VIF_DIRECT(2));          /* the GS's FINISH, by path 2 once path 1 is quiet */
+		vu_cp[0] = GIF_TAG(1, 1, 0, 0, GSKIT_GIF_FLG_PACKED, 1); vu_cp[1] = GIF_AD; vu_cp[2] = 0; vu_cp[3] = GS_FINISH; vu_cp += 4;
+		vu_tag(DMA_ID_END, 0, 0, VIF_NOP, VIF_NOP);
+		if ((vu_cp - vu_chain_pool) * 8 > (int)sizeof(vu_chain_pool)) { printf("VU1: the chain pool is too small\n"); for (;;) ; }
+	}
+	/* the program, the double buffer and the fixed words of VU1's memory */
+	dma_channel_initialize(DMA_CHANNEL_VIF1, NULL, 0);
+	dma_channel_fast_waits(DMA_CHANNEL_VIF1);
+	vu_ptrs[0] = vu_ptrs[1] = vu_ptrs[2] = vu_ptrs[3] = 0;
+	vu_ptrs[4] = VU_O1A; vu_ptrs[5] = VU_O2A; vu_ptrs[6] = vu_ptrs[7] = 0;
+	vu_ptrs[8] = VU_O1B; vu_ptrs[9] = VU_O2B; vu_ptrs[10] = vu_ptrs[11] = 0;
+	vu_cp = init_chain;
+	vu_tag(DMA_ID_CNT, 0, 0, VIF_STCYCL(1, 1), VIF_BASE(VU_IN_BASE));
+	vu_tag(DMA_ID_CNT, 0, 0, VIF_OFFSET(VU_IN_OFFSET), VIF_NOP);
+	for (off = 0; off < n; off += 256)
+	{
+		int chunk = n - off < 256 ? n - off : 256;
+
+		vu_tag(DMA_ID_REF, chunk / 2, code + off * 2, VIF_NOP, VIF_MPG(chunk & 255, off));
+	}
+	vu_tag(DMA_ID_REF, 3, vu_ptrs, VIF_NOP, VIF_UNPACK(VIF_UNPACK_V4_32, 3, 0, 0, VU_TOGGLE));
+	vu_tag(DMA_ID_END, 0, 0, VIF_NOP, VIF_NOP);
+	FlushCache(0);
+	dma_channel_send_chain(DMA_CHANNEL_VIF1, init_chain, 0, DMA_FLAG_TRANSFERTAG, 0);
+	vu_wait_vif1();
+	printf("VU1: microprogram %d instructions, %d + %d batches of %d triangles a frame\n", n, vu_chief.batches, vu_rifle.batches, VU_T);
+}
+
+/* world to screen: view and projection as one matrix (p * M, rows for x, y, z and 1): X/W and Y/W are pixels with the GS's origin, Z/W the
+   16-bit depth, W the depth in the view, as vu0_world_to_screen has them */
+static void vu_matrix(const xform *view, qvec *m)
+{
+	float cxo = screen_cx + gs_offset_x / 16.f, cyo = screen_cy + gs_offset_y / 16.f;
+	int i;
+
+	for (i = 0; i < 3; i++)
+	{
+		m[i].v[0] = focal_x * view->r[i][0] + cxo * view->r[i][2];
+		m[i].v[1] = -focal * view->r[i][1] + cyo * view->r[i][2];
+		m[i].v[2] = -z_k2 * view->r[i][2];
+		m[i].v[3] = view->r[i][2];
+	}
+	m[3].v[0] = focal_x * view->t[0] + cxo * view->t[2];
+	m[3].v[1] = -focal * view->t[1] + cyo * view->t[2];
+	m[3].v[2] = z_k1 - z_k2 * view->t[2];
+	m[3].v[3] = view->t[2];
+}
+
+/* the specular colours for this frame, on the schedule cached_pose has (a quarter of the vertices a frame), written to every slot of a vertex */
+static void vu_spec_update(int frame)
+{
+	const int visor_first = CHIEF_VERTS - 69, full = !spec_primed;
+	int i, j, k = spec_phase;
+
+	for (i = 0; i < CHIEF_VERTS; i++)
+	{
+		if (i < visor_first && (k == 0 || full))
+		{
+			u64 sp = specular_rgbaq(armor_cube, chief_wn[frame][i].v, chief_wp[frame][i].v, chief_ls[frame][i].v);
+#ifdef NO_SPECULAR_PASS
+			sp = 0;
+#endif
+			chief_spec_rgbaq[i] = sp;
+			for (j = chief_slot_first[i]; j < chief_slot_first[i + 1]; j++) chief_vu_spec[chief_slot_list[j]] = (u32)sp;
+		}
+		if (++k == SPEC_SPREAD) k = 0;
+	}
+	for (i = 0; i < RIFLE_VERTS; i++)
+	{
+		if (k == 0 || full)
+		{
+			u64 sp = specular_rgbaq(i < RIFLE_GRIP_VERTS ? rifle_grip_cube : rifle_gun_cube, rifle_wn[frame][i].v, rifle_wp[frame][i].v, rifle_ls[frame][i].v);
+#ifdef NO_SPECULAR_PASS
+			sp = 0;
+#endif
+			rifle_spec_rgbaq[i] = sp;
+			for (j = rifle_slot_first[i]; j < rifle_slot_first[i + 1]; j++) rifle_vu_spec[rifle_slot_list[j]] = (u32)sp;
+		}
+		if (++k == SPEC_SPREAD) k = 0;
+	}
+	spec_primed = 1;
+	if (++spec_phase == SPEC_SPREAD) spec_phase = 0;
+	SyncDCache(chief_vu_spec, chief_vu_spec + VU_PAD(CHIEF_SLOTS));
+	SyncDCache(rifle_vu_spec, rifle_vu_spec + VU_PAD(RIFLE_SLOTS));
+}
+
+/* the start of a frame: the clear goes out, the VU1 stream is started once it is done (see above) */
+static void chief_vu1_kick(GSGLOBAL *gs, int frame, const xform *view)
+{
+	qvec m[4];
+	u64 *d = vu_dyn[vu_dyn_toggle ^= 1];
+
+	vu_matrix(view, m);
+	d[0] = 4 | ((u64)DMA_ID_CNT << 28);                                                           /* tag: the matrix follows ... */
+	d[1] = (u64)VIF_STCYCL(1, 1) | ((u64)VIF_UNPACK(VIF_UNPACK_V4_32, 4, 0, 0, VU_M) << 32);       /* ... as an UNPACK */
+	memcpy(&d[2], m, sizeof(m));
+	d[10] = (u64)DMA_ID_NEXT << 28 | ((u64)((u32)vu_chief.chain[frame] & 0x0FFFFFFF) << 32);      /* then on to the frame's chain */
+	d[11] = 0;
+	SyncDCache(d, d + 12);
+	gsKit_queue_exec(gs);                       /* the clear */
+	vu_spec_update(frame);
+	gsKit_finish();                             /* the clear is done: the VU1 draws may follow */
+	GS_SETREG_CSR_FINISH(1);
+	vu_wait_vif1();
+	dma_channel_send_chain(DMA_CHANNEL_VIF1, d, 0, DMA_FLAG_TRANSFERTAG, 0);
+}
+#endif
 #endif
 
 /* the camera's axes for an eye and a target (z up) */
@@ -1645,6 +2171,10 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 
 #ifndef NO_MAP
 	gsKit_clear(gs, GS_SETREG_RGBAQ(0x70, 0x9c, 0xd0, 0x00, 0x00));    /* the sky */
+#ifdef CHIEF_VU1
+	chief_vu1_kick(gs, frame, &view);                                  /* the clear goes out, then VU1 draws the Chief while the EE builds the map */
+	PROF_MARK(P_VU1);
+#endif
 	PROF_MARK(P_SETUP);
 #ifndef NO_VU0
 	draw_map(gs, &view, &view4);
@@ -1716,21 +2246,25 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	PROF_MARK(P_RIFLE);
 #endif
 
-	draw_textured(gs, &chief_tex, chief_v, NULL, chief_tri, CHIEF_ARMOR_FIRST_TRI, CHIEF_ARMOR_TRIS);
+#ifndef CHIEF_VU1                    /* (VU1 has drawn the armour and the rifle with their masks, before the map) */
+	draw_textured(gs, &chief_tex, chief_v, NULL, NULL, chief_tri, CHIEF_ARMOR_FIRST_TRI, CHIEF_ARMOR_TRIS);
+#endif
 	draw_flat_gouraud(gs, chief_v, chief_tri, CHIEF_VISOR_FIRST_TRI, CHIEF_VISOR_TRIS);
 	/* the armour's reflection and highlight: its triangles again, the mask texture added on */
-#ifndef NO_SPECULAR_PASS
+#if !defined(NO_SPECULAR_PASS) && !defined(CHIEF_VU1)
 	gs->PrimAlphaEnable = GS_SETTING_ON;
 	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 2, 2, 1, 0x80), 0);
-	draw_textured(gs, &mask_tex, chief_v, chief_spec_rgbaq, chief_tri, CHIEF_ARMOR_FIRST_TRI, CHIEF_ARMOR_TRIS);
+	draw_textured(gs, &mask_tex, chief_v, chief_spec_rgbaq, chief_mask_uv, chief_tri, CHIEF_ARMOR_FIRST_TRI, CHIEF_ARMOR_TRIS);
 	gs->PrimAlphaEnable = GS_SETTING_OFF;
 #endif
-	draw_textured(gs, &rifle_tex, rifle_v, NULL, rifle_tri, 0, RIFLE_TRIS);
-	draw_textured(gs, &display_tex, display_v, NULL, display_tri, 0, DISPLAY_TRIS);
-#ifndef NO_SPECULAR_PASS
+#ifndef CHIEF_VU1
+	draw_textured(gs, &rifle_tex, rifle_v, NULL, NULL, rifle_tri, 0, RIFLE_TRIS);
+#endif
+	draw_textured(gs, &display_tex, display_v, NULL, NULL, display_tri, 0, DISPLAY_TRIS);
+#if !defined(NO_SPECULAR_PASS) && !defined(CHIEF_VU1)
 	gs->PrimAlphaEnable = GS_SETTING_ON;
 	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 2, 2, 1, 0x80), 0);
-	draw_textured(gs, &rifle_mask_tex, rifle_v, rifle_spec_rgbaq, rifle_tri, 0, RIFLE_TRIS);
+	draw_textured(gs, &rifle_mask_tex, rifle_v, rifle_spec_rgbaq, NULL, rifle_tri, 0, RIFLE_TRIS);
 	gs->PrimAlphaEnable = GS_SETTING_OFF;
 #endif
 	PROF_MARK(P_SUBMIT);
@@ -1748,6 +2282,7 @@ int main(void)
 	gs = gsKit_init_global_custom(6 * 1024 * 1024, 16 * 1024);   /* a frame of the map's packets (four passes of a third of its triangles) takes about 2.5 MB */
 	gs->Mode = GS_MODE_NTSC;        /* 60 Hz whatever the console's region: the scene is timed for it */
 	gs->Height = 448;               /* gsKit sized the buffers for the console's own mode (PAL: 512 lines) before this */
+	gs->Width = SCREEN_WIDTH;       /* and its magnification (MagH = DW / Width - 1) follows the width */
 #if defined(FB16) || !defined(NO_MAP)
 	gs->PSM = GS_PSM_CT16S;         /* 16-bit frame buffers: 1.2 MB less video memory, for the map's textures */
 	gs->Dithering = GS_SETTING_ON;  /* hides the banding that 5 bits a channel would show */
@@ -1765,7 +2300,7 @@ int main(void)
 	gs_offset_y = gs->OffsetY;
 
 	FlushCache(0);
-	/* the masks are the size of the base maps: the second pass reuses the first's UV registers */
+	/* the rifle's mask is the size of its base map (the second pass reuses its UV registers), the Chief's has its own UVs */
 	texture_setup(gs, &chief_tex, CHIEF_TEX_SIZE, GS_PSM_T8, chief_tex_pixels, chief_tex_clut);
 	texture_setup(gs, &rifle_tex, RIFLE_TEX_SIZE, GS_PSM_T8, rifle_tex_pixels, rifle_tex_clut);
 	texture_setup(gs, &mask_tex, MASK_TEX_SIZE, GS_PSM_T4, mask_tex_pixels, mask_tex_clut);
@@ -1799,6 +2334,9 @@ int main(void)
 	}
 #endif
 
+	for (i = 0; i < CHIEF_VERTS; i++) chief_mask_uv[i] = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], (float)MASK_TEX_SIZE);
+	/* the rifle's mask has its base map's size (RIFLE_MASK_SIZE == RIFLE_TEX_SIZE): the second pass shares its UVs */
+
 	/* lights, and the camera: in front of the model (+x), a little above its middle, looking at the
 	   centre (the map scene moves the camera every frame) */
 	{
@@ -1821,17 +2359,40 @@ int main(void)
 	z_near = CAMERA_DISTANCE - MODEL_RADIUS * 1.5f;
 	z_far = CAMERA_DISTANCE + MODEL_RADIUS * 2.5f;
 #endif
+	focal_x = focal * (float)gs->Width / 640.f;        /* the display is 640 wide whatever the buffer's width */
 	z_k1 = 65535.f * z_far * z_near / (z_far - z_near);
 	z_k2 = 65535.f * z_near / (z_far - z_near);
 #ifndef NO_MAP
 	clip_setup(gs);
 	placement_setup();
 	pose_cache_build();
+#ifdef CHIEF_VU1
+	chief_vu1_init();
+#endif
 	map_lod_setup();
 #endif
 
 	refresh = gs->Mode == GS_MODE_PAL ? 50.f : 60.f;
 	gsKit_add_vsync_handler(vsync_handler);
+#ifdef MIP_AUDIT                     /* the whole orbit in half-degree steps, then the report */
+	{
+		int f, t, d;
+
+		for (t = 0; t < MAP_TEXTURES; t++) for (d = 0; d < 4; d++) audit_lod[d][t] = AUDIT_BIG;
+		for (d = 0; d < MAP_DETAILS; d++) audit_detail_lod[d] = AUDIT_BIG;
+		for (f = 0; f < 720; f++)
+		{
+			render_frame(gs, f * (ORBIT_SECONDS / 720.f));
+			gsKit_queue_exec(gs);
+			gsKit_sync_flip(gs);
+		}
+		for (t = 0; t < MAP_TEXTURES; t++)
+			printf("MIPAUDIT tex %d drawn %u base %.2f d0 %.2f d1 %.2f bump %.2f\n", t, audit_drawn[t], audit_lod[0][t], audit_lod[1][t], audit_lod[2][t], audit_lod[3][t]);
+		for (d = 0; d < MAP_DETAILS; d++) printf("MIPAUDIT detail %d %.2f\n", d, audit_detail_lod[d]);
+		printf("MIPAUDIT done\n");
+		for (;;) ;
+	}
+#endif
 
 	for (;;)
 	{
@@ -1844,6 +2405,12 @@ int main(void)
 #ifdef DEBUG_SECONDS                 /* a still frame, for comparing builds */
 		render_frame(gs, DEBUG_SECONDS);
 		(void)refresh;
+#elif defined(PROFILE)             /* the orbit steps by frame, not by the clock, so that a dropped frame does not move the camera and builds see the same views */
+		{
+			static int frame_no;
+
+			render_frame(gs, frame_no++ / refresh);
+		}
 #else
 		render_frame(gs, vsync_count / refresh);
 #endif

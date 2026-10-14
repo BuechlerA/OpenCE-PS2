@@ -1,0 +1,151 @@
+; The Chief's two textured passes on VU1: the base map, then the specular mask added over it (the VU1 path of the Master Chief sample,
+; -DCHIEF_VU1, see main.c). Per batch of up to 12 triangles (36 vertices) it transforms the world positions, culls the back faces,
+; and writes what the GS draws as two PACKED GIF packets, one XGKICK each.
+;
+; Memory (quadwords of VU1's data memory; main.c has the same numbers):
+;   0..3    the matrix, world to screen: p * M gives (X, Y, Z, W) with X/W, Y/W the pixel (the GS's origin added) and Z/W the 16-bit depth
+;   4       (su, sv): the scale from the base map's UV to the mask's
+;   5       word x: which pair of output buffers is next (0 or 1)
+;   6, 7    word x: output buffer 1's address, word y: output buffer 2's address, for pair 0 (6) and pair 1 (7)
+;   16..    the double-buffered input, 152 quadwords a buffer (VIF1's BASE 16, OFFSET 152), as xtop gives it:
+;           +0 the GIF tag of pass 1's draw, +1 pass 2's, +2 (triangles in the batch, 0, 0, 0),
+;           +3 world positions (x, y, z, 1), +39 base-map UV in texels (u, v, 0, 0), +75 pass 1's colours, +111 pass 2's
+;           (RGBA a word each, from bytes), 36 of each
+;   320..   the output: buffer 1 (114 quadwords): pass 1's state (a GIF A+D tag and four register writes), then its draw tag at +5
+;           and its vertices from +6 (RGBAQ, UV, XYZ2 each); buffer 2 (113): pass 2's state (a tag and three writes), draw tag at +4,
+;           vertices from +5. Pair 0 at 320 and 548, pair 1 at 434 and 661. The state is put there once, by the host.
+;
+; A GS triangle list that loses a triangle to ADC bits breaks its vertex count, so the visible triangles are written one after another
+; and the draw tags' NLOOP is patched at the end. Registers: VF01-04 the matrix, VF05 the UV scale, VF06-08 the positions, VF09-11 the
+; screen coordinates (x, y in pixels, z the depth), VI02 the input buffer, VI03 positions, VI11 UVs, VI12 pass 1 colours, VI13 pass 2
+; colours, VI05/VI06 the output cursors, VI07 3 * visible triangles, VI08/VI09 the output buffers, VI04 triangles left.
+		.vu
+		.align 4
+		.global	ChiefVU1_CodeStart
+		.global	ChiefVU1_CodeEnd
+ChiefVU1_CodeStart:
+         NOP                                                        lq            VF01,0(VI00)
+         NOP                                                        lq            VF02,1(VI00)
+         NOP                                                        lq            VF03,2(VI00)
+         NOP                                                        lq            VF04,3(VI00)
+         NOP                                                        lq            VF05,4(VI00)
+         NOP                                                        xtop          VI02
+         NOP                                                        ilw.x         VI10,5(VI00)
+         NOP                                                        iaddiu        VI01,VI00,1
+         NOP                                                        iaddiu        VI15,VI00,0x0080
+         NOP                                                        ilw.x         VI08,6(VI10)
+         NOP                                                        ilw.y         VI09,6(VI10)
+         NOP                                                        isub          VI14,VI01,VI10
+         NOP                                                        isw.x         VI14,5(VI00)
+         NOP                                                        ilw.x         VI04,2(VI02)
+         NOP                                                        lq            VF06,0(VI02)
+         NOP                                                        lq            VF07,1(VI02)
+         NOP                                                        sq            VF06,5(VI08)
+         NOP                                                        sq            VF07,4(VI09)
+         NOP                                                        iaddiu        VI05,VI08,6
+         NOP                                                        iaddiu        VI06,VI09,5
+         NOP                                                        iaddiu        VI03,VI02,3
+         NOP                                                        iaddiu        VI11,VI02,39
+         NOP                                                        iaddiu        VI12,VI02,75
+         NOP                                                        iaddiu        VI13,VI02,111
+         NOP                                                        iaddiu        VI07,VI00,0
+         NOP                                                        NOP
+triLoop:
+         NOP                                                        lq            VF06,0(VI03)
+         NOP                                                        lq            VF07,1(VI03)
+         NOP                                                        lq            VF08,2(VI03)
+         mulax         ACC,VF01,VF06x                               NOP
+         madday        ACC,VF02,VF06y                               NOP
+         maddaz        ACC,VF03,VF06z                               NOP
+         maddw         VF09,VF04,VF06w                              NOP
+         mulax         ACC,VF01,VF07x                               NOP
+         madday        ACC,VF02,VF07y                               NOP
+         maddaz        ACC,VF03,VF07z                               NOP
+         maddw         VF10,VF04,VF07w                              NOP
+         mulax         ACC,VF01,VF08x                               NOP
+         madday        ACC,VF02,VF08y                               NOP
+         maddaz        ACC,VF03,VF08z                               NOP
+         maddw         VF11,VF04,VF08w                              NOP
+         NOP                                                        div           Q,VF00w,VF09w
+         NOP                                                        waitq
+         mulq.xyz      VF09,VF09,Q                                  div           Q,VF00w,VF10w
+         NOP                                                        waitq
+         mulq.xyz      VF10,VF10,Q                                  div           Q,VF00w,VF11w
+         NOP                                                        waitq
+         mulq.xyz      VF11,VF11,Q                                  NOP
+; the screen-space area of the triangle: (x1 - x0) (y2 - y0) - (x2 - x0) (y1 - y0), negative when it faces the camera (y is down); its sign
+; is x's sign flag in the MAC flags, bit 7 (0x0080: the sign flags are bits 7 to 4, x first), which fmand reads once the msuby has settled
+         sub.xy        VF12,VF10,VF09                               NOP
+         sub.xy        VF13,VF11,VF09                               NOP
+         mulay.x       ACC,VF12,VF13y                               NOP
+         msuby.x       VF14,VF13,VF12y                              NOP
+         NOP                                                        NOP
+         NOP                                                        NOP
+         NOP                                                        NOP
+         NOP                                                        NOP
+         NOP                                                        fmand         VI01,VI15
+         NOP                                                        NOP
+         NOP                                                        ibeq          VI01,VI00,triNext
+         NOP                                                        NOP
+; vertex 0
+         ftoi4.xy      VF16,VF09                                    lq            VF17,0(VI12)
+         ftoi0.z       VF16,VF09                                    lq            VF18,0(VI11)
+         ftoi4.xy      VF20,VF18                                    lq            VF19,0(VI13)
+         mul.xy        VF21,VF18,VF05                               sq            VF17,0(VI05)
+         ftoi4.xy      VF21,VF21                                    sq            VF20,1(VI05)
+         NOP                                                        sq.xyz        VF16,2(VI05)
+         NOP                                                        isw.w         VI00,2(VI05)
+         NOP                                                        sq            VF19,0(VI06)
+         NOP                                                        sq            VF21,1(VI06)
+         NOP                                                        sq.xyz        VF16,2(VI06)
+         NOP                                                        isw.w         VI00,2(VI06)
+; vertex 1
+         ftoi4.xy      VF16,VF10                                    lq            VF17,1(VI12)
+         ftoi0.z       VF16,VF10                                    lq            VF18,1(VI11)
+         ftoi4.xy      VF20,VF18                                    lq            VF19,1(VI13)
+         mul.xy        VF21,VF18,VF05                               sq            VF17,3(VI05)
+         ftoi4.xy      VF21,VF21                                    sq            VF20,4(VI05)
+         NOP                                                        sq.xyz        VF16,5(VI05)
+         NOP                                                        isw.w         VI00,5(VI05)
+         NOP                                                        sq            VF19,3(VI06)
+         NOP                                                        sq            VF21,4(VI06)
+         NOP                                                        sq.xyz        VF16,5(VI06)
+         NOP                                                        isw.w         VI00,5(VI06)
+; vertex 2
+         ftoi4.xy      VF16,VF11                                    lq            VF17,2(VI12)
+         ftoi0.z       VF16,VF11                                    lq            VF18,2(VI11)
+         ftoi4.xy      VF20,VF18                                    lq            VF19,2(VI13)
+         mul.xy        VF21,VF18,VF05                               sq            VF17,6(VI05)
+         ftoi4.xy      VF21,VF21                                    sq            VF20,7(VI05)
+         NOP                                                        sq.xyz        VF16,8(VI05)
+         NOP                                                        isw.w         VI00,8(VI05)
+         NOP                                                        sq            VF19,6(VI06)
+         NOP                                                        sq            VF21,7(VI06)
+         NOP                                                        sq.xyz        VF16,8(VI06)
+         NOP                                                        isw.w         VI00,8(VI06)
+         NOP                                                        iaddiu        VI05,VI05,9
+         NOP                                                        iaddiu        VI06,VI06,9
+         NOP                                                        iaddiu        VI07,VI07,3
+triNext:
+         NOP                                                        iaddiu        VI03,VI03,3
+         NOP                                                        iaddiu        VI11,VI11,3
+         NOP                                                        iaddiu        VI12,VI12,3
+         NOP                                                        iaddiu        VI13,VI13,3
+         NOP                                                        isubiu        VI04,VI04,1
+         NOP                                                        NOP
+         NOP                                                        ibne          VI04,VI00,triLoop
+         NOP                                                        NOP
+; the draw tags' NLOOP (and EOP, bit 15): 3 * the visible triangles; nothing visible, nothing sent
+         NOP                                                        ibeq          VI07,VI00,done
+         NOP                                                        iaddiu        VI14,VI07,0x7fff
+         NOP                                                        iaddiu        VI14,VI14,1
+         NOP                                                        isw.x         VI14,5(VI08)
+         NOP                                                        isw.x         VI14,4(VI09)
+         NOP                                                        NOP
+         NOP                                                        xgkick        VI08
+         NOP                                                        xgkick        VI09
+done:
+         NOP[E]                                                     NOP
+         NOP                                                        NOP
+		.align 4
+ChiefVU1_CodeEnd:

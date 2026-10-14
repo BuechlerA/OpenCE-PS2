@@ -30,7 +30,7 @@
   HALO_MAP (default assets/maps/bloodgulch.map), CHIEF_X, CHIEF_Y, CHIEF_BELOW (the highest ground that
   counts) and LM_SCALE (default 1) in the environment.
 """
-import os, struct, sys
+import json, os, struct, sys
 import numpy as np
 from PIL import Image
 
@@ -59,6 +59,18 @@ EMBOSS_GAIN = float(os.environ.get('EMBOSS_GAIN', 2.4))
 BUMP_SCALE_AT, BUMP_MAP_AT, REFLECTION_CUBE_AT = 0x124, 0x128, 0x324    # in a shader_environment
 CHUNK_CELL = float(os.environ.get('CHUNK_CELL', 12))
 BIG_TRIANGLES = 1000               # a base map under this many triangles is cut to 256 pixels
+
+def load_mip_floor():
+    """the levels each texture never reads in the sample's camera orbit, from tools/mip_audit.py (MIP_FLOOR=0 keeps every level)"""
+    path = os.path.join(HERE, 'mip_floor.json')
+    if os.environ.get('MIP_FLOOR', '1') == '0' or not os.path.exists(path): return {'base': {}, 'detail': {}}
+    with open(path) as f: return json.load(f)
+
+def drop_levels(pixels, w, h, levels, drop):
+    """a chain (its levels one after another, each half the size of the one before) without its top `drop` levels"""
+    assert 0 <= drop < levels, (drop, levels)
+    skip = sum((w >> l) * (h >> l) for l in range(drop))
+    return pixels[skip:], w >> drop, h >> drop, levels - drop
 
 def flat(a): return np.asarray(a).reshape(-1)
 
@@ -216,6 +228,18 @@ def sky_dome(mf):
     flip = (n * P[T].mean(1)).sum(1) > 0                                # facing away from the middle: turn it round
     T = T.copy(); T[flip] = T[flip][:, [0, 2, 1]]
     return P, part['uv'] * np.array(part['scale']), T, img
+
+SKY_FOG_AT = 0x58     # the sky tag's outdoor fog (struct sky_atmospheric_fog): a colour, 8 unused bytes, the maximum density, the start and opaque distances
+
+def sky_fog(mf):
+    """the scenario's first sky's outdoor atmospheric fog: (r, g, b as bytes, maximum density, start distance, opaque distance).
+    The Xbox's vertex shader fogs by the view depth: density * clamp ((z - start) / (opaque - start)), toward the colour"""
+    scenario = [a for (g, n), a in mf.tags.items() if g == b'scnr'][0] - TAG_BASE
+    c, a, _ = struct.unpack_from('<iII', mf.td, scenario + 48)
+    so = mf.tags[(b'sky ', mf.ref(a - TAG_BASE))] - TAG_BASE
+    col = struct.unpack_from('<3f', mf.td, so + SKY_FOG_AT)
+    density, start, opaque = struct.unpack_from('<3f', mf.td, so + SKY_FOG_AT + 0x14)
+    return tuple(int(round(min(max(x, 0.0), 1.0) * 255)) for x in col), density, start, opaque
 
 SCENERY_SKIP = ('floor_arrow', 'doorblinker', 'scenery\\teleporter_shield\\teleporter', 'small beacon')   # markers of the game, not of the place (a beacon is 10 cm across, 470 triangles)
 SUN_DIRECTION = (0.6, -0.5, 0.7)
@@ -389,6 +413,14 @@ def main():
             textures.append(dict(name=name, w=w, h=h, pixels=idx, clut=gs_palette(pal), levels=levels, alpha=0))
         print('  texture %-34s %3dx%-3d (from %dx%d) %5d triangles%s' % (name.split('\\')[-1], w, h, info['w'], info['h'], uses[name], ' (cut out)' if name in alpha_names else ''))
     tex_id = {n: i for i, n in enumerate(names)}
+    mip_floor = load_mip_floor()
+    saved = 0
+    for t in textures:
+        d = mip_floor['base'].get(t['name'].replace('\\', '/'), 0)
+        if d:
+            before = len(t['pixels'])
+            t['pixels'], t['w'], t['h'], t['levels'] = drop_levels(t['pixels'], t['w'], t['h'], t['levels'], d)
+            saved += before - len(t['pixels'])
 
     # the detail maps of each base map's shader: (map id or -1, scale) for the primary and the micro
     detail_names, detail_of, bump_names, cubes, cube_names, refl_of = [], [], [], [], [], []
@@ -423,6 +455,15 @@ def main():
     for n in bump_names:
         details.append(emboss_map(mf, n, DETAIL_SIZE)); detail_names.append(n + ' (emboss)')
     ndetail = len(detail_names) - len(bump_names)
+    detail_size = [DETAIL_SIZE] * len(details)
+    for i, n in enumerate(detail_names):
+        d = mip_floor['detail'].get(n.replace('\\', '/'), 0)
+        if d:
+            before = len(details[i][0])
+            pix, detail_size[i], _h, levels = drop_levels(details[i][0], DETAIL_SIZE, DETAIL_SIZE, details[i][1], d)
+            details[i] = (pix, levels)
+            saved += before - len(pix)
+    if saved: print('  mip_floor.json: %d KB of mip levels the orbit never reads left out' % (saved // 1024))
     detail_of = [[(i if i >= -1 else ndetail + (-2 - i), sc) for i, sc in e] for e in detail_of]
     pages, page_id = [], {}          # lightmap pages in use: grey, padded; the scale from the page's own to the padded UV
 
@@ -560,7 +601,7 @@ def main():
         c.write(cstr_array('map_page%d_pixels' % i, flat(pg['pixels']), 'unsigned char', 64))
     c.write('const map_gray_texture map_details[MAP_DETAILS] = {\n')
     for i, (d, levels) in enumerate(details):
-        c.write('\t{ map_detail%d_pixels, %d, %d, %d },   /* %s */\n' % (i, DETAIL_SIZE, DETAIL_SIZE, levels, detail_names[i].replace('\\', '/')))
+        c.write('\t{ map_detail%d_pixels, %d, %d, %d },   /* %s */\n' % (i, detail_size[i], detail_size[i], levels, detail_names[i].replace('\\', '/')))
     c.write('};\nconst map_gray_texture map_lightmaps[MAP_LIGHTMAPS] = {\n')
     for i, pg in enumerate(pages):
         c.write('\t{ map_page%d_pixels, %d, %d, 1 },\n' % (i, pg['w'], pg['h']))
@@ -582,6 +623,8 @@ def main():
         c.write('\t{ map_tex%d_pixels, map_tex%d_clut, %d, %d, %d, %d },   /* %s */\n' % (i, i, t['w'], t['h'], t['levels'], t['alpha'], t['name'].replace('\\', '/')))
     c.write('};\n')
     c.close()
+    fog = sky_fog(mf)
+    print('  fog: colour %s, maximum density %g from %g to %g units' % (fog[0], fog[1], fog[2], fog[3]))
     h = open(os.path.join(OUT, 'map_assets.h'), 'w')
     h.write('''/* generated by tools/export_map.py; do not edit */
 #ifndef MAP_ASSETS_H
@@ -600,6 +643,12 @@ def main():
 #define MAP_CHIEF_X %rf
 #define MAP_CHIEF_Y %rf
 #define MAP_CHIEF_Z %rf
+#define MAP_FOG_R %d
+#define MAP_FOG_G %d
+#define MAP_FOG_B %d
+#define MAP_FOG_DENSITY %rf
+#define MAP_FOG_START %rf
+#define MAP_FOG_OPAQUE %rf
 typedef struct { const unsigned char *pixels; const unsigned int *clut; int width, height, levels, alpha; } map_texture_data;   /* the mip levels follow one another; alpha: palette entry 255 is cut out */
 typedef struct { const unsigned char *pixels; int width, height, levels; } map_gray_texture;   /* 8-bit grey, its value the alpha of map_gray_clut */
 typedef struct { int detail[3]; float scale[3]; } map_detail_data;                    /* primary and micro detail map and bump (emboss) map of a base map, and their scales */
@@ -621,7 +670,8 @@ extern const signed char map_normals[];       /* x, y, z (x 127) and a pad, for 
 extern const unsigned char *const map_cubes[];   /* the reflected cube maps: six faces of 16x16 RGB */
 extern const map_texture_data map_textures[];
 #endif
-''' % (len(P), len(T), len(textures), nspans, len(lm_order), sky_first_vertex, sky_chunk, nchunks, len(batches) // 3, len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb)))
+''' % (len(P), len(T), len(textures), nspans, len(lm_order), sky_first_vertex, sky_chunk, nchunks, len(batches) // 3, len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb),
+       fog[0][0], fog[0][1], fog[0][2], float(fog[1]), float(fog[2]), float(fog[3])))
     h.close()
     print('wrote', os.path.abspath(OUT))
 

@@ -7,9 +7,11 @@ adjustment, and writes src/assets.c + src/assets.h:
 
   - the Chief's armour and visor meshes, the rifle mesh (positions, normals, UVs, nodes, weights)
   - 20 frames of skinning matrices (one 4x3 per node) and the rifle's matrix per frame
-  - the Chief's colour-changed base map and the rifle's base map, each as an 8-bit palettised
-    256x256 texture (the GS has no DXT; BASE_TEX_SIZE=512 keeps the sources' size), palettes
-    already in the GS's CSM1 order; the two specular masks as 4-bit greys (16 levels, error diffused)
+  - the Chief's colour-changed base map (8-bit palettised, 256x256; the GS has no DXT;
+    BASE_TEX_SIZE=512 keeps the source's size) and the rifle's (128x128), palettes already in the GS's
+    CSM1 order; the two specular masks as 4-bit greys (16 levels, error diffused), 128x128; the rifle's
+    ammo display at 32x32. RIFLE_TEX_SIZE, MASK_TEX_SIZE and DISPLAY_TEX_SIZE set the last three. The
+    ones cut down from a larger source are box filtered
   - the visor's gold reflection cube map (CPU-lit at run time)
 """
 import math, os, struct, sys
@@ -80,7 +82,30 @@ def quantise(rgb01):
     if len(pal) < 256: pal = np.vstack([pal, np.zeros((256 - len(pal), 3), np.uint8)])
     return np.array(q, dtype=np.uint8), pal
 
-BASE_TEX_SIZE = int(os.environ.get('BASE_TEX_SIZE', '256'))   # the Chief's and the rifle's base maps (the sources are 512)
+BASE_TEX_SIZE = int(os.environ.get('BASE_TEX_SIZE', '256'))   # the Chief's base map (the source is 512)
+# The rifle covers about 500 pixels of the 640x448 map scene (the Chief about 5,000): its base map needs a side
+# of about 40 to 80 texels, so 128 is plenty; and the ammo display, 3 pixels, needs 8 or 16.
+RIFLE_TEX_SIZE = int(os.environ.get('RIFLE_TEX_SIZE', '128'))
+MASK_TEX_SIZE = int(os.environ.get('MASK_TEX_SIZE', '128'))    # the Chief's specular mask: it is smooth, so it can be smaller than his base map
+RIFLE_MASK_SIZE = RIFLE_TEX_SIZE                                # the rifle's mask is drawn with the rifle's UVs, so it has its size
+DISPLAY_TEX_SIZE = int(os.environ.get('DISPLAY_TEX_SIZE', '32'))
+
+def grid(n, ss=1):
+    """the texel centres of an n x n texture, ss x ss samples a texel (averaged by box())"""
+    k = n * ss
+    uu = (np.arange(k) + 0.5) / k
+    return np.meshgrid(uu, uu)
+
+def box(a, ss):
+    """the mean of each ss x ss block of a (k, k, ...) array"""
+    if ss == 1: return a
+    k = a.shape[0] // ss
+    return a.reshape((k, ss, k, ss) + a.shape[2:]).mean(axis=(1, 3))
+
+def supersample(n):
+    """samples a texel along a side when a source is cut down: 1 up to 256 (the Chief's base map is cut from 512 by
+    point sampling, as it always was), 4 below, so that a 128 or 32 map is the mean of what it covers"""
+    return 1 if n >= 256 else 4
 
 def chief_texture():
     m = H.MATS[H.M_ARMOR]
@@ -98,15 +123,15 @@ def chief_texture():
 
 def rifle_texture():
     m = H.MATS[H.M_GUN]
-    n = BASE_TEX_SIZE
-    uu = (np.arange(n) + 0.5) / n
-    u, v = np.meshgrid(uu, uu)
-    return quantise(H.sample(m['base'], u, v))
+    n = RIFLE_TEX_SIZE
+    ss = supersample(n)
+    u, v = grid(n, ss)
+    return quantise(box(H.sample(m['base'], u, v), ss))
 
 def grey4(t):
     """t in 0..1 -> 4-bit texels (two per byte, the left one in the low nibble, as the GS's PSMT4 keeps
     them) with a 16-entry grey palette; Floyd-Steinberg keeps the mask's gradients from banding"""
-    im = Image.fromarray(np.round(np.clip(t, 0, 1) * 255).astype(np.uint8), 'L')
+    im = Image.fromarray(np.round(np.clip(t, 0, 1) * 255).astype(np.uint8))
     q = im.quantize(16, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG)
     pal = np.array(q.getpalette()[:48], dtype=np.uint8).reshape(-1, 3)
     if len(pal) < 16: pal = np.vstack([pal, np.zeros((16 - len(pal), 3), np.uint8)])
@@ -118,15 +143,13 @@ def spec_mask(m, n):
     """a part's specular mask (multipurpose red), as the grey the second pass modulates: the shader's
     reflection weight 0.06 + 0.40 m and specular weight 0.15 + 1.1 m are both close to k (0.14 + m),
     so one map, (0.14 + m) / 1.14, serves both; 4-bit, to spare video memory"""
-    uu = (np.arange(n) + 0.5) / n
-    u, v = np.meshgrid(uu, uu)
-    sm = H.sample(m['multi'], u, v)[..., 0]
+    ss = supersample(n)
+    u, v = grid(n, ss)
+    sm = box(H.sample(m['multi'], u, v)[..., 0], ss)
     return grey4((0.14 + sm) / 1.14)
 
-# the masks are the size of the base maps they are drawn with: the second pass reuses the first's UV
-# registers, which are in texels
-MASK_TEX_SIZE = BASE_TEX_SIZE
-RIFLE_MASK_SIZE = BASE_TEX_SIZE
+# A mask's UV registers are in texels of the mask, so the program gives the masked pass its own set when its size
+# differs from the base map's (the Chief's); the rifle's has its base map's size.
 
 def mask_texture(): return spec_mask(H.MATS[H.M_ARMOR], MASK_TEX_SIZE)
 def rifle_mask_texture(): return spec_mask(H.MATS[H.M_GUN], RIFLE_MASK_SIZE)
@@ -138,9 +161,10 @@ def display_texture():
     glow = m['multi'][..., 1:2]
     so = H.TAGS[(b'soso', 'weapons\\assault rifle\\fp\\shaders\\display')] - H.B
     upper = np.array(struct.unpack_from('<3f', H.td, so + 0x84))
-    return quantise(m['base'] + glow * upper * 0.9)
-
-DISPLAY_TEX_SIZE = 256       # its source's size
+    full = m['base'] + glow * upper * 0.9
+    k = full.shape[0] // DISPLAY_TEX_SIZE                 # its source is 256: the mean of each k x k block
+    assert full.shape[0] == full.shape[1] and full.shape[0] % DISPLAY_TEX_SIZE == 0, full.shape
+    return quantise(box(full, k))
 
 def visor_spec():
     m = H.MATS[H.M_VISOR]
@@ -264,7 +288,7 @@ extern const unsigned int chief_tex_clut[], rifle_tex_clut[], mask_tex_clut[], r
 extern const float visor_tint[], visor_spec[];
 #endif
 ''' % (len(chief['P']), a_first, a_count, v_first, v_count, len(rifle['P']), len(rifle['T']), len(disp['P']), len(dT), len(H.rifle[0]['P']), rifle['spans'][0][1],
-       skin.shape[0], BASE_TEX_SIZE, BASE_TEX_SIZE, MASK_TEX_SIZE, RIFLE_MASK_SIZE, DISPLAY_TEX_SIZE, float(H.STRIDE), float(H.center[0]), float(H.center[1]), float(H.center[2]),
+       skin.shape[0], BASE_TEX_SIZE, RIFLE_TEX_SIZE, MASK_TEX_SIZE, RIFLE_MASK_SIZE, DISPLAY_TEX_SIZE, float(H.STRIDE), float(H.center[0]), float(H.center[1]), float(H.center[2]),
        float(H.radius), float(lo[2])))
     h.close()
     print('wrote', os.path.abspath(OUT))

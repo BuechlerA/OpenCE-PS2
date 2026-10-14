@@ -1,0 +1,17 @@
+{
+ "base": {
+  "levels/b30/bitmaps/metal flat generic": 1,
+  "levels/b30/bitmaps/metal panels ext unearthed": 1,
+  "levels/b30/bitmaps/metal panels generic ext": 1,
+  "levels/b30/bitmaps/metal panels generic ext clean": 2,
+  "levels/test/beavercreek/bitmaps/beavercreek boulder": 1,
+  "levels/test/bloodgulch/bitmaps/cap_metal": 1,
+  "scenery/flag_base/bitmaps/flag_base": 2
+ },
+ "detail": {
+  "levels/b30/bitmaps/detail metal sratches": 2,
+  "levels/b30/bitmaps/detail rock sandstone": 2,
+  "levels/b30/bitmaps/metal plate floor ext": 2
+ },
+ "margin": 0.1
+}
