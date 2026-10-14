@@ -9,6 +9,7 @@ map's structure BSP. No PS2 or GS code in it: src/pad.c reads the DualShock, mai
 #define FP_CONTROLLER_H
 
 #include "fp_weapon.h"
+#include "fp_view.h"
 
 /* what a gamepad gave this frame, as the Xbox's XInput state: sticks in -32768..32767 (right and up positive) */
 enum
@@ -59,6 +60,7 @@ typedef struct
 	/* the weapons (fp_weapon.h), the lens and the look's autolevel */
 	fpw_inventory weapons;
 	fpw_events events;          /* what the weapons did this frame */
+	fpv_state view;             /* the first-person weapon's pose (the arms and the gun) */
 	unsigned previous_buttons, pending_edges;
 	float trigger;
 	float field_of_view, fov_from, fov_to, fov_time;   /* horizontal, radians: the unit's, over the zoom's magnification, eased in over 0.18 s */

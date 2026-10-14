@@ -12,6 +12,7 @@ walked by a demo or a DualShock, or orbits him in the builds for stills and prof
     python3 tools/export_assets.py     # run from here; reads HALO_MAP (default assets/maps/bloodgulch.map) -> src/assets.[ch]
     python3 tools/export_map.py        # the map's structure BSP -> src/map_assets.[ch]
     python3 tools/export_weapons.py    # the hand weapons' tags -> src/weapon_assets.[ch] (the first-person controller's weapons)
+    python3 tools/export_fp_models.py  # the first-person arms, guns and textures -> src/fpm_assets.[ch]
     make                               # PS2DEV, PS2SDK set; writes masterchief.elf
     make NO_MAP=1                      # the Chief alone, on the old ground grid (needs no map_assets)
     make FP_NO_DEMO=1                  # the player stands for the pad alone (else a demo walks it to the Chief); ORBIT_CAMERA=1: the camera orbits the Chief

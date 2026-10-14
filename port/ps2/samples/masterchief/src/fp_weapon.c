@@ -43,7 +43,6 @@ blast, a grenade's fuse): a projectile that hits something is an event.
 #define MAX_FLIGHT_TICKS 300
 
 static int ticks_of(float seconds) { return (int)(seconds * TICKS_PER_SECOND); }
-static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 /* ---------- random numbers: a seeded sequence, the same every run ---------- */
 
@@ -720,6 +719,7 @@ void fpw_inventory_tick(fpw_inventory *inv, const fpw_input *input, fpw_events *
 {
 	fpw_state *w;
 	const fpw_weapon *def;
+	int first_event;
 
 	if (!inv->slot_count) { projectiles_tick(inv, events); return; }
 	w = &inv->slots[inv->current];
@@ -738,8 +738,10 @@ void fpw_inventory_tick(fpw_inventory *inv, const fpw_input *input, fpw_events *
 			inv->zoom_level = -1;
 		}
 	}
-	else if (input->switch_weapon && inv->slot_count > 1 && !weapon_busy(w) && !inv->melee_timer)
+	else if (input->switch_weapon && inv->slot_count > 1) inv->switch_pending = 1;           /* the unit's desired weapon: it switches as soon as the weapon is not busy */
+	if (inv->switch_timer < 0 && inv->switch_pending && !weapon_busy(w) && !inv->melee_timer)
 	{
+		inv->switch_pending = 0;
 		inv->desired = 1 - inv->current;
 		w->control_flags = 0;
 		weapon_reset(w, events);
@@ -792,7 +794,15 @@ void fpw_inventory_tick(fpw_inventory *inv, const fpw_input *input, fpw_events *
 		if (inv->melee_timer) w->control_flags |= FPW_CONTROL_USER_BUSY;
 		if (inv->zoom_level >= 0) w->control_flags |= FPW_CONTROL_ZOOMED;
 		w->primary_trigger = input->trigger;
+		first_event = events ? events->count : 0;
 		weapon_update(inv, w, events);
+		if (events && inv->zoom_level >= 0)       /* first_person_weapons.c: a reload takes the unit out of the zoom */
+		{
+			int e;
+
+			for (e = first_event; e < events->count; e++)
+				if (events->list[e].type == FPW_EVENT_RELOAD_START) { inv->zoom_level = -1; add_event(events, FPW_EVENT_ZOOM, -1, 0, NULL, NULL); break; }
+		}
 	}
 	projectiles_tick(inv, events);
 }

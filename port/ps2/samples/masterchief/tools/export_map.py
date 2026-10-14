@@ -496,6 +496,8 @@ def player_tunings(mf):
     unit_fov, = struct.unpack_from('<f', td, b + UNIT_FOV_AT)
     min_swap_ticks, min_autolevel_ticks = struct.unpack_from('<2h', td, pc + 0x6C)
     autolevel_scale, = struct.unpack_from('<f', td, pc + 0x54)
+    pi_ = block(GLOBALS_PLAYER_INFORMATION_AT)
+    idle_lower, idle_upper, idle_skip = struct.unpack_from('<3f', td, pi_ + 0x9C)      # first_person_idle_time_lower_bound, upper bound and skip fraction
     cam_stand, cam_crouch, crouch_time = struct.unpack_from('<3f', td, b + BIPED_CAMERA_AT)
     height_stand, height_crouch, radius = struct.unpack_from('<3f', td, b + BIPED_COLLISION_AT)
     assert 0.3 < cam_stand < 1 and 0 < cam_crouch < cam_stand and 0.05 < radius < 0.5 and 0.01 < jump < 0.2 and 0.5 < max_slope < 1.2, 'the biped tag is not laid out as expected'
@@ -508,7 +510,8 @@ def player_tunings(mf):
             ('UPHILL_FALLOFF', uh_falloff), ('UPHILL_CUTOFF', uh_cutoff), ('UPHILL_SCALE', uh_scale), ('JUMP_VELOCITY', jump),
             ('CAMERA_STANDING', cam_stand), ('CAMERA_CROUCHING', cam_crouch), ('CROUCH_TIME', crouch_time),
             ('HEIGHT_STANDING', height_stand), ('HEIGHT_CROUCHING', height_crouch), ('RADIUS', radius),
-            ('UNIT_FOV', unit_fov), ('MIN_AUTOLEVEL_TICKS', min_autolevel_ticks), ('LOOK_AUTOLEVEL_SCALE', autolevel_scale)], look
+            ('UNIT_FOV', unit_fov), ('MIN_AUTOLEVEL_TICKS', min_autolevel_ticks), ('LOOK_AUTOLEVEL_SCALE', autolevel_scale),
+            ('FP_IDLE_LOWER', idle_lower), ('FP_IDLE_UPPER', idle_upper), ('FP_IDLE_SKIP', idle_skip)], look
 
 
 def main():

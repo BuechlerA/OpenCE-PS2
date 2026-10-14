@@ -97,6 +97,26 @@ zeroed): `player_control.c` levels the pitch toward the unit camera's autolevel 
 for `MAP_MIN_AUTOLEVEL_TICKS` (15) ticks without looking up or down, by `|pitch| * 0.6366 * look_autolevel_scale (0.5) * speed` a tick.
 It is here, off, toggled by Select, where the original has a menu.
 
+## The arms and the gun
+
+`src/fp_view.c` (30 Hz, no PS2 code) is `source/interface/first_person_weapons.c`: the state the weapon's animation is in (idle, posing after
+10 to 15 s idle, fire, reload, melee, ready, put away), the animation's frame a tick, the moving overlay, the sway overlay (position, turning
+and the push-back of a shot, eased as `accelerate_to_position` does) and the 3 to 6 ticks of interpolation between animations. It makes the
+node matrices of the weapon's animation graph in the camera's space (x forward, y left, z up). `fp_weapon.c`'s events (`fpv_event`) drive it,
+and the reload and ready times of the weapon logic are the animations' frame counts. `tools/export_fp_models.py` bakes the first-person
+models (the arms and each weapon's gun: positions, normals, UVs, two bone indices and a weight a vertex, inverse bind matrices from the
+default pose) and their 17 textures into `src/fpm_assets.[ch]` (gitignored); `tools/fp_view_reference.py` is an independent numpy
+version of the animation decode and the skinning (`fp_view_test` with a weapon, type and frame prints the same vertices: they agree to
+six decimals). The graph's animations are uncompressed frames (per node a rotation of four int16, a translation of three floats and a scale,
+by the node's flags; only unflagged components take the default pose).
+
+`draw_first_person` in `main.c` draws them after the map and the Chief, with the depth test on and the arms and gun's own projection (near plane
+0.01, clipped against it only when a vertex is behind it). A bone's skin matrix is its inverse bind matrix and its graph node's; a light
+is carried into the bone's bind space instead of a normal out of it. On VU0 (macro mode; `NO_VU0` keeps the C path) the vertices take two matrix
+products by their bones, the projection is one divide, and a normal is lit by three dot products, a clamp and the lights' colours, its index
+into a gamma table coming out of the same registers: the EE packs the GS registers. The weapon costs 3.3 ms of the EE a frame (the C path:
+5.3; the first version, which also lit every vertex, about 9). VRAM: all 17 textures stay resident, 1.1 MB (0.6 MB free).
+
 ## Walking on the map: the collision BSP
 
 The player collides with the map's own collision geometry, the geometry the original's biped is swept through, not the render
@@ -159,13 +179,15 @@ puts the player back at the start.
   random sticks, jumps and crouches (the deepest any sphere went into a surface, against every triangle: 0.0005 of a 0.2
   radius, and never through the floor), and 36 headings x 60 s of holding forward: finite, never off the ground, never
   out of the map.
+- `tools/fp_view_test.c`: the state machine (a reload of 86 ticks against the animation's 87 frames, the pistol readied in 33 of 35, the idle pose
+  after 10 to 15 s) and, with a weapon, an animation type and a frame, the skinned vertices for `fp_view_reference.py`.
 - `tools/fp_demo_test.c` (the command is in its header): the demo plans the walk, and the controller, given only the pad
   the demo makes, arrives next to the Chief, four times in 100 s, jumping four times a walk and facing him, never
   stuck; a touch of the pad takes over and Start restarts the demo.
 - The demo is what PCSX2 shows with no one at the pad. `make FP_NO_DEMO=1` leaves the player standing, for the pad alone.
   `make EXTRA_CFLAGS=-DPAD_DEBUG` prints what libpad sees twice a second.
-- The frame rate of the demo, `make EXTRA_CFLAGS="-DPROFILE -DFIRST_PERSON"`: 60 fps all the way, the EE busy
-  8.5 to 12.2 ms of 16.7 (the orbit: 8 to 14), the widest views drawing 3,600 triangles. The builds for stills
+- The frame rate of the demo, `make EXTRA_CFLAGS="-DPROFILE -DFIRST_PERSON"`: 59 to 60 fps, the EE busy
+  about 14.5 ms of 16.7 with the weapon (its draw 3.3 ms) (the orbit: 8 to 14), the widest views drawing 3,600 triangles. The builds for stills
   (`-DDEBUG_SECONDS`), the profile and the mip audit keep the orbit camera so that builds see the same views, unless
   `-DFIRST_PERSON` is added; `make ORBIT_CAMERA=1` asks for the orbit in any build.
 

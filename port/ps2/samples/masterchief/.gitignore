@@ -8,3 +8,5 @@ src/map_assets.c
 src/map_assets.h
 src/weapon_assets.c
 src/weapon_assets.h
+src/fpm_assets.c
+src/fpm_assets.h

@@ -509,6 +509,12 @@ void fp_init(fp_player *player, float x, float y, float yaw)
 		static const int loadout[2] = { FPW_ASSAULT_RIFLE, FPW_PISTOL };
 
 		fpw_inventory_init(&player->weapons, loadout, 2, 12345u);
+		fpv_init(&player->view);
+		{
+			fpw_event ready = { FPW_EVENT_READY, loadout[0], 0, { 0 }, { 0 } };
+
+			fpv_event(&player->view, &ready, &player->weapons.slots[0]);       /* the first weapon is readied: its animation plays */
+		}
 		player->field_of_view = player->fov_from = player->fov_to = MAP_UNIT_FOV;
 		player->fov_time = 1.f;
 	}
@@ -640,11 +646,11 @@ static void biped_tick(fp_player *p, float forward, float strafe, int jump, int 
 }
 
 /* the weapons' tick: the player's eye and aim, and what it asked of them (units.c's control flags, the edges of the buttons) */
-static void weapon_tick(fp_player *p, unsigned edges)
+static void weapon_tick(fp_player *p, unsigned edges, float forward, float strafe)
 {
 	float cp = cosf(p->pitch), speed;
 	fpw_input input;
-	int k;
+	int k, events_before;
 
 	for (k = 0; k < 3; k++) p->weapons.aim.origin[k] = p->pos[k];
 	p->weapons.aim.origin[2] += lerpf(MAP_CAMERA_STANDING, MAP_CAMERA_CROUCHING, p->crouch);
@@ -653,13 +659,29 @@ static void weapon_tick(fp_player *p, unsigned edges)
 	for (k = 0; k < 3; k++) p->weapons.aim.velocity[k] = p->weapons.aim.forward[k] * (speed > 0.f ? speed : 0.f);
 	input.trigger = p->trigger; input.reload = (edges & FP_RELOAD) != 0; input.switch_weapon = (edges & FP_SWITCH_WEAPON) != 0;
 	input.melee = (edges & FP_MELEE) != 0; input.zoom = (edges & FP_ZOOM) != 0; input.grenade = (edges & FP_GRENADE) != 0;
+	events_before = p->events.count;
 	fpw_inventory_tick(&p->weapons, &input, &p->events);
+	/* the first-person weapon hears what the weapon did this tick, then moves a frame on */
+	{
+		fpw_state *w = fpw_current_state(&p->weapons);
+		fpv_input view_input;
+		int e;
+
+		for (e = events_before; e < p->events.count; e++) fpv_event(&p->view, &p->events.list[e], w);
+		view_input.throttle[0] = forward; view_input.throttle[1] = strafe;
+		view_input.yaw = p->yaw; view_input.pitch = p->pitch;
+		view_input.rounds_loaded = w ? w->magazines[0].rounds_loaded : 0;
+		view_input.zoomed = p->weapons.zoom_level >= 0;
+		view_input.flying = p->airborne;
+		view_input.overheated = w && (w->flags & FPW_FLAG_OVERHEATED);
+		fpv_tick(&p->view, &view_input, w);
+	}
 }
 
 static void tick(fp_player *p, float forward, float strafe, int jump, int crouch_held, unsigned edges)
 {
 	biped_tick(p, forward, strafe, jump, crouch_held);
-	weapon_tick(p, edges);
+	weapon_tick(p, edges, forward, strafe);
 }
 
 /* ---------- looking ---------- */

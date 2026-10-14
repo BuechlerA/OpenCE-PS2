@@ -56,6 +56,7 @@ typedef struct
 	fpw_state slots[2];
 	int slot_count, current, desired;
 	int switch_timer;                    /* ticks left of putting the current weapon away (-1: not switching) */
+	int switch_pending;                  /* the player asked to switch and the weapon was busy */
 	int zoom_level;                      /* -1: none */
 	int melee_timer, melee_key_timer;
 	fpw_aim aim;

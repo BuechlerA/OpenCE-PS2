@@ -41,6 +41,7 @@
 #ifdef FIRST_PERSON
 #include "fp_controller.h"
 #include "fp_demo.h"
+#include "fpm_assets.h"
 #include "pad.h"
 #endif
 
@@ -125,7 +126,7 @@ static inline float dot(const float *a, const float *b)
 }
 
 #define MAX_VERTS 2200
-#define MAX_TRIS 2000
+#define MAX_TRIS 4400
 
 /* ---------- VU0 in macro mode: the transforms ---------- */
 
@@ -238,6 +239,92 @@ static inline void vu0_skin(const mat4 *b0, const mat4 *b1, const vec4 *p, const
 		"vwaitq\n" "vmulq.xyz $vf17, $vf17, $Q\n"
 		"sqc2 $vf14, 0(%5)\n" "sqc2 $vf17, 0(%6)\n" "sqc2 $vf19, 0(%7)\n"
 		: : "r"(b0), "r"(b1), "r"(p), "r"(n), "r"(w), "r"(pw), "r"(nw), "r"(pv) : "memory");
+}
+
+/* ---- the first-person weapon's vertices (the stages of fp_draw_model) ---- */
+
+/* a point (w 1) by one bone: out = p * m (a mat4 whose columns were permuted by the caller to give (y, z, x): the weapon's view order) */
+static inline void vu0_fp_skin1(const mat4 *m, const vec4 *p, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%1)\n"
+		"lqc2 $vf4, 0(%0)\n" "lqc2 $vf5, 16(%0)\n" "lqc2 $vf6, 32(%0)\n" "lqc2 $vf7, 48(%0)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddaz.xyz $ACC, $vf6, $vf1z\n" "vmaddw.xyz $vf2, $vf7, $vf1w\n"
+		"sqc2 $vf2, 0(%2)\n"
+		: : "r"(m), "r"(p), "r"(out) : "memory");
+}
+
+/* the same by two bones, blended by w = (w0, w1, 0, 0) */
+static inline void vu0_fp_skin2(const mat4 *b0, const mat4 *b1, const vec4 *p, const vec4 *w, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%2)\n" "lqc2 $vf3, 0(%3)\n"
+		"lqc2 $vf4, 0(%0)\n" "lqc2 $vf5, 16(%0)\n" "lqc2 $vf6, 32(%0)\n" "lqc2 $vf7, 48(%0)\n"
+		"lqc2 $vf8, 0(%1)\n" "lqc2 $vf9, 16(%1)\n" "lqc2 $vf10, 32(%1)\n" "lqc2 $vf11, 48(%1)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddaz.xyz $ACC, $vf6, $vf1z\n" "vmaddw.xyz $vf12, $vf7, $vf1w\n"
+		"vmulax.xyz $ACC, $vf8, $vf1x\n" "vmadday.xyz $ACC, $vf9, $vf1y\n" "vmaddaz.xyz $ACC, $vf10, $vf1z\n" "vmaddw.xyz $vf13, $vf11, $vf1w\n"
+		"vmulax.xyz $ACC, $vf12, $vf3x\n" "vmaddy.xyz $vf14, $vf13, $vf3y\n"
+		"vmove.w $vf14, $vf0\n"
+		"sqc2 $vf14, 0(%4)\n"
+		: : "r"(b0), "r"(b1), "r"(p), "r"(w), "r"(out) : "memory");
+}
+
+/* The weapon's constants, kept in vf24-vf31 for the whole draw: the screen scale (-focal_x, -focal), the screen's centre plus the GS's origin, the depth's
+   (A, B) in z (iz = A - B * min (x, 1)), 512 for the gamma table's index, the ambient light and the three lights' colours */
+static inline void vu0_fp_load_constants(const vec4 *c)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf24, 0(%0)\n" "lqc2 $vf25, 16(%0)\n" "lqc2 $vf26, 32(%0)\n" "lqc2 $vf27, 48(%0)\n"
+		"lqc2 $vf28, 64(%0)\n" "lqc2 $vf29, 80(%0)\n" "lqc2 $vf30, 96(%0)\n" "lqc2 $vf31, 112(%0)\n"
+		: : "r"(c));
+}
+
+/* a point in the weapon's view order (y, z, x) to the screen: out_f gets the screen x and y (floats), out_i their fixed-point packing and the depth (ints) */
+static inline void vu0_fp_project(const vec4 *p, vec4 *out_f, vec4 *out_i)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"vdiv $Q, $vf0w, $vf1z\n"
+		"vminiw.z $vf5, $vf1, $vf0w\n"
+		"vwaitq\n"
+		"vmulq.xy $vf2, $vf1, $Q\n" "vmul.xy $vf2, $vf2, $vf24\n" "vadd.xy $vf2, $vf2, $vf25\n"
+		"vftoi4.xy $vf3, $vf2\n"
+		"vmuly.z $vf5, $vf5, $vf26y\n" "vsub.z $vf6, $vf26, $vf5\n" "vftoi0.z $vf6, $vf6\n"
+		"vmove.xy $vf6, $vf3\n"
+		"sqc2 $vf2, 0(%1)\n" "sqc2 $vf6, 0(%2)\n"
+		: : "r"(p), "r"(out_f), "r"(out_i) : "memory");
+}
+
+/* a vertex's lit colour as the gamma table's three indices: its normal n (w 0) against a bone's lights (3 rows: the lights' dot products with the normal's
+   x, y and z), the three dot products clamped at 0, mixed with the lights' colours over the ambient, times 512 */
+static inline void vu0_fp_light1(const vec4 *n, const vec4 *rows, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"lqc2 $vf4, 0(%1)\n" "lqc2 $vf5, 16(%1)\n" "lqc2 $vf6, 32(%1)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddz.xyz $vf2, $vf6, $vf1z\n"
+		"vmax.xyz $vf2, $vf2, $vf0\n"
+		"vmulax.xyz $ACC, $vf29, $vf2x\n" "vmadday.xyz $ACC, $vf30, $vf2y\n" "vmaddaz.xyz $ACC, $vf31, $vf2z\n" "vmaddw.xyz $vf3, $vf28, $vf0w\n"
+		"vmul.xyz $vf3, $vf3, $vf27\n" "vftoi0.xyz $vf3, $vf3\n"
+		"sqc2 $vf3, 0(%2)\n"
+		: : "r"(n), "r"(rows), "r"(out) : "memory");
+}
+
+/* the same for a vertex of two bones: the two bones' dot products blended by w before the clamp */
+static inline void vu0_fp_light2(const vec4 *n, const vec4 *rows0, const vec4 *rows1, const vec4 *w, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n" "lqc2 $vf9, 0(%3)\n"
+		"lqc2 $vf4, 0(%1)\n" "lqc2 $vf5, 16(%1)\n" "lqc2 $vf6, 32(%1)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddz.xyz $vf2, $vf6, $vf1z\n"
+		"lqc2 $vf4, 0(%2)\n" "lqc2 $vf5, 16(%2)\n" "lqc2 $vf6, 32(%2)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddz.xyz $vf7, $vf6, $vf1z\n"
+		"vmulax.xyz $ACC, $vf2, $vf9x\n" "vmaddy.xyz $vf2, $vf7, $vf9y\n"
+		"vmax.xyz $vf2, $vf2, $vf0\n"
+		"vmulax.xyz $ACC, $vf29, $vf2x\n" "vmadday.xyz $ACC, $vf30, $vf2y\n" "vmaddaz.xyz $ACC, $vf31, $vf2z\n" "vmaddw.xyz $vf3, $vf28, $vf0w\n"
+		"vmul.xyz $vf3, $vf3, $vf27\n" "vftoi0.xyz $vf3, $vf3\n"
+		"sqc2 $vf3, 0(%4)\n"
+		: : "r"(n), "r"(rows0), "r"(rows1), "r"(w), "r"(out) : "memory");
 }
 
 /* the meshes' vertices as the VU reads them: 16-byte quads, the position's w 1, the normal's 0,
@@ -2178,6 +2265,446 @@ static int chief_in_view(const xform *view)
 }
 #endif
 
+#if defined(FIRST_PERSON) && !defined(NO_MAP)
+/* ---------- the first-person weapon: the arms and the gun ---------- */
+
+/* The models are skinned by the node matrices fp_view.c makes (in the camera's own space: x forward, y left, z up), lit by the three lights (turned into that
+   space), clipped against a near plane (the arms start behind the eye) and drawn after the map in a slice of the Z buffer in front of anything it holds
+   (the pill's radius keeps the map's own surfaces further than the slice's start). One pass, the base map only. */
+
+#define FP_MAX_VERTS 3600
+#define FP_EXTRA_VERTS 3000
+#define FP_NEAR 0.035f                    /* the near plane of the weapon's view, world units */
+#define FP_Z_NEAR 65500                   /* the Z values the weapon spans: 62000 (a unit away) to 65500 (at the near plane) */
+#define FP_Z_RANGE 3500.f
+
+static texture fp_tex[FPM_TEXTURES];
+static float fp_p[FP_MAX_VERTS + FP_EXTRA_VERTS][3], fp_t[FP_EXTRA_VERTS][2], fp_c[FP_EXTRA_VERTS][3];   /* (the extras: a vertex made by the clip has its colour and texture coordinate here) */
+static svert fp_sv[FP_MAX_VERTS + FP_EXTRA_VERTS];
+static unsigned short fp_tris[FP_MAX_VERTS * 2 * 3], fp_visible[FP_MAX_VERTS * 2 * 3];
+static unsigned char fp_needed[FP_MAX_VERTS + FP_EXTRA_VERTS];
+static u64 fp_uv_cache[2][FP_MAX_VERTS];  /* a model's vertices' texture coordinates as the GS takes them: hands, gun */
+static int fp_uv_weapon = -1;
+static float fp_light[3][3];              /* the lights' directions in the camera's space */
+
+static void fp_textures_setup(GSGLOBAL *gs)
+{
+	int i;
+
+	for (i = 0; i < FPM_TEXTURES; i++) texture_setup(gs, &fp_tex[i], FPM_TEXTURE_SIZE, GS_PSM_T8, fpm_textures[i].pixels, fpm_textures[i].clut);
+}
+
+#ifndef NO_VU0
+static void fp_vu0_setup(void);
+#endif
+
+/* a vertex's position in the camera's space to the weapon's view and the screen, in the weapon's slice of the Z buffer */
+static inline void fp_project(const float *p, svert *o)
+{
+	float inv = 1.f / p[0], d = p[0] > 1.f ? 1.f : p[0];
+	int iz = FP_Z_NEAR - (int)((d - FP_NEAR) * (FP_Z_RANGE / (1.f - FP_NEAR)));
+
+	o->x = screen_cx - p[1] * inv * focal_x;
+	o->y = screen_cy - p[2] * inv * focal;
+	o->xyz2 = GS_SETREG_XYZ2(to_gs_xy(o->x, gs_offset_x), to_gs_xy(o->y, gs_offset_y), iz);
+}
+
+/* the triangles of tri[0 .. n) as one REGLIST packet (draw_textured, for triangles already culled) */
+static void fp_draw_list(GSGLOBAL *gs, const texture *x, const svert *v, const unsigned short *vis, int n)
+{
+	int i, qwords = (n * 3 * 3 + 1) / 2;
+	u64 *p;
+
+	if (n == 0) return;
+	set_prim(gs, x, 1, -1);
+	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
+	*p++ = GIF_TAG(n * 3, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
+	*p++ = (u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_XYZ2 << 8);
+	for (i = 0; i < n * 3; i++)
+	{
+		const svert *s = &v[vis[i]];
+
+		*p++ = s->rgbaq; *p++ = s->uv; *p++ = s->xyz2;
+	}
+}
+
+/* one model: skinned, projected, its triangles clipped to the near plane and culled, the vertices they use lit, and drawn part by part */
+#ifdef NO_VU0
+static void fp_draw_model(GSGLOBAL *gs, const fpm_model *m, const short *graph_node, float t, u64 *uv_cache, int which)
+{
+	float skin[FPV_MAX_NODES][12], node_light[FPV_MAX_NODES][3][3];
+	int nodes = m->node_count < FPV_MAX_NODES ? m->node_count : FPV_MAX_NODES, n, v, l, c, part, count = m->vertices, extra = 0, any_near = 0;
+	const unsigned short *tris = m->triangle;
+	int part_first[FPM_MAX_PARTS], part_count[FPM_MAX_PARTS], tri_count = 0, visible_count = 0;
+
+	for (n = 0; n < nodes; n++)
+	{
+		const float *r = skin[n];
+
+		fpv_skin_matrix(&player.view, m, graph_node, n, t, skin[n]);
+		/* a light's direction in the node's own bind space: a normal n is lit by (n R) . L = n . (R L), so no vertex's normal is transformed */
+		for (l = 0; l < 3; l++)
+			for (c = 0; c < 3; c++) node_light[n][l][c] = r[c * 3] * fp_light[l][0] + r[c * 3 + 1] * fp_light[l][1] + r[c * 3 + 2] * fp_light[l][2];
+	}
+	for (v = 0; v < count; v++)
+	{
+		const float *p = &m->position[v * 3], *sa = skin[m->node[v * 2]];
+		float x = p[0] * sa[0] + p[1] * sa[3] + p[2] * sa[6] + sa[9], y = p[0] * sa[1] + p[1] * sa[4] + p[2] * sa[7] + sa[10], z = p[0] * sa[2] + p[1] * sa[5] + p[2] * sa[8] + sa[11];
+		unsigned wa = m->weight[v];
+
+		if (wa != 255)
+		{
+			const float *sb = skin[m->node[v * 2 + 1]];
+			float wf = wa * (1.f / 255.f), wb = 1.f - wf;
+
+			x = x * wf + (p[0] * sb[0] + p[1] * sb[3] + p[2] * sb[6] + sb[9]) * wb;
+			y = y * wf + (p[0] * sb[1] + p[1] * sb[4] + p[2] * sb[7] + sb[10]) * wb;
+			z = z * wf + (p[0] * sb[2] + p[1] * sb[5] + p[2] * sb[8] + sb[11]) * wb;
+		}
+		fp_p[v][0] = x; fp_p[v][1] = y; fp_p[v][2] = z;
+		if (x < FP_NEAR) any_near = 1;
+		fp_needed[v] = 0;
+	}
+	/* the triangles of each part: all of them if every vertex is beyond the near plane, else the ones across it cut */
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = m->parts[part].first_triangle, last = first + m->parts[part].triangle_count;
+
+		part_first[part] = tri_count; part_count[part] = 0;
+		if (!any_near) { part_first[part] = first; part_count[part] = last - first; continue; }
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2], idx[3] = { ia, ib, ic };
+			int inside = (fp_p[ia][0] >= FP_NEAR) + (fp_p[ib][0] >= FP_NEAR) + (fp_p[ic][0] >= FP_NEAR);
+
+			if (inside == 0) continue;
+			if (inside == 3)
+			{
+				fp_tris[tri_count * 3] = ia; fp_tris[tri_count * 3 + 1] = ib; fp_tris[tri_count * 3 + 2] = ic; tri_count++; part_count[part]++;
+			}
+			else
+			{
+				/* Sutherland-Hodgman against x = near: a polygon of three or four vertices, fanned */
+				unsigned short poly[4];
+				int pc = 0, e;
+
+				for (e = 0; e < 3; e++)
+				{
+					unsigned short a = idx[e], b = idx[(e + 1) % 3];
+					int a_in = fp_p[a][0] >= FP_NEAR, b_in = fp_p[b][0] >= FP_NEAR;
+
+					if (a_in) poly[pc++] = a;
+					if (a_in != b_in && extra < FP_EXTRA_VERTS)
+					{
+						float f = (FP_NEAR - fp_p[a][0]) / (fp_p[b][0] - fp_p[a][0]);
+						int nv = count + extra++, k;
+
+						for (k = 0; k < 3; k++) fp_p[nv][k] = fp_p[a][k] + (fp_p[b][k] - fp_p[a][k]) * f;
+						fp_p[nv][0] = FP_NEAR;
+						{
+							/* the new vertex's colour and texture coordinate are blended when it is lit and projected: it keeps its edge's two ends */
+							fp_t[nv - count][0] = (float)a; fp_t[nv - count][1] = (float)b; fp_c[nv - count][0] = f;
+						}
+						poly[pc++] = (unsigned short)nv;
+					}
+				}
+				for (e = 1; e + 1 < pc; e++)
+				{
+					fp_tris[tri_count * 3] = poly[0]; fp_tris[tri_count * 3 + 1] = poly[e]; fp_tris[tri_count * 3 + 2] = poly[e + 1]; tri_count++; part_count[part]++;
+				}
+			}
+		}
+	}
+	if (any_near) tris = fp_tris;
+	/* the vertices: projected; then the triangles facing the camera, and the vertices they use marked */
+	for (v = 0; v < count + extra; v++) if (fp_p[v][0] >= FP_NEAR * 0.5f) fp_project(fp_p[v], &fp_sv[v]);
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = part_first[part], last = first + part_count[part];
+
+		part_first[part] = visible_count / 3;
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2];
+			const svert *a = &fp_sv[ia], *b = &fp_sv[ib], *cc = &fp_sv[ic];
+			float area = (b->x - a->x) * (cc->y - a->y) - (cc->x - a->x) * (b->y - a->y);
+
+			if (area * CULL_SIGN <= 0.f) continue;
+			fp_visible[visible_count++] = ia; fp_visible[visible_count++] = ib; fp_visible[visible_count++] = ic;
+			fp_needed[ia] = fp_needed[ib] = fp_needed[ic] = 1;
+		}
+		part_count[part] = visible_count / 3 - part_first[part];
+	}
+	/* the lit colour and the texture coordinate of each vertex a triangle uses (a vertex the clip made takes its edge's ends' colours) */
+	for (v = 0; v < count; v++)
+	{
+		const float *nl_a, *nl_b;
+		float nx, ny, nz, sum[3], d;
+		int wa;
+
+		if (!fp_needed[v]) continue;
+		nx = m->normal[v * 3] * (1.f / 127.f); ny = m->normal[v * 3 + 1] * (1.f / 127.f); nz = m->normal[v * 3 + 2] * (1.f / 127.f);
+		wa = m->weight[v];
+		sum[0] = ambient[0]; sum[1] = ambient[1]; sum[2] = ambient[2];
+		nl_a = &node_light[m->node[v * 2]][0][0];
+		if (wa == 255)
+		{
+			d = nx * nl_a[0] + ny * nl_a[1] + nz * nl_a[2]; if (d > 0.f) { sum[0] += d * light_color[0][0]; sum[1] += d * light_color[0][1]; sum[2] += d * light_color[0][2]; }
+			d = nx * nl_a[3] + ny * nl_a[4] + nz * nl_a[5]; if (d > 0.f) { sum[0] += d * light_color[1][0]; sum[1] += d * light_color[1][1]; sum[2] += d * light_color[1][2]; }
+			d = nx * nl_a[6] + ny * nl_a[7] + nz * nl_a[8]; if (d > 0.f) { sum[0] += d * light_color[2][0]; sum[1] += d * light_color[2][1]; sum[2] += d * light_color[2][2]; }
+		}
+		else
+		{
+			float wf = wa * (1.f / 255.f), wb = 1.f - wf;
+
+			nl_b = &node_light[m->node[v * 2 + 1]][0][0];
+			for (l = 0; l < 3; l++)
+			{
+				d = (nx * nl_a[l * 3] + ny * nl_a[l * 3 + 1] + nz * nl_a[l * 3 + 2]) * wf + (nx * nl_b[l * 3] + ny * nl_b[l * 3 + 1] + nz * nl_b[l * 3 + 2]) * wb;
+				if (d > 0.f) { sum[0] += d * light_color[l][0]; sum[1] += d * light_color[l][1]; sum[2] += d * light_color[l][2]; }
+			}
+		}
+		fp_sv[v].rgbaq = diffuse_rgbaq(sum);
+		fp_sv[v].uv = uv_cache[v];
+	}
+	for (v = count; v < count + extra; v++)
+	{
+		int a = (int)fp_t[v - count][0], b = (int)fp_t[v - count][1], k;
+		float f = fp_c[v - count][0];
+		unsigned ca[4], cb[4];
+
+		if (!fp_needed[v]) continue;
+		/* a vertex of the cut: the colour and the coordinates of its edge's ends, by the same fraction */
+		for (k = 0; k < 3; k++) { ca[k] = (unsigned)((fp_sv[a].rgbaq >> (8 * k)) & 0xff); cb[k] = (unsigned)((fp_sv[b].rgbaq >> (8 * k)) & 0xff); }
+		fp_sv[v].rgbaq = GS_SETREG_RGBAQ((int)(ca[0] + (cb[0] - (int)ca[0]) * f), (int)(ca[1] + ((int)cb[1] - (int)ca[1]) * f), (int)(ca[2] + ((int)cb[2] - (int)ca[2]) * f), 0x80, 0x00);
+		{
+			int ua = (int)(uv_cache[a] & 0xffff), va = (int)((uv_cache[a] >> 16) & 0xffff), ub = (int)(uv_cache[b] & 0xffff), vb = (int)((uv_cache[b] >> 16) & 0xffff);
+
+			fp_sv[v].uv = GS_SETREG_UV((int)(ua + (ub - ua) * f), (int)(va + (vb - va) * f));
+		}
+	}
+	for (part = 0; part < m->part_count; part++)
+		if (part_count[part]) fp_draw_list(gs, &fp_tex[m->parts[part].texture], fp_sv, &fp_visible[part_first[part] * 3], part_count[part]);
+}
+
+#else
+/* The same on VU0 (macro mode): the vertices and the lights' dot products by the bones' matrices and the screen's constants in its registers. The vertices'
+   positions are kept in (y, z, x, 1) order, so that the projection's divide is by the z lane and its scale applies to the xy lanes. */
+static vec4 fp_p4[2][FP_MAX_VERTS], fp_n4[2][FP_MAX_VERTS], fp_w4[2][FP_MAX_VERTS];
+static vec4 fp_pv[FP_MAX_VERTS + FP_EXTRA_VERTS], fp_sf[FP_MAX_VERTS + FP_EXTRA_VERTS], fp_si[FP_MAX_VERTS + FP_EXTRA_VERTS];
+static mat4 fp_skin4[FPV_MAX_NODES];
+static vec4 fp_ltm[FPV_MAX_NODES][3];
+static vec4 fp_const[8] __attribute__((aligned(16)));
+static unsigned char fp_gamma[1280];
+
+static void fp_vu0_setup(void)
+{
+	int i;
+
+	for (i = 0; i < 1280; i++) fp_gamma[i] = to_half_byte(gamma_enc_in_range(i * (1.f / 512.f)));
+}
+
+/* a model's vertices as the aligned vectors VU0 reads, once for a weapon in hand */
+static void fp_vectors(const fpm_model *m, int which)
+{
+	int v;
+
+	for (v = 0; v < m->vertices; v++)
+	{
+		fp_p4[which][v].v[0] = m->position[v * 3]; fp_p4[which][v].v[1] = m->position[v * 3 + 1]; fp_p4[which][v].v[2] = m->position[v * 3 + 2]; fp_p4[which][v].v[3] = 1.f;
+		fp_n4[which][v].v[0] = m->normal[v * 3] * (1.f / 127.f); fp_n4[which][v].v[1] = m->normal[v * 3 + 1] * (1.f / 127.f); fp_n4[which][v].v[2] = m->normal[v * 3 + 2] * (1.f / 127.f); fp_n4[which][v].v[3] = 0.f;
+		fp_w4[which][v].v[0] = m->weight[v] * (1.f / 255.f); fp_w4[which][v].v[1] = 1.f - fp_w4[which][v].v[0]; fp_w4[which][v].v[2] = fp_w4[which][v].v[3] = 0.f;
+	}
+}
+
+static void fp_draw_model(GSGLOBAL *gs, const fpm_model *m, const short *graph_node, float t, u64 *uv_cache, int which)
+{
+	float skin[FPV_MAX_NODES][12];
+	int nodes = m->node_count < FPV_MAX_NODES ? m->node_count : FPV_MAX_NODES, n, v, l, c, part, count = m->vertices, extra = 0, any_near = 0;
+	const unsigned short *tris = m->triangle;
+	int part_first[FPM_MAX_PARTS], part_count[FPM_MAX_PARTS], tri_count = 0, visible_count = 0;
+	float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
+	const vec4 *p4 = fp_p4[which], *n4 = fp_n4[which], *w4 = fp_w4[which];
+
+	/* the constants: screen scale and centre, the depth, the gamma index's scale, the ambient light and the lights' colours */
+	fp_const[0].v[0] = -focal_x; fp_const[0].v[1] = -focal; fp_const[0].v[2] = fp_const[0].v[3] = 0.f;
+	fp_const[1].v[0] = screen_cx + ox; fp_const[1].v[1] = screen_cy + oy; fp_const[1].v[2] = fp_const[1].v[3] = 0.f;
+	fp_const[2].v[1] = FP_Z_RANGE / (1.f - FP_NEAR); fp_const[2].v[2] = (float)FP_Z_NEAR + FP_NEAR * fp_const[2].v[1]; fp_const[2].v[0] = fp_const[2].v[3] = 0.f;
+	fp_const[3].v[0] = fp_const[3].v[1] = fp_const[3].v[2] = 512.f; fp_const[3].v[3] = 0.f;
+	for (c = 0; c < 3; c++) { fp_const[4].v[c] = ambient[c]; fp_const[5].v[c] = light_color[0][c]; fp_const[6].v[c] = light_color[1][c]; fp_const[7].v[c] = light_color[2][c]; }
+	fp_const[4].v[3] = fp_const[5].v[3] = fp_const[6].v[3] = fp_const[7].v[3] = 0.f;
+	vu0_fp_load_constants(fp_const);
+
+	for (n = 0; n < nodes; n++)
+	{
+		const float *r = skin[n];
+
+		fpv_skin_matrix(&player.view, m, graph_node, n, t, skin[n]);
+		/* the bone's matrix with its columns in the view's order (y, z, x) */
+		for (c = 0; c < 3; c++)
+		{
+			fp_skin4[n].row[c].v[0] = r[c * 3 + 1]; fp_skin4[n].row[c].v[1] = r[c * 3 + 2]; fp_skin4[n].row[c].v[2] = r[c * 3]; fp_skin4[n].row[c].v[3] = 0.f;
+		}
+		fp_skin4[n].row[3].v[0] = r[10]; fp_skin4[n].row[3].v[1] = r[11]; fp_skin4[n].row[3].v[2] = r[9]; fp_skin4[n].row[3].v[3] = 1.f;
+		/* a light in the bone's bind space: a normal n is lit by (n R) . L = n . (R L); the row k holds the three lights' k components */
+		for (l = 0; l < 3; l++)
+			for (c = 0; c < 3; c++) fp_ltm[n][c].v[l] = r[c * 3] * fp_light[l][0] + r[c * 3 + 1] * fp_light[l][1] + r[c * 3 + 2] * fp_light[l][2];
+		for (c = 0; c < 3; c++) fp_ltm[n][c].v[3] = 0.f;
+		/* (fp_ltm[n][k].v[l]: the light l's component k: the dot product of the bone's row k with the light) */
+	}
+	for (v = 0; v < count; v++)
+	{
+		int a = m->node[v * 2];
+
+		if (m->weight[v] == 255) vu0_fp_skin1(&fp_skin4[a], &p4[v], &fp_pv[v]);
+		else vu0_fp_skin2(&fp_skin4[a], &fp_skin4[m->node[v * 2 + 1]], &p4[v], &w4[v], &fp_pv[v]);
+		if (fp_pv[v].v[2] < FP_NEAR) any_near = 1;
+		fp_needed[v] = 0;
+	}
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = m->parts[part].first_triangle, last = first + m->parts[part].triangle_count;
+
+		part_first[part] = tri_count; part_count[part] = 0;
+		if (!any_near) { part_first[part] = first; part_count[part] = last - first; continue; }
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2], idx[3] = { ia, ib, ic };
+			int inside = (fp_pv[ia].v[2] >= FP_NEAR) + (fp_pv[ib].v[2] >= FP_NEAR) + (fp_pv[ic].v[2] >= FP_NEAR);
+
+			if (inside == 0) continue;
+			if (inside == 3)
+			{
+				fp_tris[tri_count * 3] = ia; fp_tris[tri_count * 3 + 1] = ib; fp_tris[tri_count * 3 + 2] = ic; tri_count++; part_count[part]++;
+			}
+			else
+			{
+				unsigned short poly[4];
+				int pc = 0, e;
+
+				for (e = 0; e < 3; e++)
+				{
+					unsigned short a = idx[e], b = idx[(e + 1) % 3];
+					int a_in = fp_pv[a].v[2] >= FP_NEAR, b_in = fp_pv[b].v[2] >= FP_NEAR;
+
+					if (a_in) poly[pc++] = a;
+					if (a_in != b_in && extra < FP_EXTRA_VERTS)
+					{
+						float f = (FP_NEAR - fp_pv[a].v[2]) / (fp_pv[b].v[2] - fp_pv[a].v[2]);
+						int nv = count + extra++, k;
+
+						for (k = 0; k < 2; k++) fp_pv[nv].v[k] = fp_pv[a].v[k] + (fp_pv[b].v[k] - fp_pv[a].v[k]) * f;
+						fp_pv[nv].v[2] = FP_NEAR; fp_pv[nv].v[3] = 1.f;
+						fp_t[nv - count][0] = (float)a; fp_t[nv - count][1] = (float)b; fp_c[nv - count][0] = f;
+						fp_needed[nv] = 0;
+						poly[pc++] = (unsigned short)nv;
+					}
+				}
+				for (e = 1; e + 1 < pc; e++)
+				{
+					fp_tris[tri_count * 3] = poly[0]; fp_tris[tri_count * 3 + 1] = poly[e]; fp_tris[tri_count * 3 + 2] = poly[e + 1]; tri_count++; part_count[part]++;
+				}
+			}
+		}
+	}
+	if (any_near) tris = fp_tris;
+	/* the screen: every vertex in front of the near plane's half, through VU0 */
+	for (v = 0; v < count + extra; v++)
+	{
+		if (fp_pv[v].v[2] < FP_NEAR * 0.5f) continue;
+		vu0_fp_project(&fp_pv[v], &fp_sf[v], &fp_si[v]);
+		{
+			int ix = *(int *)&fp_si[v].v[0], iy = *(int *)&fp_si[v].v[1], iz = *(int *)&fp_si[v].v[2];
+
+			fp_sv[v].x = fp_sf[v].v[0]; fp_sv[v].y = fp_sf[v].v[1];
+			fp_sv[v].xyz2 = GS_SETREG_XYZ2(ix < 0 ? 0 : (ix > 65535 ? 65535 : ix), iy < 0 ? 0 : (iy > 65535 ? 65535 : iy), iz);
+		}
+	}
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = part_first[part], last = first + part_count[part];
+
+		part_first[part] = visible_count / 3;
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2];
+			const svert *a = &fp_sv[ia], *b = &fp_sv[ib], *cc = &fp_sv[ic];
+			float area = (b->x - a->x) * (cc->y - a->y) - (cc->x - a->x) * (b->y - a->y);
+
+			if (area * CULL_SIGN <= 0.f) continue;
+			fp_visible[visible_count++] = ia; fp_visible[visible_count++] = ib; fp_visible[visible_count++] = ic;
+			fp_needed[ia] = fp_needed[ib] = fp_needed[ic] = 1;
+		}
+		part_count[part] = visible_count / 3 - part_first[part];
+	}
+	/* the lit colour of each vertex a triangle uses: its gamma table indices from VU0, then the bytes */
+	for (v = 0; v < count; v++)
+	{
+		vec4 idx;
+		int i0, i1, i2;
+
+		if (!fp_needed[v]) continue;
+		if (m->weight[v] == 255) vu0_fp_light1(&n4[v], fp_ltm[m->node[v * 2]], &idx);
+		else vu0_fp_light2(&n4[v], fp_ltm[m->node[v * 2]], fp_ltm[m->node[v * 2 + 1]], &w4[v], &idx);
+		i0 = *(int *)&idx.v[0]; i1 = *(int *)&idx.v[1]; i2 = *(int *)&idx.v[2];
+		fp_sv[v].rgbaq = GS_SETREG_RGBAQ(fp_gamma[i0 > 1279 ? 1279 : i0], fp_gamma[i1 > 1279 ? 1279 : i1], fp_gamma[i2 > 1279 ? 1279 : i2], 0x80, 0x00);
+		fp_sv[v].uv = uv_cache[v];
+	}
+	for (v = count; v < count + extra; v++)
+	{
+		int a = (int)fp_t[v - count][0], b = (int)fp_t[v - count][1], k;
+		float f = fp_c[v - count][0];
+		int ca[3], cb[3];
+
+		if (!fp_needed[v]) continue;
+		for (k = 0; k < 3; k++) { ca[k] = (int)((fp_sv[a].rgbaq >> (8 * k)) & 0xff); cb[k] = (int)((fp_sv[b].rgbaq >> (8 * k)) & 0xff); }
+		fp_sv[v].rgbaq = GS_SETREG_RGBAQ((int)(ca[0] + (cb[0] - ca[0]) * f), (int)(ca[1] + (cb[1] - ca[1]) * f), (int)(ca[2] + (cb[2] - ca[2]) * f), 0x80, 0x00);
+		{
+			int ua = (int)(uv_cache[a] & 0xffff), va = (int)((uv_cache[a] >> 16) & 0xffff), ub = (int)(uv_cache[b] & 0xffff), vb = (int)((uv_cache[b] >> 16) & 0xffff);
+
+			fp_sv[v].uv = GS_SETREG_UV((int)(ua + (ub - ua) * f), (int)(va + (vb - va) * f));
+		}
+	}
+	for (part = 0; part < m->part_count; part++)
+		if (part_count[part]) fp_draw_list(gs, &fp_tex[m->parts[part].texture], fp_sv, &fp_visible[part_first[part] * 3], part_count[part]);
+}
+#endif
+
+/* the arms and the gun, after the map and the Chief */
+static void draw_first_person(GSGLOBAL *gs)
+{
+	const fpm_weapon *fw;
+	float t = player.tick_time * 30.f;
+	int l;
+
+	if (player.view.weapon < 0 || !fpm_weapons[player.view.weapon].present) return;
+	fw = &fpm_weapons[player.view.weapon];
+	if (t > 1.f) t = 1.f;
+	/* the lights in the camera's space (x forward, y left, z up) */
+	for (l = 0; l < 3; l++)
+	{
+		fp_light[l][0] = light_dir[l][0] * cam_fwd[0] + light_dir[l][1] * cam_fwd[1] + light_dir[l][2] * cam_fwd[2];
+		fp_light[l][1] = -(light_dir[l][0] * cam_right[0] + light_dir[l][1] * cam_right[1] + light_dir[l][2] * cam_right[2]);
+		fp_light[l][2] = light_dir[l][0] * cam_up[0] + light_dir[l][1] * cam_up[1] + light_dir[l][2] * cam_up[2];
+	}
+	gs->PrimFogEnable = GS_SETTING_OFF;
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+	if (fp_uv_weapon != player.view.weapon)        /* the texture coordinates, once for a weapon in hand (the arms' are the same for all) */
+	{
+		int i;
+
+		fp_uv_weapon = player.view.weapon;
+		for (i = 0; i < fpm_hands.vertices; i++) fp_uv_cache[0][i] = uv_reg(fpm_hands.uv[i * 2], fpm_hands.uv[i * 2 + 1], (float)FPM_TEXTURE_SIZE);
+		for (i = 0; i < fw->gun->vertices; i++) fp_uv_cache[1][i] = uv_reg(fw->gun->uv[i * 2], fw->gun->uv[i * 2 + 1], (float)FPM_TEXTURE_SIZE);
+#ifndef NO_VU0
+		fp_vectors(&fpm_hands, 0); fp_vectors(fw->gun, 1);
+#endif
+	}
+	fp_draw_model(gs, &fpm_hands, fw->hands_graph_node, t, fp_uv_cache[0], 0);
+	fp_draw_model(gs, fw->gun, fw->gun->graph_node, t, fp_uv_cache[1], 1);
+}
+#endif
+
 static void render_frame(GSGLOBAL *gs, float seconds)
 {
 	float theta = 2.f * (float)M_PI * seconds / ORBIT_SECONDS;
@@ -2370,6 +2897,9 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	draw_textured(gs, &rifle_mask_tex, rifle_v, rifle_spec_rgbaq, NULL, rifle_tri, 0, RIFLE_TRIS);
 	gs->PrimAlphaEnable = GS_SETTING_OFF;
 #endif
+#ifdef FIRST_PERSON
+	draw_first_person(gs);
+#endif
 	PROF_MARK(P_SUBMIT);
 }
 
@@ -2409,6 +2939,9 @@ int main(void)
 	texture_setup(gs, &mask_tex, MASK_TEX_SIZE, GS_PSM_T4, mask_tex_pixels, mask_tex_clut);
 	texture_setup(gs, &rifle_mask_tex, RIFLE_MASK_SIZE, GS_PSM_T4, rifle_mask_pixels, rifle_mask_clut);
 	texture_setup(gs, &display_tex, DISPLAY_TEX_SIZE, GS_PSM_T8, display_tex_pixels, display_tex_clut);
+#ifdef FIRST_PERSON
+	fp_textures_setup(gs);
+#endif
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
 	{
@@ -2427,6 +2960,9 @@ int main(void)
 	if (vram_failed) { printf("VRAM: a texture did not fit; stopping\n"); return 1; }
 	tables_setup();
 #ifndef NO_VU0
+#ifdef FIRST_PERSON
+	fp_vu0_setup();
+#endif
 	pack_vertices();
 #endif
 #ifdef NO_MAP
