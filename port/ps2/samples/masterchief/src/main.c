@@ -25,11 +25,14 @@
 #include <gsToolkit.h>
 
 #include "assets.h"
+#ifndef NO_MAP
+#include "map_assets.h"
+#endif
 
 #ifdef PROFILE                      /* -DPROFILE: time the frame's phases with the EE's cycle counter */
 #include <timer.h>
 enum { P_SETUP, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
-static const char *prof_name[P_COUNT] = { "setup", "ground", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
+static const char *prof_name[P_COUNT] = { "setup", "ground/map", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
 static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled;
 static void prof_mark(int phase) { u32 t = cpu_ticks(); prof_sum[phase] += t - prof_last; prof_last = t; }
 #define PROF_MARK(p) prof_mark(p)
@@ -197,11 +200,21 @@ static void pack_vertices(void)
 #define GRID_CELL 0.25f
 #define GAMMA (1.0f / 2.2f)
 #define CULL_SIGN (-1.0f)           /* front faces have this sign of screen-space area (y down) */
+#define DISPLAY_NUDGE 0.0045f       /* the ammo display's depth, toward the camera, in world units */
+
+#ifndef NO_MAP
+#define MAP_FOV_HALF_DEGREES 27.5f  /* the map scene's lens */
+#define MAP_CAMERA_DISTANCE 2.2f    /* the camera orbits the Chief at this distance (world units, 1 = 10 feet) ... */
+#define MAP_CAMERA_HEIGHT 0.35f     /* ... this far above his centre */
+#define MAP_NEAR 0.15f
+#define MAP_FAR 500.f
+#define CHIEF_HEADING 0.f           /* radians about the vertical */
+#endif
 
 static float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
 static float focal;                 /* pixels per unit of x/z */
 static float screen_cx, screen_cy;
-static float z_near, z_far, z_scale; /* z_scale: 65535 / (z_far - z_near) */
+static float z_near, z_far, z_k1, z_k2; /* the 16-bit Z value is z_k1 / z - z_k2: affine in screen space, as the GS interpolates it */
 static float light_dir[3][3];
 static const float light_color[3][3] = { { 0.90f, 0.855f, 0.765f }, { 0.2025f, 0.2475f, 0.36f }, { 0.45f, 0.475f, 0.5f } };
 static const float ambient[3] = { 0.14f, 0.15f, 0.18f };
@@ -422,11 +435,11 @@ static inline u64 uv_reg(float u, float v, float tex_size)
 	return GS_SETREG_UV(iu, iv);
 }
 
-/* the vertex's view-space position to the screen and the 16-bit Z buffer; z_add nudges it toward the camera */
-static inline void project(const float *p, int z_add, svert *o)
+/* the vertex's view-space position to the screen and the 16-bit Z buffer; z_add (world units) nudges its depth toward the camera */
+static inline void project(const float *p, float z_add, svert *o)
 {
-	float zc = p[2] < 0.01f ? 0.01f : p[2], inv = 1.f / zc;
-	int iz = (int)((z_far - zc) * z_scale) + z_add;
+	float zc = p[2] < 0.01f ? 0.01f : p[2], inv = 1.f / zc, zd = zc - z_add;
+	int iz = (int)(z_k1 / (zd < z_near ? z_near : zd) - z_k2);
 
 	o->x = screen_cx + p[0] * inv * focal;
 	o->y = screen_cy - p[1] * inv * focal;
@@ -516,6 +529,7 @@ static void draw_flat_gouraud(GSGLOBAL *gs, const svert *v, const unsigned short
 	}
 }
 
+#ifdef NO_MAP
 /* the ground grid, in model space, sliding back at the cycle's own stride */
 static float ground_color[3];       /* the grid's colour at the centre, gamma encoded */
 
@@ -572,6 +586,195 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 		}
 	}
 }
+
+#endif
+
+#ifndef NO_MAP
+/* ---------- the map: static geometry drawn as one Gouraud mesh ---------- */
+
+/* The camera stands inside the map, so triangles cross the near plane and run far off the screen. The
+   GS's coordinates reach about +-1700 pixels around the screen, so a triangle with a vertex behind the
+   near plane or beyond CLIP_MARGIN pixels outside the screen is clipped against those five planes in
+   view space (Sutherland-Hodgman) before projection; the rest go straight through. */
+#define CLIP_MARGIN 1000.f
+#define CLIP_PLANES 5
+#define CLIP_MAX 8                  /* a triangle gains at most one vertex a plane */
+#define ATTRS 5                     /* what a vertex carries through the clip: r, g, b, u, v */
+
+typedef struct { float p[3]; float a[ATTRS]; } cvert;
+typedef struct { u64 rgbaq, xyz2; } flatv;
+
+static float clip_plane[CLIP_PLANES][4];   /* d = a x + b y + c z + e >= 0 is inside */
+static float map_view[MAP_VERTS][3];
+static svert map_v[MAP_VERTS];
+static unsigned char map_code[MAP_VERTS];
+static flatv map_out[MAP_TRIS * 3 + 4096];
+#ifdef PROFILE
+static u32 prof_map_clipped;
+#endif
+
+static void clip_setup(const GSGLOBAL *gs)
+{
+	float w = (float)gs->Width, h = (float)gs->Height;
+	static float q[CLIP_PLANES][4];
+
+	q[0][2] = 1.f; q[0][3] = -z_near;                                    /* near */
+	q[1][0] = focal; q[1][2] = screen_cx + CLIP_MARGIN;                  /* left */
+	q[2][0] = -focal; q[2][2] = w + CLIP_MARGIN - screen_cx;             /* right */
+	q[3][1] = -focal; q[3][2] = screen_cy + CLIP_MARGIN;                 /* top */
+	q[4][1] = focal; q[4][2] = h + CLIP_MARGIN - screen_cy;              /* bottom */
+	memcpy(clip_plane, q, sizeof(q));
+}
+
+static inline float plane_dist(int pl, const float *p)
+{
+	const float *q = clip_plane[pl];
+
+	return q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3];
+}
+
+static inline int outcode(const float *p)
+{
+	int pl, code = 0;
+
+	for (pl = 0; pl < CLIP_PLANES; pl++)
+		if (plane_dist(pl, p) < 0.f) code |= 1 << pl;
+	return code;
+}
+
+static int clip_triangle(const cvert *tri, cvert *out)
+{
+	cvert a[CLIP_MAX], b[CLIP_MAX], *src = a, *dst = b, *swap;
+	int n = 3, pl, i, k, m;
+
+	memcpy(a, tri, 3 * sizeof(cvert));
+	for (pl = 0; pl < CLIP_PLANES && n > 0; pl++)
+	{
+		m = 0;
+		for (i = 0; i < n; i++)
+		{
+			const cvert *c = &src[i], *q = &src[(i + n - 1) % n];
+			float dc = plane_dist(pl, c->p), dq = plane_dist(pl, q->p);
+
+			if ((dc >= 0.f) != (dq >= 0.f))
+			{
+				float t = dq / (dq - dc);
+				cvert *o = &dst[m++];
+
+				for (k = 0; k < 3; k++) o->p[k] = q->p[k] + (c->p[k] - q->p[k]) * t;
+				for (k = 0; k < ATTRS; k++) o->a[k] = q->a[k] + (c->a[k] - q->a[k]) * t;
+			}
+			if (dc >= 0.f) dst[m++] = *c;
+		}
+		swap = src; src = dst; dst = swap;
+		n = m;
+	}
+	memcpy(out, src, n * sizeof(cvert));
+	return n;
+}
+
+static inline u64 flat_rgbaq(const float *a)
+{
+	return GS_SETREG_RGBAQ((int)(a[0] + 0.5f), (int)(a[1] + 0.5f), (int)(a[2] + 0.5f), 0x80, 0x00);
+}
+
+/* project a clipped vertex (its depth at least the near plane, give or take rounding) */
+static inline void project_cvert(const cvert *v, svert *o)
+{
+	project(v->p, 0.f, o);
+	o->rgbaq = flat_rgbaq(v->a);
+}
+
+static inline float screen_area(const svert *a, const svert *b, const svert *c)
+{
+	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
+}
+
+static void draw_map(GSGLOBAL *gs, const xform *view)
+{
+	int i, n = 0, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
+	u64 *p;
+
+	for (i = 0; i < MAP_VERTS; i++)
+	{
+		svert *o = &map_v[i];
+
+		apply_point(view, &map_pos[i * 3], map_view[i]);
+		map_code[i] = (unsigned char)outcode(map_view[i]);
+		if (map_code[i]) continue;
+		project(map_view[i], 0.f, o);
+		o->rgbaq = GS_SETREG_RGBAQ(map_color[i * 4], map_color[i * 4 + 1], map_color[i * 4 + 2], map_color[i * 4 + 3], 0x00);
+	}
+	for (i = 0; i < MAP_TRIS; i++)
+	{
+		unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
+		int ca = map_code[ia], cb = map_code[ib], cc = map_code[ic];
+
+		if (ca & cb & cc) continue;                          /* all outside one plane */
+		if ((ca | cb | cc) == 0)
+		{
+			const svert *a = &map_v[ia], *b = &map_v[ib], *c = &map_v[ic];
+
+			if (screen_area(a, b, c) * CULL_SIGN <= 0.f) continue;
+			if (n + 3 > cap) break;
+			map_out[n].rgbaq = a->rgbaq; map_out[n++].xyz2 = a->xyz2;
+			map_out[n].rgbaq = b->rgbaq; map_out[n++].xyz2 = b->xyz2;
+			map_out[n].rgbaq = c->rgbaq; map_out[n++].xyz2 = c->xyz2;
+		}
+		else
+		{
+			cvert in[3], poly[CLIP_MAX];
+			svert sv[CLIP_MAX];
+			int m, k, v, ids[3];
+
+			ids[0] = ia; ids[1] = ib; ids[2] = ic;
+			for (v = 0; v < 3; v++)
+			{
+				memcpy(in[v].p, map_view[ids[v]], sizeof(in[v].p));
+				for (k = 0; k < 3; k++) in[v].a[k] = (float)map_color[ids[v] * 4 + k];
+				in[v].a[3] = in[v].a[4] = 0.f;
+			}
+			m = clip_triangle(in, poly);
+			for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v]);
+			for (k = 1; k + 1 < m; k++)
+			{
+				if (screen_area(&sv[0], &sv[k], &sv[k + 1]) * CULL_SIGN <= 0.f) continue;
+				if (n + 3 > cap) break;
+				map_out[n].rgbaq = sv[0].rgbaq; map_out[n++].xyz2 = sv[0].xyz2;
+				map_out[n].rgbaq = sv[k].rgbaq; map_out[n++].xyz2 = sv[k].xyz2;
+				map_out[n].rgbaq = sv[k + 1].rgbaq; map_out[n++].xyz2 = sv[k + 1].xyz2;
+			}
+#ifdef PROFILE
+			prof_map_clipped++;
+#endif
+		}
+	}
+#ifdef PROFILE
+	prof_tris += n / 3;
+#endif
+	if (n == 0) return;
+	set_prim(gs, NULL);
+	p = gsKit_heap_alloc(gs, n, n * 16, GIF_AD);             /* two registers a vertex: one quadword */
+	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
+	*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
+	memcpy(p, map_out, n * sizeof(flatv));
+}
+
+/* the camera orbits the Chief; he stands where the exporter found the ground */
+static xform chief_placement;
+
+static void placement_setup(void)
+{
+	float c = cosf(CHIEF_HEADING), s = sinf(CHIEF_HEADING), foot[3] = { MODEL_CENTER_X, MODEL_CENTER_Y, MODEL_FLOOR_Z }, rf[3];
+
+	memset(&chief_placement, 0, sizeof(chief_placement));
+	chief_placement.r[0][0] = c; chief_placement.r[0][1] = s; chief_placement.r[1][0] = -s; chief_placement.r[1][1] = c; chief_placement.r[2][2] = 1.f;
+	apply_vector(&chief_placement, foot, rf);
+	chief_placement.t[0] = MAP_CHIEF_X - rf[0];
+	chief_placement.t[1] = MAP_CHIEF_Y - rf[1];
+	chief_placement.t[2] = MAP_CHIEF_Z - rf[2];
+}
+#endif
 
 /* ---------- frame ---------- */
 
@@ -648,6 +851,23 @@ static void skin_chief(const xform *bone_world, const xform *view, int visor_fir
 }
 #endif
 
+/* the camera's axes for an eye and a target (z up) */
+static void camera_look(const float *eye, const float *target)
+{
+	static const float up[3] = { 0.f, 0.f, 1.f };
+	int i;
+
+	for (i = 0; i < 3; i++) { cam_pos[i] = eye[i]; cam_fwd[i] = target[i] - eye[i]; }
+	normalise(cam_fwd);
+	cam_right[0] = cam_fwd[1] * up[2] - cam_fwd[2] * up[1];
+	cam_right[1] = cam_fwd[2] * up[0] - cam_fwd[0] * up[2];
+	cam_right[2] = cam_fwd[0] * up[1] - cam_fwd[1] * up[0];
+	normalise(cam_right);
+	cam_up[0] = cam_right[1] * cam_fwd[2] - cam_right[2] * cam_fwd[1];
+	cam_up[1] = cam_right[2] * cam_fwd[0] - cam_right[0] * cam_fwd[2];
+	cam_up[2] = cam_right[0] * cam_fwd[1] - cam_right[1] * cam_fwd[0];
+}
+
 static void render_frame(GSGLOBAL *gs, float seconds)
 {
 	float theta = 2.f * (float)M_PI * seconds / ORBIT_SECONDS;
@@ -661,6 +881,16 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 #endif
 	int i, j;
 
+#ifndef NO_MAP
+	/* the Chief stands on the map and the camera circles him */
+	orbit = chief_placement;
+	{
+		const float target[3] = { MAP_CHIEF_X, MAP_CHIEF_Y, MAP_CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
+		const float eye[3] = { target[0] + MAP_CAMERA_DISTANCE * c, target[1] + MAP_CAMERA_DISTANCE * s, target[2] + MAP_CAMERA_HEIGHT };
+
+		camera_look(eye, target);
+	}
+#else
 	/* orbit about the model's centre; row-vector rotation [[c,s,0],[-s,c,0],[0,0,1]] */
 	memset(&orbit, 0, sizeof(orbit));
 	orbit.r[0][0] = c; orbit.r[0][1] = s; orbit.r[1][0] = -s; orbit.r[1][1] = c; orbit.r[2][2] = 1.f;
@@ -671,6 +901,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 		apply_vector(&orbit, ctr, rc);
 		for (i = 0; i < 3; i++) orbit.t[i] = ctr[i] - rc[i];
 	}
+#endif
 	/* the view: the camera's right, up and forward as the columns */
 	for (i = 0; i < 3; i++)
 	{
@@ -694,6 +925,13 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	mat4_from_xform(&rifle_world4, &rifle_world);
 #endif
 
+#ifndef NO_MAP
+	gsKit_clear(gs, GS_SETREG_RGBAQ(0x70, 0x9c, 0xd0, 0x00, 0x00));    /* the sky */
+	PROF_MARK(P_SETUP);
+	draw_map(gs, &view);
+	(void)scroll; (void)world_to_view;
+	PROF_MARK(P_GROUND);
+#else
 	/* backdrop */
 	gsKit_clear(gs, GS_SETREG_RGBAQ(0x20, 0x26, 0x2c, 0x00, 0x00));
 	gsKit_set_test(gs, GS_ZTEST_OFF);
@@ -701,6 +939,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	draw_ground(gs, &world_to_view, theta, scroll);
 	gsKit_set_test(gs, GS_ZTEST_ON);
 	PROF_MARK(P_GROUND);
+#endif
 
 #ifndef NO_VU0
 	skin_chief(bone_world4, &view4, CHIEF_VERTS - 69);
@@ -740,7 +979,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 		svert *o = &display_v[i];
 
 		apply_point(&rifle_view, &display_pos[i * 3], pp);
-		project(pp, 120, o);
+		project(pp, DISPLAY_NUDGE, o);
 		o->uv = uv_reg(display_uv[i * 2], display_uv[i * 2 + 1], 256.f);
 		o->rgbaq = GS_SETREG_RGBAQ(128, 128, 128, 0x80, 0x00);
 	}
@@ -777,7 +1016,13 @@ int main(void)
 
 	gs = gsKit_init_global_custom(1024 * 1024, 16 * 1024);
 	gs->Mode = GS_MODE_NTSC;        /* 60 Hz whatever the console's region: the scene is timed for it */
+	gs->Height = 448;               /* gsKit sized the buffers for the console's own mode (PAL: 512 lines) before this */
+#if defined(FB16) || !defined(NO_MAP)
+	gs->PSM = GS_PSM_CT16S;         /* 16-bit frame buffers: 1.2 MB less video memory, for the map's textures */
+	gs->Dithering = GS_SETTING_ON;  /* hides the banding that 5 bits a channel would show */
+#else
 	gs->PSM = GS_PSM_CT32;
+#endif
 	gs->PSMZ = GS_PSMZ_16S;
 	gs->DoubleBuffering = GS_SETTING_ON;
 	gs->ZBuffering = GS_SETTING_ON;
@@ -795,40 +1040,47 @@ int main(void)
 	texture_setup(gs, &rifle_mask_tex, 256, rifle_mask_pixels, rifle_mask_clut);
 	texture_setup(gs, &display_tex, 256, display_tex_pixels, display_tex_clut);
 
+	printf("VRAM: %u of 4194304 bytes allocated\n", (unsigned)gs->CurrentPointer);
 	tables_setup();
 #ifndef NO_VU0
 	pack_vertices();
 #endif
+#ifdef NO_MAP
 	{
 		static const float base[3] = { 0.075f, 0.09f, 0.11f }, add[3] = { 0.10f, 0.14f, 0.17f };
 
 		for (i = 0; i < 3; i++) ground_color[i] = powf(base[i] + add[i], GAMMA);
 	}
+#endif
 
-	/* camera: in front of the model (+x), a little above its middle, looking at the centre */
+	/* lights, and the camera: in front of the model (+x), a little above its middle, looking at the
+	   centre (the map scene moves the camera every frame) */
 	{
-		float centre[3] = { MODEL_CENTER_X, MODEL_CENTER_Y, MODEL_CENTER_Z }, up[3] = { 0.f, 0.f, 1.f };
+		float centre[3] = { MODEL_CENTER_X, MODEL_CENTER_Y, MODEL_CENTER_Z };
+		float eye[3] = { centre[0] + CAMERA_DISTANCE, centre[1], centre[2] + CAMERA_HEIGHT };
 		static const float key[3] = { 0.6f, -0.5f, 0.7f }, fill[3] = { 0.3f, 0.8f, 0.2f }, back[3] = { -0.8f, -0.1f, 0.3f };
 
-		cam_pos[0] = centre[0] + CAMERA_DISTANCE; cam_pos[1] = centre[1]; cam_pos[2] = centre[2] + CAMERA_HEIGHT;
-		for (i = 0; i < 3; i++) cam_fwd[i] = centre[i] - cam_pos[i];
-		normalise(cam_fwd);
-		cam_right[0] = cam_fwd[1] * up[2] - cam_fwd[2] * up[1];
-		cam_right[1] = cam_fwd[2] * up[0] - cam_fwd[0] * up[2];
-		cam_right[2] = cam_fwd[0] * up[1] - cam_fwd[1] * up[0];
-		normalise(cam_right);
-		cam_up[0] = cam_right[1] * cam_fwd[2] - cam_right[2] * cam_fwd[1];
-		cam_up[1] = cam_right[2] * cam_fwd[0] - cam_right[0] * cam_fwd[2];
-		cam_up[2] = cam_right[0] * cam_fwd[1] - cam_right[1] * cam_fwd[0];
+		camera_look(eye, centre);
 		memcpy(light_dir[0], key, sizeof(key)); memcpy(light_dir[1], fill, sizeof(fill)); memcpy(light_dir[2], back, sizeof(back));
 		for (i = 0; i < 3; i++) normalise(light_dir[i]);
 	}
 	screen_cx = gs->Width * 0.5f;
 	screen_cy = gs->Height * 0.5f;
+#ifndef NO_MAP
+	focal = (1.f / tanf(MAP_FOV_HALF_DEGREES * (float)M_PI / 180.f)) * gs->Height * 0.5f;
+	z_near = MAP_NEAR;
+	z_far = MAP_FAR;
+#else
 	focal = (1.f / tanf(FOV_HALF_DEGREES * (float)M_PI / 180.f)) * gs->Height * 0.5f;
 	z_near = CAMERA_DISTANCE - MODEL_RADIUS * 1.5f;
 	z_far = CAMERA_DISTANCE + MODEL_RADIUS * 2.5f;
-	z_scale = 65535.f / (z_far - z_near);
+#endif
+	z_k1 = 65535.f * z_far * z_near / (z_far - z_near);
+	z_k2 = 65535.f * z_near / (z_far - z_near);
+#ifndef NO_MAP
+	clip_setup(gs);
+	placement_setup();
+#endif
 
 	refresh = gs->Mode == GS_MODE_PAL ? 50.f : 60.f;
 	gsKit_add_vsync_handler(vsync_handler);
@@ -862,6 +1114,10 @@ int main(void)
 
 			printf("PROFILE %d frames in %d vsyncs: %.1f fps, %.2f ms/frame; %u tris drawn + %u culled per frame\n",
 				frames, vsyncs, frames * refresh / vsyncs, (vsyncs * 1000.f / refresh) / frames, prof_tris / frames, prof_tris_culled / frames);
+#ifndef NO_MAP
+			printf("PROFILE   %u map triangles a frame were clipped\n", prof_map_clipped / frames);
+			prof_map_clipped = 0;
+#endif
 			for (p = 0; p < P_COUNT; p++)
 			{
 				printf("PROFILE   %-11s %6.2f ms\n", prof_name[p], prof_sum[p] * ms_per_tick / frames);

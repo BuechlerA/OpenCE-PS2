@@ -4,3 +4,5 @@ src/assets.h
 *.elf
 *.o
 __pycache__/
+src/map_assets.c
+src/map_assets.h

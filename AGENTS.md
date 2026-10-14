@@ -26,8 +26,9 @@ PS2 status comes first) and [docs/ps2_port_plan.md](docs/ps2_port_plan.md).
 - Run PS2 programs in PCSX2 without its window with `tools/ps2/pcsx2_run.py`;
   keep the emulator's memory at 32 MB so it enforces the retail budget.
 - The Master Chief sample is built apart from `ninja`: in
-  `port/ps2/samples/masterchief` run `python tools/export_assets.py`, then
-  `make` ([README](port/ps2/samples/masterchief/README.md)). It needs
+  `port/ps2/samples/masterchief` run `python tools/export_assets.py` and
+  `python tools/export_map.py`, then `make`
+  ([README](port/ps2/samples/masterchief/README.md)). It needs
   `assets/maps/bloodgulch.map` and the ps2dev toolchain with gsKit.
 
 ### Checking the Master Chief sample
@@ -53,7 +54,7 @@ that only print):
 ## Rules
 
 - **Game data stays out of the repository.** Keep the maps and disc image in
-  `assets/`. The sample's generated `src/assets.c`, `src/assets.h` and the ELF
+  `assets/`. The sample's generated `src/assets.[ch]`, `src/map_assets.[ch]` and the ELF
   hold the game's models and textures: they are gitignored; never commit
   them, nor screenshots, GIFs or videos made from them.
 - Change `source/` as little as possible and mark each change from the
