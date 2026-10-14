@@ -38,16 +38,24 @@ static float wrap_angle(float a) { while (a > PI_F) a -= 2.f * PI_F; while (a < 
 
 /* ---------- the plan ---------- */
 
-/* the controller can walk from (ax, ay, az) to (bx, by), and there is room around b */
-static int walk_ok(float az, float bx, float by, float *bz)
+/* the controller can walk from a point at height az to (bx, by), and there is room around b. Only ground within a step of az counts (a
+   drop or a rise of more is no way), so the queries look no deeper than that, which is far less of the tree. `cache` (a byte, or NULL) holds
+   the answer to the room around b, which does not depend on where the walk comes from */
+static int walk_ok(float az, float bx, float by, unsigned char *cache, float *bz)
 {
 	static const float around[4][2] = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } };
 	float nz, z;
 	int i;
 
-	if (!fp_ground(bx, by, az + STEP_UP, bz, &nz, NULL) || nz < MIN_NORMAL_Z || fabsf(*bz - az) > STEP_UP) return 0;
+	if (!fp_ground_in(bx, by, az + STEP_UP, 2.f * STEP_UP, bz, &nz, NULL) || nz < MIN_NORMAL_Z || fabsf(*bz - az) > STEP_UP) return 0;
+	if (cache && *cache) return *cache == 1;
 	for (i = 0; i < 4; i++)
-		if (!fp_ground(bx + around[i][0] * CLEARANCE, by + around[i][1] * CLEARANCE, az + STEP_UP, &z, NULL, NULL) || fabsf(z - *bz) > 1.5f * STEP_UP) return 0;
+		if (!fp_ground_in(bx + around[i][0] * CLEARANCE, by + around[i][1] * CLEARANCE, *bz + 1.5f * STEP_UP, 3.f * STEP_UP, &z, NULL, NULL) || fabsf(z - *bz) > 1.5f * STEP_UP)
+		{
+			if (cache) *cache = 2;
+			return 0;
+		}
+	if (cache) *cache = 1;
 	return 1;
 }
 
@@ -58,13 +66,14 @@ static int line_ok(const float *a, const float *b, float az)
 	int steps = (int)ceilf(length / 0.25f), i;
 
 	for (i = 1; i <= steps; i++)
-		if (!walk_ok(z, a[0] + dx * i / steps, a[1] + dy * i / steps, &z)) return 0;
+		if (!walk_ok(z, a[0] + dx * i / steps, a[1] + dy * i / steps, NULL, &z)) return 0;
 	return 1;
 }
 
 static float node_z[GRID * GRID], node_cost[GRID * GRID];
 static short node_parent[GRID * GRID];
 static unsigned char node_state[GRID * GRID];         /* 0 new, 1 open, 2 closed */
+static unsigned char node_room[GRID * GRID];          /* 0 unknown, 1 room around the cell, 2 none */
 typedef struct { float f; short node; } heap_item;
 static heap_item heap[GRID * GRID * 2];
 static int heap_count;
@@ -115,6 +124,7 @@ static int plan_leg(fp_demo *d, const float *a, const float *b)
 	if (!fp_ground(a[0], a[1], 6.f, &sz, NULL, NULL)) return 0;
 	s = sy * GRID + sx; g = gy * GRID + gx;
 	memset(node_state, 0, sizeof(node_state));
+	memset(node_room, 0, sizeof(node_room));
 	node_z[s] = sz; node_cost[s] = 0.f; node_parent[s] = -1; node_state[s] = 1;
 	heap_count = 0;
 	heap_push(hypotf((float)(gx - sx), (float)(gy - sy)) * CELL, s);
@@ -131,7 +141,7 @@ static int plan_leg(fp_demo *d, const float *a, const float *b)
 			float z, step, cost;
 
 			if ((!dx && !dy) || mx < 0 || my < 0 || mx >= GRID || my >= GRID || node_state[m] == 2) continue;
-			if (!walk_ok(node_z[node], ox + mx * CELL, oy + my * CELL, &z)) continue;
+			if (!walk_ok(node_z[node], ox + mx * CELL, oy + my * CELL, &node_room[m], &z)) continue;
 			step = (dx && dy ? 1.4142f : 1.f) * CELL;
 			cost = node_cost[node] + step + 2.f * fabsf(z - node_z[node]);       /* a climb costs more than the ground it covers */
 			if (node_state[m] == 1 && cost >= node_cost[m]) continue;

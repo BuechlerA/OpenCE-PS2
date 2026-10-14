@@ -21,29 +21,36 @@ static void run(fp_player *p, const fp_pad *pad, float seconds)
 	for (t = 0; t < seconds; t += dt) fp_update(p, pad, dt);
 }
 
-/* how far the pill is into the front of a collision surface: the deepest of its spheres */
+/* how far the pill is into the front of a collision surface: the deepest of its spheres, against every triangle of the map (not the tree's candidates) */
 static float penetration(const fp_player *p)
 {
 	float centres[3][3], deepest = 0.f;
-	int spheres = pill_spheres(p->pos, p->crouch, centres), s, i, n = gather(p->pos[0] - 1.f, p->pos[1] - 1.f, p->pos[0] + 1.f, p->pos[1] + 1.f);
+	int spheres = pill_spheres(p->pos, p->crouch, centres), s, i;
 
-	for (s = 0; s < spheres; s++)
-		for (i = 0; i < n; i++)
+	for (i = 0; i < MAP_COL_TRIS; i++)
+	{
+		const unsigned short *ix = &map_col_tri[i * 3];
+		const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
+		float e1[3], e2[3], nrm[3], length;
+
+		if (fmaxf(a[0], fmaxf(b[0], c[0])) < p->pos[0] - 0.3f || fminf(a[0], fminf(b[0], c[0])) > p->pos[0] + 0.3f) continue;
+		if (fmaxf(a[1], fmaxf(b[1], c[1])) < p->pos[1] - 0.3f || fminf(a[1], fminf(b[1], c[1])) > p->pos[1] + 0.3f) continue;
+		sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
+		length = sqrtf(dot3(nrm, nrm));
+		if (length < 1e-12f) continue;
+		for (s = 0; s < spheres; s++)
 		{
-			const unsigned short *ix = &map_col_tri[candidates[i] * 3];
-			const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
-			float e1[3], e2[3], nrm[3], to[3], closest[3], d[3], length;
+			float to[3], closest[3], d[3];
 
-			sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
-			length = sqrtf(dot3(nrm, nrm));
-			if (length < 1e-12f) continue;
 			sub3(centres[s], a, to);
 			if (dot3(to, nrm) / length < 0.f) continue;           /* behind it: the surface does not touch from there */
 			closest_on_triangle(centres[s], a, b, c, closest);
 			sub3(centres[s], closest, d);
 			length = sqrtf(dot3(d, d));
 			if (MAP_RADIUS - length > deepest) deepest = MAP_RADIUS - length;
+			length = sqrtf(dot3(nrm, nrm));
 		}
+	}
 	return deepest;
 }
 
@@ -94,15 +101,19 @@ int main(void)
 	{
 		float deepest = 0.f, lowest = 1e9f, start_depth_worst = 0.f;
 		int deepest_run = -1, deepest_tick = -1;
-		int run_index, tick_index, rolls = 0;
+		int run_index, tick_index, rolls = 0, skipped = 0;
 
 		for (run_index = 0; run_index < 40; run_index++)
 		{
 			float x, y, g, nz;
 			fp_pad pad = { 0, 0, 0, 0, 0 };
 
-			do { x = 10.f + rand01() * 120.f; y = -185.f + rand01() * 140.f; } while (!fp_ground(x, y, 3.f, &g, &nz, NULL));
-			fp_init(&p, x, y, rand01() * 6.28f);                  /* (a place against a wall is pushed out of it) */
+			do   /* (a place against a wall is pushed out of it; one in a crevice that the push cannot clear is not a place to start) */
+			{
+				do { x = 10.f + rand01() * 120.f; y = -185.f + rand01() * 140.f; } while (!fp_ground(x, y, 3.f, &g, &nz, NULL));
+				fp_init(&p, x, y, rand01() * 6.28f);
+				if (penetration(&p) > 0.005f) skipped++;
+			} while (penetration(&p) > 0.005f);
 			if (penetration(&p) > start_depth_worst) start_depth_worst = penetration(&p);
 			for (tick_index = 0; tick_index < 40 * 60; tick_index++)
 			{
@@ -121,9 +132,124 @@ int main(void)
 				if (p.pos[2] < lowest) lowest = p.pos[2];
 			}
 		}
-		printf("40 random players x 40 s (%d inputs): deepest into a surface %.4f units (run %d, tick %d; the worst place to start was %.4f deep), lowest z %.2f\n", rolls, deepest, deepest_run, deepest_tick, start_depth_worst, lowest);
+		printf("40 random players x 40 s (%d inputs): deepest into a surface %.4f units (run %d, tick %d; the worst place to start was %.4f deep, %d places in crevices skipped), lowest z %.2f\n", rolls, deepest, deepest_run, deepest_tick, start_depth_worst, skipped, lowest);
 		CHECK(deepest < 0.02f, "the pill went %.4f units into a surface", deepest);
 		CHECK(lowest > -5.f, "fell through the map to z %.2f", lowest);
+	}
+
+	/* the BSP's tree and the objects' grid give every triangle that is ground: the highest up-facing triangle under 4,000 random points,
+	   by the tree and by a look at every triangle */
+	{
+		int k, wrong = 0, found = 0;
+
+		for (k = 0; k < 4000; k++)
+		{
+			float x = -5.f + rand01() * 170.f, y = -215.f + rand01() * 180.f, zmax = -0.5f + rand01() * 12.f, z = 0.f, brute = -1e9f;
+			int i, have = 0, tree = fp_ground(x, y, zmax, &z, NULL, NULL);
+
+			for (i = 0; i < MAP_COL_TRIS; i++)
+			{
+				const unsigned short *ix = &map_col_tri[i * 3];
+				const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
+				float d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]), w0, w1, w2, zz, e1[3], e2[3], nrm[3];
+
+				if (fabsf(d) < 1e-12f) continue;
+				w0 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d; w1 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d; w2 = 1.f - w0 - w1;
+				if (w0 < -1e-5f || w1 < -1e-5f || w2 < -1e-5f) continue;
+				zz = w0 * a[2] + w1 * b[2] + w2 * c[2];
+				sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
+				if (zz > zmax || zz < zmax - 100.f || nrm[2] <= 1e-4f * sqrtf(dot3(nrm, nrm))) continue;
+				if (!have || zz > brute) { brute = zz; have = 1; }
+			}
+			if (tree) found++;
+			/* the tree must find the ground within 8 units under the point, and anything it finds must be the highest there is (it may also find
+			   ground deeper than 8, from a leaf it reached) */
+			if ((have && brute >= zmax - 8.f && !tree) || (tree && (!have || fabsf(brute - z) > 1e-3f))) { if (wrong++ < 3) printf("  tree %d (%.4f) brute %d (%.4f) at %.2f %.2f under %.2f\n", tree, z, have, brute, x, y, zmax); }
+		}
+		printf("ground by the tree against every triangle: %d points, %d with ground, %d differ\n", k, found, wrong);
+		CHECK(wrong == 0, "the tree missed ground at %d points", wrong);
+	}
+
+	/* the Chief is solid: walking straight at him from 2.4 units stops at the sum of two radii */
+	{
+		fp_pad forward = { 0, 32767, 0, 0, 0 };
+		float closest = 1e9f;
+		int k;
+
+		fp_init(&p, MAP_DEMO_CHIEF_X + 2.4f, MAP_DEMO_CHIEF_Y, (float)M_PI);
+		for (k = 0; k < 60 * 12; k++)
+		{
+			fp_update(&p, &forward, 1.f / 60.f);
+			closest = fminf(closest, hypotf(p.pos[0] - MAP_DEMO_CHIEF_X, p.pos[1] - MAP_DEMO_CHIEF_Y));
+		}
+		printf("walking at the Chief for 12 s: never nearer than %.3f units (his capsule's radius and the player's make 0.4)\n", closest);
+		CHECK(closest > 0.36f && closest < 0.6f, "stopped %.3f from the Chief", closest);
+	}
+
+	/* scenery is solid: for the steep surfaces of scenery within the pill's height, the player starts a unit in front of one and walks into it: it does not get through */
+	{
+		int tried = 0, through = 0, tri, k;
+		fp_pad forward = { 0, 32767, 0, 0, 0 };
+
+		for (tri = MAP_COL_STRUCTURE_TRIS; tri < MAP_COL_TRIS - 80 && tried < 60; tri += 5)
+		{
+			const unsigned short *ix = &map_col_tri[tri * 3];
+			const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
+			float e1[3], e2[3], nrm[3], length, centre[3], g, start[2], depth_in;
+
+			sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
+			length = sqrtf(dot3(nrm, nrm));
+			if (length < 1e-9f) continue;
+			nrm[0] /= length; nrm[1] /= length; nrm[2] /= length;
+			if (fabsf(nrm[2]) > 0.3f) continue;                                /* a wall of it, not a top */
+			centre[0] = (a[0] + b[0] + c[0]) / 3.f; centre[1] = (a[1] + b[1] + c[1]) / 3.f; centre[2] = (a[2] + b[2] + c[2]) / 3.f;
+			length = sqrtf(nrm[0] * nrm[0] + nrm[1] * nrm[1]);
+			start[0] = centre[0] + nrm[0] / length * 1.2f; start[1] = centre[1] + nrm[1] / length * 1.2f;
+			if (!fp_ground(start[0], start[1], centre[2] + 0.3f, &g, NULL, NULL) || centre[2] - g < 0.1f || centre[2] - g > 0.6f) continue;   /* the wall's middle is within the pill's height */
+			fp_init(&p, start[0], start[1], atan2f(-nrm[1], -nrm[0]));
+			if (penetration(&p) > 0.01f) continue;
+			tried++;
+			for (k = 0; k < 60 * 3 / 2; k++) fp_update(&p, &forward, 1.f / 60.f);      /* 1.5 s: it reaches the wall in half a second and presses on, not long enough to go round */
+			depth_in = (p.pos[0] - centre[0]) * nrm[0] + (p.pos[1] - centre[1]) * nrm[1] + (p.pos[2] - centre[2]) * nrm[2];
+			{
+				float at[3] = { p.pos[0], p.pos[1], centre[2] }, near_point[3], gap[3];
+
+				closest_on_triangle(at, a, b, c, near_point); sub3(at, near_point, gap);
+				/* behind its plane and close to it: through. (Behind it and far from it: round the object, which a small rock allows.) */
+				if (depth_in >= 0.f || sqrtf(dot3(gap, gap)) > 0.5f) depth_in = 1.f;
+			}
+			if (depth_in < 0.f) { through++; printf("  got through scenery triangle %d (%.1f, %.1f, %.2f), %.3f behind its plane\n", tri, centre[0], centre[1], centre[2], depth_in); }
+		}
+		printf("walking into %d walls of scenery for 1.5 s each: %d got through\n", tried, through);
+		CHECK(tried >= 10 && through == 0, "tried %d, through %d", tried, through);
+	}
+
+	/* standing up under a ceiling is refused: a place where the pill fits crouched but not standing, found over the map */
+	{
+		float x, y, z, nz, push[3], found_x = 0, found_y = 0, found_z = 0;
+		int found = 0, k;
+		fp_pad crouch = { 0, 0, 0, 0, FP_CROUCH }, idle_pad = { 0, 0, 0, 0, 0 };
+
+		for (x = -5.f; x < 165.f && !found; x += 0.4f)
+			for (y = -215.f; y < -35.f && !found; y += 0.4f)
+			{
+				float feet[3];
+
+				if (!fp_ground(x, y, 60.f, &z, &nz, NULL) || nz < 0.95f) continue;
+				feet[0] = x; feet[1] = y; feet[2] = z + 0.002f;
+				if (deepest_overlap(feet, 0.f, push) > 0.01f && deepest_overlap(feet, 1.f, push) < 0.001f) { found = 1; found_x = x; found_y = y; found_z = z; }
+			}
+		if (!found) printf("no place in the map where the pill fits crouched but not standing (the refusal is not exercised)\n");
+		else
+		{
+			fp_init(&p, found_x, found_y, 0.f);
+			p.pos[0] = found_x; p.pos[1] = found_y; p.pos[2] = found_z + 0.002f;        /* where the scan found it (the start pushed the standing pill out) */
+			p.crouch = 1.f;
+			for (k = 0; k < 60; k++) fp_update(&p, &idle_pad, 1.f / 60.f);
+			printf("under a ceiling at (%.1f, %.1f): crouched 1 s and let go, the crouch is %.2f\n", found_x, found_y, p.crouch);
+			CHECK(p.crouch > 0.3f && penetration(&p) < 0.005f, "stood up into a ceiling (crouch %.2f, %.4f into it)", p.crouch, penetration(&p));
+			(void)crouch;
+		}
 	}
 
 	/* the dead zone: a stick at 9000 does nothing, at full is 1.0 */

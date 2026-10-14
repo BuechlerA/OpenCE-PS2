@@ -230,28 +230,24 @@ def ground_height(P, T, x, y, below):
 SB_COLLISION_BSP = SB_SURFACES - 72
 SB_COLLISION_MATERIALS = SB_COLLISION_BSP - 12
 
-def load_collision_bsp(mf, index=0):
-    """-> dict(vertices (n, 3), polygons [list of vertex indices, counter-clockwise from the plane's front], normals (m, 3), offsets (m),
-    flags (m), material (m), materials [(shader, physics material)]) of a map's structure BSP's collision BSP"""
-    full, td, h = mf.full, mf.td, mf.h
-    inst = (h[0] - B) + (h[1] & 0xFFFF) * 0x20
-    scenario = struct.unpack_from('<I', td, inst + 0x14)[0] - B
-    _count, ref = struct.unpack_from('<iI', td, scenario + SCENARIO_BSP_REFERENCES)
-    file_offset, file_size, base = struct.unpack_from('<iiI', td, ref - B + index * 0x20)
-    buf = full[file_offset:file_offset + file_size]
-    sb = struct.unpack_from('<I', buf, 0)[0] - base
+def parse_collision_bsp(buf, base, cb):
+    """one collision_bsp at offset cb of buf (a structure BSP's buffer loaded at `base`, or the tags' data at B) ->
+    dict(vertices (n, 3), polygons [list of vertex indices, counter-clockwise from the plane's front], normals (m, 3), offsets (m), flags (m),
+    material (m), and the tree: nodes (k, 3) int (plane, back child, front child), planes (p, 4), leaves [list of surface indices], where a
+    child with the top bit set is a leaf (index in the low bits; all ones is none: solid)"""
     def block(o):
         c, a, _ = struct.unpack_from('<iII', buf, o)
         return c, a - base
-    mc, ma = block(sb + SB_COLLISION_MATERIALS)
-    materials = [(_name(td, struct.unpack_from('<I', buf, ma + i * 20 + 4)[0]), struct.unpack_from('<h', buf, ma + i * 20 + 18)[0]) for i in range(mc)]
-    count, cb = block(sb + SB_COLLISION_BSP)
-    assert count == 1
+    nodes_c, nodes_o = block(cb)
     planes_c, planes_o = block(cb + 12)
-    planes = np.frombuffer(buf, dtype='<f4', count=planes_c * 4, offset=planes_o).reshape(-1, 4)
-    sc, so = block(cb + 5 * 12)
-    ec, eo = block(cb + 6 * 12)
-    vc, vo = block(cb + 7 * 12)
+    leaves_c, leaves_o = block(cb + 24)
+    refs_c, refs_o = block(cb + 36)
+    n2_c, n2_o = block(cb + 48)
+    sc, so = block(cb + 60)
+    ec, eo = block(cb + 72)
+    vc, vo = block(cb + 84)
+    planes = np.frombuffer(buf, dtype='<f4', count=planes_c * 4, offset=planes_o).reshape(-1, 4) if planes_c else np.zeros((0, 4), np.float32)
+    nodes = np.frombuffer(buf, dtype='<i4', count=nodes_c * 3, offset=nodes_o).reshape(-1, 3) if nodes_c else np.zeros((0, 3), np.int32)
     surfaces = np.frombuffer(buf, dtype=[('plane', '<i4'), ('first', '<i4'), ('flags', 'u1'), ('breakable', 'u1'), ('material', '<i2')], count=sc, offset=so)
     edges = np.frombuffer(buf, dtype='<i4', count=ec * 6, offset=eo).reshape(-1, 6)
     verts = np.frombuffer(buf, dtype='<f4', count=vc * 4, offset=vo).reshape(-1, 4)[:, :3].astype(np.float64)
@@ -268,4 +264,58 @@ def load_collision_bsp(mf, index=0):
         d = int(surfaces['plane'][s]); p = planes[d & 0x7FFFFFFF].astype(np.float64)
         if d < 0: p = -p
         normals[s] = p[:3]; offsets[s] = p[3]
-    return dict(vertices=verts, polygons=polygons, normals=normals, offsets=offsets, flags=surfaces['flags'].copy(), material=surfaces['material'].copy(), materials=materials)
+    # the leaves: each leaf's bsp2d references (a plane and the root of a 2D tree) and the surfaces at the bottom of those trees
+    n2 = np.frombuffer(buf, dtype='<i4', count=n2_c * 5, offset=n2_o).reshape(-1, 5) if n2_c else np.zeros((0, 5), np.int32)   # plane (nx, ny, d as floats), two children
+    leaf_rows = np.frombuffer(buf, dtype=[('flags', '<u2'), ('count', '<i2'), ('first', '<i4')], count=leaves_c, offset=leaves_o)
+    refs = np.frombuffer(buf, dtype='<i4', count=refs_c * 2, offset=refs_o).reshape(-1, 2) if refs_c else np.zeros((0, 2), np.int32)
+    def surfaces_under(child, out, depth=0):
+        assert depth < 64
+        if child & 0x80000000:
+            out.add(child & 0x7FFFFFFF); return
+        surfaces_under(int(n2[child, 3]) & 0xFFFFFFFF, out, depth + 1)
+        surfaces_under(int(n2[child, 4]) & 0xFFFFFFFF, out, depth + 1)
+    leaves = []
+    for l in range(leaves_c):
+        found = set()
+        for r in range(int(leaf_rows['first'][l]), int(leaf_rows['first'][l]) + int(leaf_rows['count'][l])):
+            surfaces_under(int(refs[r, 1]) & 0xFFFFFFFF, found)
+        assert all(f < sc for f in found)
+        leaves.append(sorted(found))
+    return dict(vertices=verts, polygons=polygons, normals=normals, offsets=offsets, flags=surfaces['flags'].copy(), material=surfaces['material'].copy(),
+                nodes=nodes, planes=planes, leaves=leaves)
+
+def load_collision_bsp(mf, index=0):
+    """the structure BSP's collision BSP (parse_collision_bsp's dict), plus materials [(shader, physics material)]"""
+    full, td, h = mf.full, mf.td, mf.h
+    inst = (h[0] - B) + (h[1] & 0xFFFF) * 0x20
+    scenario = struct.unpack_from('<I', td, inst + 0x14)[0] - B
+    _count, ref = struct.unpack_from('<iI', td, scenario + SCENARIO_BSP_REFERENCES)
+    file_offset, file_size, base = struct.unpack_from('<iiI', td, ref - B + index * 0x20)
+    buf = full[file_offset:file_offset + file_size]
+    sb = struct.unpack_from('<I', buf, 0)[0] - base
+    def block(o):
+        c, a, _ = struct.unpack_from('<iII', buf, o)
+        return c, a - base
+    mc, ma = block(sb + SB_COLLISION_MATERIALS)
+    count, cb = block(sb + SB_COLLISION_BSP)
+    assert count == 1
+    out = parse_collision_bsp(buf, base, cb)
+    out['materials'] = [(_name(td, struct.unpack_from('<I', buf, ma + i * 20 + 4)[0]), struct.unpack_from('<h', buf, ma + i * 20 + 18)[0]) for i in range(mc)]
+    return out
+
+# a collision model ('coll' tag): its nodes block at 0x28C, each node 64 bytes with its bsps block (one collision_bsp of 96 bytes per permutation) at +52
+COLL_NODES_AT, COLL_NODE_SIZE, COLL_NODE_BSPS_AT, COLLISION_BSP_SIZE = 0x28C, 64, 52, 96
+
+def load_collision_model(mf, name, permutation=0):
+    """-> [(node index, parse_collision_bsp's dict)] of the collision model `name`: each node's BSP for one permutation, in the model's own space
+    (the nodes' own transforms are not applied: the scenery's nodes with surfaces are all the first, at the origin)"""
+    td = mf.td
+    a = mf.tags[(b'coll', name)] - B
+    nc, na, _ = struct.unpack_from('<iII', td, a + COLL_NODES_AT)
+    out = []
+    for i in range(nc):
+        e = na - B + i * COLL_NODE_SIZE
+        bc, ba, _ = struct.unpack_from('<iII', td, e + COLL_NODE_BSPS_AT)
+        if bc <= permutation: continue
+        out.append((i, parse_collision_bsp(td, B, ba - B + permutation * COLLISION_BSP_SIZE)))
+    return out

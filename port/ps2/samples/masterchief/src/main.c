@@ -2466,9 +2466,15 @@ int main(void)
 
 		fp_init(&player, MAP_DEMO_START_X, MAP_DEMO_START_Y, atan2f(-dy, -dx));
 #ifndef FP_NO_DEMO
+#ifdef PROFILE
+		u32 plan_start = cpu_ticks();
+#endif
 		if (!fp_demo_init(&demo, &player, MAP_DEMO_START_X, MAP_DEMO_START_Y, goal_x, goal_y, MAP_DEMO_CHIEF_X, MAP_DEMO_CHIEF_Y, via, MAP_DEMO_VIA_COUNT))
 			printf("DEMO: no way from the start to the Chief; the pad alone walks\n");
 		else printf("DEMO: %d points, %.1f units\n", demo.count, demo.length);
+#ifdef PROFILE
+		printf("DEMO: planned in %u ticks (%.0f ms at 294.9 MHz)\n", cpu_ticks() - plan_start, (cpu_ticks() - plan_start) / 294912.f);
+#endif
 #else
 		(void)via; (void)goal_x; (void)goal_y;
 #endif

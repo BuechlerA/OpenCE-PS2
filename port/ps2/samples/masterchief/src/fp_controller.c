@@ -74,20 +74,102 @@ void fp_shape_input(const fp_pad *pad, fp_input *input)
 	input->crouch = (pad->buttons & FP_CROUCH) != 0;
 }
 
+/* ---------- what is collided with ---------- */
+
+/* The map's collision: the structure BSP's surfaces, found through its own tree (the bsp3d: a node is a plane and two children,
+   a leaf the surfaces on its boundary), and the objects' (the scenery placed in the world, the Chief), found through a grid over
+   x, y. Both are triangles in one array; a query gathers the triangles near a box, each once. */
+
+#define MAX_CANDIDATES 2048
+#define MAX_TREE_DEPTH 128
+
+static unsigned short candidates[MAX_CANDIDATES];
+static unsigned stamp[MAP_COL_TRIS], stamp_now;
+
+static float dot3(const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+static void sub3(const float *a, const float *b, float *o) { o[0] = a[0] - b[0]; o[1] = a[1] - b[1]; o[2] = a[2] - b[2]; }
+static void cross3(const float *a, const float *b, float *o) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
+
+static int add_candidate(int count, unsigned tri)
+{
+	if (stamp[tri] == stamp_now) return count;
+	stamp[tri] = stamp_now;
+	if (count < MAX_CANDIDATES) candidates[count++] = (unsigned short)tri;
+	return count;
+}
+
+/* the triangles of a box: down the BSP's tree to the leaves it reaches (a node's plane is crossed by the box, or it is wholly to one
+   side: only that side's child), the surfaces of those leaves, then the objects in the grid cells the box touches */
+static int gather(const float *lo, const float *hi)
+{
+	unsigned stack[MAX_TREE_DEPTH * 2];
+	float centre[3] = { 0.5f * (lo[0] + hi[0]), 0.5f * (lo[1] + hi[1]), 0.5f * (lo[2] + hi[2]) }, half[3] = { 0.5f * (hi[0] - lo[0]), 0.5f * (hi[1] - lo[1]), 0.5f * (hi[2] - lo[2]) };
+	int count = 0, depth = 0, cx, cy;
+
+	stamp_now++;
+	stack[depth++] = 0;
+	while (depth)
+	{
+		unsigned node = stack[--depth];
+
+		while (node < MAP_COL_NODES)                       /* (a child that is no node of the tree, nor a leaf, ends the walk) */
+		{
+			const unsigned *n = &map_col_nodes[node * 3];
+			const float *plane = &map_col_planes[n[0] * 4];
+			float distance = plane[0] * centre[0] + plane[1] * centre[1] + plane[2] * centre[2] - plane[3];
+			float reach = fabsf(plane[0]) * half[0] + fabsf(plane[1]) * half[1] + fabsf(plane[2]) * half[2];
+			unsigned child;
+
+			if (distance - reach >= 0.f) child = n[2];            /* in front of it */
+			else if (distance + reach < 0.f) child = n[1];        /* behind it */
+			else { if (depth < MAX_TREE_DEPTH * 2) stack[depth++] = n[1]; child = n[2]; }
+			if (child & 0x80000000u)
+			{
+				unsigned leaf = child & 0x7FFFFFFFu, i;
+
+				if (leaf < MAP_COL_LEAVES)
+					for (i = map_col_leaf_start[leaf]; i < map_col_leaf_start[leaf + 1]; i++)
+					{
+						unsigned surface = map_col_leaf_items[i], t;
+
+						for (t = map_col_surface_tri[surface]; t < map_col_surface_tri[surface + 1]; t++) count = add_candidate(count, t);
+					}
+				break;
+			}
+			node = child;
+		}
+	}
+	/* the objects */
+	{
+		int x0 = (int)floorf((lo[0] - MAP_OBJ_X0) / MAP_OBJ_CELL), x1 = (int)floorf((hi[0] - MAP_OBJ_X0) / MAP_OBJ_CELL);
+		int y0 = (int)floorf((lo[1] - MAP_OBJ_Y0) / MAP_OBJ_CELL), y1 = (int)floorf((hi[1] - MAP_OBJ_Y0) / MAP_OBJ_CELL);
+
+		if (x0 < 0) x0 = 0;
+		if (y0 < 0) y0 = 0;
+		if (x1 >= MAP_OBJ_W) x1 = MAP_OBJ_W - 1;
+		if (y1 >= MAP_OBJ_H) y1 = MAP_OBJ_H - 1;
+		for (cy = y0; cy <= y1; cy++)
+			for (cx = x0; cx <= x1; cx++)
+			{
+				unsigned i, end = map_obj_start[cy * MAP_OBJ_W + cx + 1];
+
+				for (i = map_obj_start[cy * MAP_OBJ_W + cx]; i < end; i++) count = add_candidate(count, map_obj_items[i]);
+			}
+	}
+	return count;
+}
+
 /* ---------- the ground ---------- */
 
-int fp_ground(float x, float y, float z_max, float *z_out, float *normal_z, float normal_xy[2])
+int fp_ground_in(float x, float y, float z_max, float depth, float *z_out, float *normal_z, float normal_xy[2])
 {
-	int cx = (int)floorf((x - MAP_COL_X0) / MAP_COL_CELL), cy = (int)floorf((y - MAP_COL_Y0) / MAP_COL_CELL);
-	unsigned i, end;
-	int found = 0;
+	const float lo[3] = { x - 1e-4f, y - 1e-4f, z_max - depth }, hi[3] = { x + 1e-4f, y + 1e-4f, z_max };
+	int n = gather(lo, hi), i, found = 0;
 	float best = 0.f, best_nz = 0.f, best_nx = 0.f, best_ny = 0.f;
 
-	if (cx < 0 || cy < 0 || cx >= MAP_COL_W || cy >= MAP_COL_H) return 0;
-	end = map_col_start[cy * MAP_COL_W + cx + 1];
-	for (i = map_col_start[cy * MAP_COL_W + cx]; i < end; i++)
+	for (i = 0; i < n; i++)
 	{
-		const unsigned short *t = &map_col_tri[map_col_items[i] * 3];
+		const unsigned short *t = &map_col_tri[candidates[i] * 3];
 		const float *a = &map_col_pos[t[0] * 3], *b = &map_col_pos[t[1] * 3], *c = &map_col_pos[t[2] * 3];
 		float d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
 		float w0, w1, w2, z, ux, uy, uz, vx, vy, vz, nx, ny, nz, length;
@@ -115,6 +197,11 @@ int fp_ground(float x, float y, float z_max, float *z_out, float *normal_z, floa
 	return found;
 }
 
+int fp_ground(float x, float y, float z_max, float *z_out, float *normal_z, float normal_xy[2])
+{
+	return fp_ground_in(x, y, z_max, 8.f, z_out, normal_z, normal_xy);
+}
+
 /* ---------- the pill against the collision BSP ---------- */
 
 /* The player is a pill (a capsule: radius MAP_RADIUS, MAP_HEIGHT_STANDING tall, less crouched) standing on its feet's point. It is
@@ -126,43 +213,6 @@ int fp_ground(float x, float y, float z_max, float *z_out, float *normal_z, floa
 #define SKIN 0.001f                        /* the gap left to a surface: the player never rests in it */
 #define SLIDE_ITERATIONS 4
 #define STICK_DISTANCE 0.12f               /* a drop smaller than this is walked down, not fallen */
-#define MAX_CANDIDATES 768
-
-static unsigned short candidates[MAX_CANDIDATES];
-static unsigned stamp[MAP_COL_TRIS], stamp_now;
-
-static float dot3(const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
-static void sub3(const float *a, const float *b, float *o) { o[0] = a[0] - b[0]; o[1] = a[1] - b[1]; o[2] = a[2] - b[2]; }
-static void cross3(const float *a, const float *b, float *o) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
-
-/* the triangles of the grid cells a box touches, each once */
-static int gather(float x0, float y0, float x1, float y1)
-{
-	int cx0 = (int)floorf((x0 - MAP_COL_X0) / MAP_COL_CELL), cx1 = (int)floorf((x1 - MAP_COL_X0) / MAP_COL_CELL);
-	int cy0 = (int)floorf((y0 - MAP_COL_Y0) / MAP_COL_CELL), cy1 = (int)floorf((y1 - MAP_COL_Y0) / MAP_COL_CELL);
-	int cx, cy, n = 0;
-
-	if (cx0 < 0) cx0 = 0;
-	if (cy0 < 0) cy0 = 0;
-	if (cx1 >= MAP_COL_W) cx1 = MAP_COL_W - 1;
-	if (cy1 >= MAP_COL_H) cy1 = MAP_COL_H - 1;
-	stamp_now++;
-	for (cy = cy0; cy <= cy1; cy++)
-		for (cx = cx0; cx <= cx1; cx++)
-		{
-			unsigned i, end = map_col_start[cy * MAP_COL_W + cx + 1];
-
-			for (i = map_col_start[cy * MAP_COL_W + cx]; i < end; i++)
-			{
-				unsigned tri = map_col_items[i];
-
-				if (stamp[tri] == stamp_now) continue;
-				stamp[tri] = stamp_now;
-				if (n < MAX_CANDIDATES) candidates[n++] = (unsigned short)tri;
-			}
-		}
-	return n;
-}
 
 /* the smaller root of a t^2 + b t + c in [0, limit), or -1 */
 static float smallest_root(float a, float b, float c, float limit)
@@ -274,12 +324,13 @@ static int pill_spheres(const float *feet, float crouch, float centres[3][3])
 /* the pill moving by `disp` from `feet`: the fraction of it that is free, and the surface's normal where it is stopped (t 1: nothing is) */
 static float sweep_pill(const float *feet, float crouch, const float *disp, float *normal)
 {
-	float centres[3][3], t = 1.f, lo[2], hi[2];
+	float centres[3][3], t = 1.f, lo[3], hi[3];
 	int spheres = pill_spheres(feet, crouch, centres), s, i, n;
 
 	lo[0] = fminf(feet[0], feet[0] + disp[0]) - MAP_RADIUS - SKIN; hi[0] = fmaxf(feet[0], feet[0] + disp[0]) + MAP_RADIUS + SKIN;
 	lo[1] = fminf(feet[1], feet[1] + disp[1]) - MAP_RADIUS - SKIN; hi[1] = fmaxf(feet[1], feet[1] + disp[1]) + MAP_RADIUS + SKIN;
-	n = gather(lo[0], lo[1], hi[0], hi[1]);
+	lo[2] = fminf(feet[2], feet[2] + disp[2]) - SKIN; hi[2] = fmaxf(feet[2], feet[2] + disp[2]) + MAP_HEIGHT_STANDING + SKIN;
+	n = gather(lo, hi);
 	for (s = 0; s < spheres; s++)
 		for (i = 0; i < n; i++) sweep_triangle(centres[s], disp, MAP_RADIUS, candidates[i], &t, normal);
 	return t;
@@ -308,6 +359,42 @@ static void closest_on_triangle(const float *p, const float *a, const float *b, 
 	for (i = 0; i < 3; i++) out[i] = a[i] + ab[i] * v + ac[i] * w;
 }
 
+/* how far into the front of a surface the pill's deepest sphere is at `feet` with the crouch `crouch` (0 or less: none), and the push
+   that takes that sphere straight out of it */
+static float deepest_overlap(const float *feet, float crouch, float *push)
+{
+	float centres[3][3], deepest = 0.f, lo[3], hi[3];
+	int spheres = pill_spheres(feet, crouch, centres), s, i, n;
+
+	lo[0] = feet[0] - 1.f; lo[1] = feet[1] - 1.f; lo[2] = feet[2] - 0.5f;
+	hi[0] = feet[0] + 1.f; hi[1] = feet[1] + 1.f; hi[2] = feet[2] + 1.5f;
+	n = gather(lo, hi);
+	push[0] = push[1] = push[2] = 0.f;
+	for (s = 0; s < spheres; s++)
+		for (i = 0; i < n; i++)
+		{
+			const unsigned short *ix = &map_col_tri[candidates[i] * 3];
+			const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
+			float e1[3], e2[3], nrm[3], to[3], closest[3], d[3], length, depth;
+
+			sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
+			length = sqrtf(dot3(nrm, nrm));
+			if (length < 1e-12f) continue;
+			sub3(centres[s], a, to);
+			if (dot3(to, nrm) < 0.f) continue;                  /* behind it */
+			closest_on_triangle(centres[s], a, b, c, closest);
+			sub3(centres[s], closest, d);
+			length = sqrtf(dot3(d, d));
+			depth = MAP_RADIUS - length;
+			if (depth > deepest && length > 1e-6f)
+			{
+				deepest = depth;
+				push[0] = d[0] / length * depth; push[1] = d[1] / length * depth; push[2] = d[2] / length * depth;
+			}
+		}
+	return deepest;
+}
+
 /* The sweep lets a sphere that is already inside an edge's cylinder or a vertex's sphere out rather than stop it, so sliding across
    the seam of two surfaces can leave the pill a little into one. After a move each sphere that is nearer a surface (from the
    front) than its radius is pushed straight out of it, a few passes, never more than a few centimetres at once. */
@@ -317,31 +404,8 @@ static void depenetrate(fp_player *p)
 
 	for (pass = 0; pass < 3; pass++)
 	{
-		float centres[3][3], push[3] = { 0.f, 0.f, 0.f }, deepest = 0.f;
-		int spheres = pill_spheres(p->pos, p->crouch, centres), s, i, n = gather(p->pos[0] - 1.f, p->pos[1] - 1.f, p->pos[0] + 1.f, p->pos[1] + 1.f);
+		float push[3], deepest = deepest_overlap(p->pos, p->crouch, push);
 
-		for (s = 0; s < spheres; s++)
-			for (i = 0; i < n; i++)
-			{
-				const unsigned short *ix = &map_col_tri[candidates[i] * 3];
-				const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
-				float e1[3], e2[3], nrm[3], to[3], closest[3], d[3], length, depth;
-
-				sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
-				length = sqrtf(dot3(nrm, nrm));
-				if (length < 1e-12f) continue;
-				sub3(centres[s], a, to);
-				if (dot3(to, nrm) < 0.f) continue;                  /* behind it */
-				closest_on_triangle(centres[s], a, b, c, closest);
-				sub3(centres[s], closest, d);
-				length = sqrtf(dot3(d, d));
-				depth = MAP_RADIUS - length;
-				if (depth > deepest && length > 1e-6f)
-				{
-					deepest = depth;
-					push[0] = d[0] / length * depth; push[1] = d[1] / length * depth; push[2] = d[2] / length * depth;
-				}
-			}
 		if (deepest < 0.5f * SKIN) return;
 		if (deepest > 0.05f) { float k = 0.05f / deepest; push[0] *= k; push[1] *= k; push[2] *= k; }
 		p->pos[0] += push[0]; p->pos[1] += push[1]; p->pos[2] += push[2];
@@ -452,8 +516,11 @@ static void tick(fp_player *p, float forward, float strafe, int jump, int crouch
 	/* crouch: the camera height follows at the biped's crouch_transition_time */
 	{
 		float step = 1.f / (MAP_CROUCH_TIME * TICKS_PER_SECOND);
+		float target = crouch_held ? fminf(p->crouch + step, 1.f) : fmaxf(p->crouch - step, 0.f), push[3];
 
-		p->crouch = crouch_held ? fminf(p->crouch + step, 1.f) : fmaxf(p->crouch - step, 0.f);
+		/* standing up is refused where the taller pill would be inside a ceiling (the crouch stays until there is room) */
+		if (target < p->crouch && deepest_overlap(p->pos, target, push) > 0.004f) target = p->crouch;
+		p->crouch = target;
 	}
 	c = p->crouch;
 

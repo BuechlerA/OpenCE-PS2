@@ -63,14 +63,28 @@ turn, the acceleration, the slope's speed, the jump's arc and the walls are the 
 
 ## Walking on the map: the collision BSP
 
-The player collides with the map's own collision BSP, the one the original's biped is swept through
-(`structure_bsp.collision_bsp`, `source/physics/collision_bsp_definitions.h`), not the render geometry.
-`tools/bsp.py` (`load_collision_bsp`) reads its surfaces (4,916 for Blood Gulch: a plane, a flag byte, a material, and a ring of
-edges, which it walks as `collision_surface_polygon` does), checks every surface is planar and wound the way its plane faces, and
-`export_map.py` triangulates them (a fan: all are convex, 5,468 triangles on 2,704 vertices) and grids them over x, y in
-4-unit cells (46 x 48 cells, about 100 KB). It is not the render BSP: it has the invisible walls and the sky's
-ceiling at the map's edge (the collision box runs from -8 to 174 in x and -220 to -30 in y, the picture from 5 to 133 and
--190 to -43), and the surfaces the player can stand on and be stopped by are the ones the original's.
+The player collides with the map's own collision geometry, the geometry the original's biped is swept through, not the render
+triangles. Three sources, all triangles in one array (`map_col_pos`, `map_col_tri`; 7,576 triangles; with the tree, 395 KB):
+
+- **The structure BSP's collision BSP** (`structure_bsp.collision_bsp`, `source/physics/collision_bsp_definitions.h`).
+  `tools/bsp.py` (`parse_collision_bsp`) reads its surfaces (4,916 for Blood Gulch: a plane, a flag byte, a material and a ring of
+  edges, walked as `collision_surface_polygon` does; every one is planar, convex and wound the way its plane faces) and its
+  tree, and `export_map.py` triangulates the surfaces (a fan: 5,468 triangles). It has the invisible walls and the sky's ceiling at the
+  map's edge: its box runs from -8 to 174 in x and -220 to -30 in y, the picture from 5 to 133 and -190 to -43.
+- **The scenery's collision models** (`coll` tags: the scenery's `collision_model` reference, the nodes block at 0x28C, each node's
+  `bsps` block, one collision BSP per permutation), placed as the renderer places the scenery (position, yaw, pitch, roll,
+  permutation 0). 27 of the map's scenery objects have one (boulders, trees, the bases' props, the plants' trunks): 1,964
+  triangles in the world. Their nodes with surfaces are all the first, at the object's origin.
+- **The Chief**, a capsule of the player's own size (`capsule_mesh`: 12 sides, 3 rings a hemisphere, 144 triangles) at the demo Chief's
+  feet. The Chief does not move in this scene, so he is geometry; a Chief that moved would be tested as the pill against a pill.
+
+**The BSP's own tree** finds the structure's triangles. The exporter writes the nodes (a plane, a back child and a front child;
+a child with the top bit set is a leaf, all ones is none), the planes (`distance = n . p - d`, as `bsp3d_test_point`), and for each
+leaf the surfaces at the bottom of its bsp2d references' 2D trees (13,707 entries over 5,999 leaves) instead of the 2D trees
+themselves (the controller wants the surfaces near a box, not which surface a point on a plane is in), and each surface's first
+triangle. A query is a box: down the tree, both children where the box straddles a node's plane, one where it is wholly to a
+side, and every surface of every leaf reached. The objects are found through a grid over x, y (4-unit cells), as the tree is the
+structure's alone. Each triangle is gathered once (a stamp), 20 to 60 for a move.
 
 The player is a pill (radius 0.2, 0.7 tall standing, 0.5 crouched) swept through those triangles as two or three spheres a
 radius apart (a few millimetres from a capsule): each sphere against each triangle in the swept test (the face, then the
@@ -81,16 +95,21 @@ keeps the contact), and its normal steers the walk along the slope. A walking pl
 stand on; it slides along the level line on it. A drop of under 0.12 is walked down (a probe below the feet), a larger one is a
 fall. A sphere inside a surface after a move (the seam of two) is pushed out, and so is a player put down against a wall.
 Standing still moves nothing: the push into the ground would, on an edge or a vertex whose normal is not the stored
-ground's, leave a sideways part. The BSP's tree is not used: the triangles near the move come from the grid.
+ground's, leave a sideways part.
 
-`fp_ground` (a vertical ray: the highest up-facing triangle under a point) is still there for putting the player on the ground
-and for the demo's planner.
+**Standing up** is refused where the taller pill would be inside a surface: each tick the crouch moves toward its target, and a
+step toward standing that puts a sphere more than 4 millimetres into a surface is not taken (the crouch stays at what fits).
 
-Not ported: the collision against the scenery (rocks, plants, bases are drawn but not solid), the Chief and the
-bases' doors; standing up under a ceiling (the pill's height follows the crouch, the top of it is pushed out of a ceiling
-rather than the stand being refused); the pitch autolevel; the unit camera's own pitch limits; the first-person weapon (hands
-and rifle); the zoom; the stun penalties; melee and the other actions; the original's slipping physics on steep ground. A fall
-into the void puts the player back at the start.
+`fp_ground` (a vertical ray: the highest up-facing triangle within 8 units under a point, from the same tree and grid) is
+still there for putting the player on the ground and for the demo's planner, which asks `fp_ground_in` for only the step
+it will accept (a few tenths: a far smaller box, a fraction of the leaves; planning takes 0.3 s of the EE at start-up, 1.3 s
+before that and the cell cache).
+
+Not ported: the other objects' collision (vehicles, items, the bipeds that are not the Chief), a Chief who moves (he would be
+tested as a pill against a pill), the scenery's permutations other than the first, the 2D trees of the leaves (flattened to
+the surface lists), the pitch autolevel; the unit camera's own pitch limits; the first-person weapon (hands and rifle); the
+zoom; the stun penalties; melee and the other actions; the original's slipping physics on steep ground. A fall into the
+void puts the player back at the start.
 
 ## Checking it
 
@@ -98,9 +117,12 @@ into the void puts the player back at the start.
   run in `port/ps2/samples/masterchief` after `export_map.py` (the test includes the controller): the dead zone and the
   square stick, the look rates and their acceleration, the pitch stop, the run speed (2.2 of 2.25 on a slope), the
   jump (0.65 peak, lands), the crouch, standing still for 3 s at 508 places over the valley (133 of them on slopes:
-  no drift at all), 40 random players for 40 s each, random sticks, jumps and crouches (the deepest any sphere
-  went into a surface: 0.0003 of a 0.2 radius, and never through the floor), and 36 headings x 60 s of holding forward:
-  finite, never off the ground, never out of the map.
+  no drift at all), the ground the tree finds against every triangle of the map at 4,000 random points (no
+  difference), walking into the Chief for 12 s (stops 0.39 from him: two radii), walking into 29 walls of scenery (none
+  got through), standing up under a low ceiling (refused, the crouch stays at what fits), 40 random players for 40 s each,
+  random sticks, jumps and crouches (the deepest any sphere went into a surface, against every triangle: 0.0005 of a 0.2
+  radius, and never through the floor), and 36 headings x 60 s of holding forward: finite, never off the ground, never
+  out of the map.
 - `tools/fp_demo_test.c` (the command is in its header): the demo plans the walk, and the controller, given only the pad
   the demo makes, arrives next to the Chief, four times in 100 s, jumping four times a walk and facing him, never
   stuck; a touch of the pad takes over and Start restarts the demo.

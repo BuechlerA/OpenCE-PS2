@@ -63,8 +63,11 @@ void fp_camera(const fp_player *player, float eye[3], float target[3]);
 /* the camera's lens: the original's 70 degrees horizontal, as the vertical half angle of a 4:3 picture, in degrees */
 float fp_vertical_half_fov_degrees(void);
 
-/* the height of the walkable surface under (x, y), the highest one at or below z_max; returns 0 if there is none.
+/* the height of the walkable surface under (x, y), the highest one at or below z_max (and no more than 8 units under it); returns 0 if there is none.
    normal_z gets the surface's slope (the cosine of its angle from the vertical) if not NULL */
 int fp_ground(float x, float y, float z_max, float *z, float *normal_z, float normal_xy[2]);
+
+/* the same, looking no deeper than `depth` below z_max (a query that wants the ground near a height is much cheaper: fewer leaves of the tree) */
+int fp_ground_in(float x, float y, float z_max, float depth, float *z, float *normal_z, float normal_xy[2]);
 
 #endif
