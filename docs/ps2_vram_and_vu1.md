@@ -277,6 +277,34 @@ the vertical axis is halved, so the level of detail the GS picks (from the geome
 than the 256x512 map would, and the far wall comes out blotchier (6.7/255) than the smaller 128x256 map, which halves both axes and keeps
 the texel to pixel ratio.
 
+## 9. 4-bit base maps, chosen by error (opt-in)
+
+`TEX4_MAX_ERR=<n> python3 tools/export_map.py` quantises each base map a second time to 16 colours (median cut, then
+Floyd-Steinberg error diffusion on every mip level, against the first level's palette; a cut-out keeps 15 colours and
+the last index transparent) and keeps it as a PSMT4 texture when `error4` is at most `n`: the RMS difference over
+0..255 between the picture and the 16-colour texture, both blurred by 1 pixel (the diffusion is noise the eye averages
+out, so the unblurred difference would punish it). Off by default (`n` = 0), so the default build is unchanged. The
+generated `map_texture_data` has a `bits` field; `texture_setup_mips` in `main.c` uploads each level as T4 or T8, and
+the exporter packs two texels a byte, the left one in the low nibble, each level on its own. The 16-entry CLUT is in
+plain order (not CSM1-swapped) and its allocation is the 8x2 block.
+
+Measured on Blood Gulch, at the 2.6 s still, in PCSX2 (not on hardware); the 8-bit chain here is the one the mip floor
+leaves (467 KB of pixels, with the cliff at 128x256, section 8):
+
+| `TEX4_MAX_ERR` | Textures at 4 bits | Pixels | Video memory used | Frame against the 8-bit build (mean abs, /255) |
+| --- | --- | --- | --- | --- |
+| off | 0 | 467 KB | 2,303,744 | |
+| 2.1 | 9 of 26 (the metal, two rocks, the teleporter and flag bases) | 422 KB | 2,251,776 (-51,968) | 0.000: none of them is in view |
+| 3.0 | 18 of 26, with the ground and the cliff | 341 KB | 2,153,984 (-149,760) | 4.1 (the ground's 12 in the lower right) |
+
+The nine textures that 3.0 adds to 2.1 are 98 KB of the 150, led by the ground (error 2.94) and the cliff (2.96), and they are
+also where the difference is. Side by side at 2x
+the cliff is indistinguishable; the ground's grain is a little coarser and a patch is slightly greener. The Chief is
+untouched. An earlier survey script that left the mip floor out overstated the saving (360 KB at 3.0) because it counted
+levels the build does not ship: use the exporter's own figures. Two caveats: the four cut-outs and the two
+`cap_ramp` gradients stay at 8 bits (smooth gradients are what 16 colours do worst at), and the frame time was not
+measured (the GS reads a 4-bit texel at the same rate).
+
 ## Pitfalls (each cost real time)
 
 - **PCSX2 needs an absolute path for `-elf`** (it logs "Failed to read ELF" for a relative one, boots to

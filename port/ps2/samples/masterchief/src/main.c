@@ -298,7 +298,7 @@ static const float spec_tint[3] = { 1.f, 0.97f, 0.9f };   /* the highlight's col
 
 /* tw, th: log2 of the size, for TEX0. levels: the mip levels of the map's textures (0 or 1: none), the
    levels after the first at video memory tbp (in 256-byte units) with buffer width tbw, for MIPTBP1 and 2 */
-typedef struct { GSTEXTURE t; int tw, th, levels, alpha; unsigned mip_tbp[7], mip_tbw[7]; } texture;   /* alpha: palette entry 255 is cut out */
+typedef struct { GSTEXTURE t; int tw, th, levels, alpha; unsigned mip_tbp[7], mip_tbw[7]; } texture;   /* alpha: the last palette entry is cut out */
 
 static texture chief_tex, rifle_tex, mask_tex, rifle_mask_tex, display_tex;
 
@@ -340,23 +340,24 @@ static void texture_setup_clut(GSGLOBAL *gs, texture *x, int width, int height, 
 }
 
 #ifndef NO_MAP
-/* the same with mip levels, which follow the first in pixels, each half the size of the one before */
-static void texture_setup_mips(GSGLOBAL *gs, texture *x, int width, int height, int levels, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
+/* the same with mip levels, which follow the first in pixels, each half the size of the one before; bits 4 is a 16-colour
+   texture (PSMT4), its levels packed two texels a byte, each on its own */
+static void texture_setup_mips(GSGLOBAL *gs, texture *x, int width, int height, int levels, int bits, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
 {
-	int l;
+	int l, psm = bits == 4 ? GS_PSM_T4 : GS_PSM_T8;
 
-	texture_setup_clut(gs, x, width, height, pixels, clut, shared_clut);
+	texture_setup_psm(gs, x, width, height, psm, pixels, clut, shared_clut);
 	x->levels = levels;
-	pixels += width * height;
+	pixels += width * height * bits / 8;
 	for (l = 1; l < levels; l++)
 	{
 		int w = width >> l, h = height >> l, tbw = (w + 63) / 64;
-		u32 vram = gsKit_vram_alloc(gs, gsKit_texture_size(w, h, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
+		u32 vram = gsKit_vram_alloc(gs, gsKit_texture_size(w, h, psm), GSKIT_ALLOC_USERBUFFER);
 
 		if (vram == GSKIT_ALLOC_ERROR) { printf("mip level %dx%d: out of video memory\n", w, h); vram_failed = 1; }
-		else gsKit_texture_send((u32 *)pixels, w, h, vram, GS_PSM_T8, tbw, GS_CLUT_TEXTURE);
+		else gsKit_texture_send((u32 *)pixels, w, h, vram, psm, tbw, GS_CLUT_TEXTURE);
 		x->mip_tbp[l] = vram / 256; x->mip_tbw[l] = tbw;
-		pixels += w * h;
+		pixels += w * h * bits / 8;
 	}
 }
 #endif
@@ -2573,11 +2574,11 @@ int main(void)
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
 	{
-		texture_setup_mips(gs, &map_tex[i], map_textures[i].width, map_textures[i].height, map_textures[i].levels, map_textures[i].pixels, map_textures[i].clut, 0);
+		texture_setup_mips(gs, &map_tex[i], map_textures[i].width, map_textures[i].height, map_textures[i].levels, map_textures[i].bits, map_textures[i].pixels, map_textures[i].clut, 0);
 		map_tex[i].alpha = map_textures[i].alpha;
 	}
 	for (i = 0; i < MAP_DETAILS; i++)         /* the grey textures share one palette: alpha = index */
-		texture_setup_mips(gs, &map_detail_tex[i], map_details[i].width, map_details[i].height, map_details[i].levels, map_details[i].pixels, map_gray_clut, i ? map_detail_tex[0].t.VramClut : 0);
+		texture_setup_mips(gs, &map_detail_tex[i], map_details[i].width, map_details[i].height, map_details[i].levels, 8, map_details[i].pixels, map_gray_clut, i ? map_detail_tex[0].t.VramClut : 0);
 	for (i = 0; i < MAP_LIGHTMAPS; i++)
 		texture_setup_clut(gs, &map_lm_tex[i], map_lightmaps[i].width, map_lightmaps[i].height, map_lightmaps[i].pixels, map_gray_clut, map_detail_tex[0].t.VramClut);
 	for (i = 0; i < MAP_LIGHTMAPS; i++) map_lm_tex[i].t.Filter = GS_FILTER_LINEAR;

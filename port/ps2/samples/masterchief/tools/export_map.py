@@ -28,7 +28,8 @@
   - where the Chief stands: the ground height under MAP_CHIEF_X/Y
 
   HALO_MAP (default assets/maps/bloodgulch.map), CHIEF_X, CHIEF_Y, CHIEF_BELOW (the highest ground that
-  counts) and LM_SCALE (default 1) in the environment.
+  counts) and LM_SCALE (default 1) in the environment. TEX4_MAX_ERR (default 0: off) sends each base map whose 16-colour,
+  error-diffused version is that close to the picture (RMS over 0..255 after a blur: error4) to 4 bits (PSMT4).
 """
 import json, os, struct, sys
 import numpy as np
@@ -59,6 +60,7 @@ EMBOSS_LIGHT = (-0.45, -0.45, 0.77)       # in the bump map's tangent space
 EMBOSS_GAIN = float(os.environ.get('EMBOSS_GAIN', 2.4))
 BUMP_SCALE_AT, BUMP_MAP_AT, REFLECTION_CUBE_AT = 0x124, 0x128, 0x324    # in a shader_environment
 CHUNK_CELL = float(os.environ.get('CHUNK_CELL', 12))
+TEX4_MAX_ERR = float(os.environ.get('TEX4_MAX_ERR', 0))   # a base map goes to 4 bits (16 colours, dithered) when its error (error4) is at most this; 0: none do
 BIG_TRIANGLES = 1000               # a base map under this many triangles is cut to 256 pixels
 
 def load_mip_floor():
@@ -94,6 +96,34 @@ def gs_palette(pal, clear_last=False):          # (256, 3) uint8 -> RGBA words i
         out[j] = r | (g << 8) | (b << 16) | ((0 if clear_last and i == 255 else 0x80) << 24)     # entry 255 alpha 0: cut out
     return out
 
+def gs_palette16(pal, clear_last=False):        # (16, 3) -> RGBA words of a 4-bit texture's palette, which the GS reads in plain order
+    out = np.zeros(16, dtype='<u4')
+    for i in range(16):
+        r, g, b = (int(x) for x in pal[i])
+        out[i] = r | (g << 8) | (b << 16) | ((0 if clear_last and i == 15 else 0x80) << 24)
+    return out
+
+def pack4(pixels, w, h, levels):
+    """a chain of one-byte indices (below 16) -> two to a byte, the left one in the low nibble (the GS's PSMT4), level by level"""
+    out, at = [], 0
+    for l in range(levels):
+        lw, lh = w >> l, h >> l
+        a = pixels[at:at + lw * lh].reshape(lh, lw); at += lw * lh
+        out.append((a[:, 0::2] | (a[:, 1::2] << 4)).reshape(-1))
+    return np.concatenate(out)
+
+def error4(ref_rgb01, size, idx, pal, opaque=None):
+    """how far a 4-bit texture's first level is from the picture: RMS over 0..255, after a 1-pixel blur of both (error diffusion is
+    noise the eye averages out, so it is the blurred difference that counts)"""
+    from PIL import ImageFilter
+    w, h = size
+    ref = Image.fromarray((np.clip(ref_rgb01, 0, 1) * 255 + 0.5).astype(np.uint8))
+    if ref.size != size: ref = ref.resize(size, Image.BOX)
+    got = Image.fromarray(pal[idx[:w * h].reshape(h, w)].astype(np.uint8))
+    d = np.asarray(ref.filter(ImageFilter.GaussianBlur(1.0)), np.float64) - np.asarray(got.filter(ImageFilter.GaussianBlur(1.0)), np.float64)
+    if opaque is not None: d = d[opaque]
+    return float(np.sqrt(np.mean(d ** 2)))
+
 def mip_sizes(w, h):
     """the size of each mip level: halved while both sides stay at least 16 by 8 (the GS moves 16 bytes at a time), 7 levels at most"""
     out = [(w, h)]
@@ -101,26 +131,29 @@ def mip_sizes(w, h):
         out.append((out[-1][0] // 2, out[-1][1] // 2))
     return out
 
-def quantise(rgb01, size, mips=True):
+def quantise(rgb01, size, mips=True, ncol=256, dither=False):
     """rgb01 (h, w, 3) floats in the game's own (display) encoding -> (indices of each mip level, one after the other,
-    palette, level count), cut down to size = (w, h); every level takes the palette of the first"""
+    palette, level count), cut down to size = (w, h); every level takes the palette of the first. ncol 16 is for the 4-bit
+    textures (dither: error diffusion, which hides the banding of so few colours)"""
+    fs = Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE
     im = Image.fromarray((np.clip(rgb01, 0, 1) * 255 + 0.5).astype(np.uint8))
     sizes = mip_sizes(*size) if mips else [size]
     q = None; data = []
     for sz in sizes:
         lv = im if im.size == sz else im.resize(sz, Image.BOX)
         if q is None:
-            q = lv.quantize(256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE); idx = q
+            q = lv.quantize(ncol, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE); idx = q if not dither else lv.quantize(palette=q, dither=fs)
         else:
-            idx = lv.quantize(palette=q, dither=Image.Dither.NONE)
+            idx = lv.quantize(palette=q, dither=fs)
         data.append(np.array(idx, dtype=np.uint8).reshape(-1))
-    pal = np.array(q.getpalette()[:768], dtype=np.uint8).reshape(-1, 3)
-    if len(pal) < 256: pal = np.vstack([pal, np.zeros((256 - len(pal), 3), np.uint8)])
+    pal = np.array(q.getpalette()[:ncol * 3], dtype=np.uint8).reshape(-1, 3)
+    if len(pal) < ncol: pal = np.vstack([pal, np.zeros((ncol - len(pal), 3), np.uint8)])
     return np.concatenate(data), pal, len(sizes)
 
-def quantise_cutout(rgb01, alpha, size):
-    """a picture with a cut-out: 255 colours (taken where it is opaque) and index 255 for what is not, each mip level
+def quantise_cutout(rgb01, alpha, size, ncol=256, dither=False):
+    """a picture with a cut-out: ncol - 1 colours (taken where it is opaque) and the last index for what is not, each mip level
     from the picture's own average, the colour of what is opaque spread into what is not (a bilinear filter reads it)"""
+    fs = Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE
     sizes = mip_sizes(*size)
     q = None; data = []
     for sz in sizes:
@@ -132,13 +165,13 @@ def quantise_cutout(rgb01, alpha, size):
         c[~opaque] = fill
         im = Image.fromarray((np.clip(c, 0, 1) * 255 + 0.5).astype(np.uint8))
         if q is None:
-            q = im.quantize(255, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE); idx = q
+            q = im.quantize(ncol - 1, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE); idx = q if not dither else im.quantize(palette=q, dither=fs)
         else:
-            idx = im.quantize(palette=q, dither=Image.Dither.NONE)
-        ix = np.array(idx, dtype=np.uint8); ix[~opaque] = 255
+            idx = im.quantize(palette=q, dither=fs)
+        ix = np.array(idx, dtype=np.uint8); ix[~opaque] = ncol - 1
         data.append(ix.reshape(-1))
-    pal = np.array(q.getpalette()[:765], dtype=np.uint8).reshape(-1, 3)
-    pal = np.vstack([pal, np.zeros((256 - len(pal), 3), np.uint8)])
+    pal = np.array(q.getpalette()[:(ncol - 1) * 3], dtype=np.uint8).reshape(-1, 3)
+    pal = np.vstack([pal, np.zeros((ncol - len(pal), 3), np.uint8)])
     return np.concatenate(data), pal, len(sizes)
 
 # the lightmaps' unused texels are a red and yellow checker: pure (31, 0, 0) and (31, 63, 0) in 5-6-5
@@ -408,13 +441,25 @@ def main():
         w, h = max(w, 16), max(h, 16)
         picture = mf.rgb(info)
         if name in factors and factors[name] != 1.0 and name in extra_names: picture = np.clip(picture * factors[name], 0, 1)
-        if name in alpha_names:
+        cut = name in alpha_names
+        t4 = None
+        if TEX4_MAX_ERR > 0:
+            if cut:
+                idx, pal, levels = quantise_cutout(picture, mf.alpha(info), (w, h), 16, True)
+                a0 = np.asarray(Image.fromarray(mf.alpha(info).astype(np.float32)).resize((w, h), Image.BOX)) >= 0.5
+                err = error4(picture, (w, h), idx, pal, a0)
+            else:
+                idx, pal, levels = quantise(picture, (w, h), True, 16, True)
+                err = error4(picture, (w, h), idx, pal)
+            if err <= TEX4_MAX_ERR: t4 = dict(name=name, w=w, h=h, pixels=idx, clut=gs_palette16(pal, clear_last=cut), levels=levels, alpha=int(cut), bits=4, err=err)
+        if t4: textures.append(t4)
+        elif cut:
             idx, pal, levels = quantise_cutout(picture, mf.alpha(info), (w, h))
-            textures.append(dict(name=name, w=w, h=h, pixels=idx, clut=gs_palette(pal, clear_last=True), levels=levels, alpha=1))
+            textures.append(dict(name=name, w=w, h=h, pixels=idx, clut=gs_palette(pal, clear_last=True), levels=levels, alpha=1, bits=8))
         else:
             idx, pal, levels = quantise(picture, (w, h))
-            textures.append(dict(name=name, w=w, h=h, pixels=idx, clut=gs_palette(pal), levels=levels, alpha=0))
-        print('  texture %-34s %3dx%-3d (from %dx%d) %5d triangles%s' % (name.split('\\')[-1], w, h, info['w'], info['h'], uses[name], ' (cut out)' if name in alpha_names else ''))
+            textures.append(dict(name=name, w=w, h=h, pixels=idx, clut=gs_palette(pal), levels=levels, alpha=0, bits=8))
+        print('  texture %-34s %3dx%-3d (from %dx%d) %5d triangles%s%s' % (name.split('\\')[-1], w, h, info['w'], info['h'], uses[name], ' (cut out)' if cut else '', ' 4-bit, error %.2f' % t4['err'] if t4 else ''))
     tex_id = {n: i for i, n in enumerate(names)}
     mip_floor = load_mip_floor()
     saved = 0
@@ -509,7 +554,7 @@ def main():
     sky_p, sky_uv, sky_t, sky_img = sky_dome(mf)
     sky_idx, sky_pal, sky_levels = quantise(sky_img, (64, 64), mips=False)
     sky_tex = len(textures)
-    textures.append(dict(name='sky gradient', w=64, h=64, pixels=sky_idx, clut=gs_palette(sky_pal), levels=sky_levels, alpha=0))
+    textures.append(dict(name='sky gradient', w=64, h=64, pixels=sky_idx, clut=gs_palette(sky_pal), levels=sky_levels, alpha=0, bits=8))
     detail_of.append([(-1, 0.0), (-1, 0.0), (-1, 0.0)]); refl_of.append((-1, 0.0, 0.0))
     sky_first_vertex = base
     P.append(sky_p); UV.append(sky_uv); LMUV.append(np.zeros((len(sky_p), 2))); C.append(np.full((len(sky_p), 3), 128.0)); T.append(sky_t + base); NRM.append(np.zeros((len(sky_p), 3)))
@@ -579,7 +624,7 @@ def main():
     rgba[:, :3] = np.round(C); rgba[:, 3] = 0x80
     zb = ground_height(P.astype(np.float64), T, CHIEF_X, CHIEF_Y, CHIEF_BELOW)
     print('%d materials, %d verts, %d tris (%d flipped), %d textures (%d KB of pixels), %d spans; ground under (%.1f, %.1f): %s'
-          % (len(mats), len(P), len(T), flipped, len(textures), sum(len(t['pixels']) for t in textures) // 1024, nspans, CHIEF_X, CHIEF_Y, zb))
+          % (len(mats), len(P), len(T), flipped, len(textures), sum(len(t['pixels']) * t['bits'] // 8 for t in textures) // 1024, nspans, CHIEF_X, CHIEF_Y, zb))
     print('%d detail maps (%d KB with mips), %d lightmap pages (%d KB), %d spans in the lightmap pass; %d chunks, %d batches'
           % (len(details), sum(len(d[0]) for d in details) // 1024, len(pages), sum(p['w'] * p['h'] for p in pages) // 1024, len(lm_order), nchunks, len(batches) // 3))
     assert zb is not None, 'no ground under the Chief'
@@ -619,11 +664,11 @@ def main():
     c.write('const unsigned char *const map_cubes[%d] = { %s };\n' % (max(len(cubes), 1), ', '.join('map_cube%d' % i for i in range(len(cubes))) or '0'))
     c.write(cstr_array('map_tex_density', densities, 'float', 16))
     for i, t in enumerate(textures):
-        c.write(cstr_array('map_tex%d_pixels' % i, flat(t['pixels']), 'unsigned char', 64))
+        c.write(cstr_array('map_tex%d_pixels' % i, flat(pack4(t['pixels'], t['w'], t['h'], t['levels']) if t['bits'] == 4 else t['pixels']), 'unsigned char', 64))
         c.write(cstr_array('map_tex%d_clut' % i, flat(t['clut'].astype(np.uint32)), 'unsigned int', 64))
     c.write('const map_texture_data map_textures[MAP_TEXTURES] = {\n')
     for i, t in enumerate(textures):
-        c.write('\t{ map_tex%d_pixels, map_tex%d_clut, %d, %d, %d, %d },   /* %s */\n' % (i, i, t['w'], t['h'], t['levels'], t['alpha'], t['name'].replace('\\', '/')))
+        c.write('\t{ map_tex%d_pixels, map_tex%d_clut, %d, %d, %d, %d, %d },   /* %s */\n' % (i, i, t['w'], t['h'], t['levels'], t['alpha'], t['bits'], t['name'].replace('\\', '/')))
     c.write('};\n')
     c.close()
     fog = sky_fog(mf)
@@ -652,7 +697,7 @@ def main():
 #define MAP_FOG_DENSITY %rf
 #define MAP_FOG_START %rf
 #define MAP_FOG_OPAQUE %rf
-typedef struct { const unsigned char *pixels; const unsigned int *clut; int width, height, levels, alpha; } map_texture_data;   /* the mip levels follow one another; alpha: palette entry 255 is cut out */
+typedef struct { const unsigned char *pixels; const unsigned int *clut; int width, height, levels, alpha, bits; } map_texture_data;   /* the mip levels follow one another; alpha: the last palette entry is cut out; bits: 8 (256 colours) or 4 (16, two texels a byte, each level packed on its own) */
 typedef struct { const unsigned char *pixels; int width, height, levels; } map_gray_texture;   /* 8-bit grey, its value the alpha of map_gray_clut */
 typedef struct { int detail[3]; float scale[3]; } map_detail_data;                    /* primary and micro detail map and bump (emboss) map of a base map, and their scales */
 typedef struct { int cube; float perpendicular, parallel; } map_reflection_data;       /* the cube map a base map's shader reflects (-1: none) and its strength head-on and at a graze */
