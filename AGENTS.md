@@ -92,6 +92,12 @@ that only print):
   goes in the second; 8-bit UNPACK data must be zero-padded to a quadword.
   VU1's data memory is readable from the EE (0x1100C000) when it has stopped:
   dump it to debug the microprogram.
+- VU0 in macro mode (COP2) stalls on every dependent instruction: a loop of
+  one vertex is as slow as the FPU, so work three or four vertices at once,
+  instruction by instruction (the specular code is generated:
+  `tools/gen_spec_vu0.py` -> `src/spec_vu0.h`; `-DSPEC_CHECK` compares it
+  with the FPU's). The registers vf1 to vf31 are free between calls but the
+  map code reloads its own at the start of `draw_map`.
 - gsKit sizes its buffers from the console's own video mode (PAL: 512 lines)
   before the sample forces NTSC: set `gs->Height` with `gs->Mode`.
 - GS coordinates are 12.4 fixed point in 16 bits around an origin gsKit puts

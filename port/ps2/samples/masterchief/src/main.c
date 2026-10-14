@@ -25,6 +25,11 @@
 #include <gsToolkit.h>
 
 #include "assets.h"
+/* The specular colours of the VU1 build's armour and rifle are worked out on VU0 (tools/gen_spec_vu0.py, src/spec_vu0.h);
+   -DNO_VU0_SPEC keeps them on the FPU */
+#if defined(CHIEF_VU1) && !defined(NO_VU0) && !defined(NO_VU0_SPEC)
+#define SPEC_ON_VU0
+#endif
 #ifndef NO_MAP
 #include "map_assets.h"
 #endif
@@ -1596,9 +1601,15 @@ static void skin_chief(const xform *bone_world, const xform *view, int visor_fir
 #define SPEC_SPREAD 4
 
 typedef struct { float v[4]; } __attribute__((aligned(16))) qvec;
+#ifdef SPEC_ON_VU0
+#include "spec_vu0.h"
+#endif
 static qvec chief_wp[ANIM_FRAMES][CHIEF_VERTS], chief_wn[ANIM_FRAMES][CHIEF_VERTS], chief_ls[ANIM_FRAMES][CHIEF_VERTS];
 static u64 chief_dif[ANIM_FRAMES][CHIEF_VERTS];
 static qvec rifle_wp[ANIM_FRAMES][RIFLE_VERTS], rifle_wn[ANIM_FRAMES][RIFLE_VERTS], rifle_ls[ANIM_FRAMES][RIFLE_VERTS];
+#ifdef SPEC_ON_VU0
+static qvec chief_ge[ANIM_FRAMES][CHIEF_VERTS], rifle_ge[ANIM_FRAMES][RIFLE_VERTS];   /* the gamma curve of a quarter of the lit sum, which the specular colour subtracts */
+#endif
 static u64 rifle_dif[ANIM_FRAMES][RIFLE_VERTS];
 static qvec display_wp[ANIM_FRAMES][DISPLAY_VERTS];
 static int spec_phase, spec_primed;
@@ -1640,6 +1651,10 @@ static void pose_cache_build(void)
 			qset(&chief_wp[f][i], pw, 1.f); qset(&chief_wn[f][i], nw, 0.f);
 			light_sum(nw, sum);
 			qset(&chief_ls[f][i], sum, 0.f);
+#ifdef SPEC_ON_VU0
+			for (c = 0; c < 3; c++) chief_ge[f][i].v[c] = QUARTER_GAMMA * gamma_enc_in_range(sum[c]);
+			chief_ge[f][i].v[3] = 0.f;
+#endif
 			chief_dif[f][i] = diffuse_rgbaq(sum);
 		}
 		for (i = 0; i < RIFLE_VERTS; i++)
@@ -1652,6 +1667,14 @@ static void pose_cache_build(void)
 			qset(&rifle_wp[f][i], pw, 1.f); qset(&rifle_wn[f][i], nw, 0.f);
 			light_sum(nw, sum);
 			qset(&rifle_ls[f][i], sum, 0.f);
+#ifdef SPEC_ON_VU0
+			{
+				int cc;
+
+				for (cc = 0; cc < 3; cc++) rifle_ge[f][i].v[cc] = QUARTER_GAMMA * gamma_enc_in_range(sum[cc]);
+				rifle_ge[f][i].v[3] = 0.f;
+			}
+#endif
 			rifle_dif[f][i] = diffuse_rgbaq(sum);
 		}
 		for (i = 0; i < DISPLAY_VERTS; i++)
@@ -2025,11 +2048,119 @@ static void vu_matrix(const xform *view, qvec *m)
 }
 
 /* the specular colours for this frame, on the schedule cached_pose has (a quarter of the vertices a frame), written to every slot of a vertex */
+#ifdef SPEC_ON_VU0
+/* The refreshed vertices go through VU0 in batches (SPEC_BATCH, a multiple of 3: it works on three at a time): the mirror direction, 1 - n.v and
+   n.h^18 (stage A), the cube map's colour in the mirror direction here on the EE (the cube is 73 KB; VU0 has 4), then the colour bytes
+   (stage C). specular_rgbaq is the same on the FPU: -DSPEC_CHECK compares them. */
+#define SPEC_BATCH 48
+static qvec spec_refl[SPEC_BATCH], spec_fs[SPEC_BATCH], spec_cube[SPEC_BATCH], spec_out[SPEC_BATCH];
+static qvec spec_a_consts[3], spec_c_consts[4];
+
+static void spec_batch(const int *idx, int n, const qvec *wp, const qvec *wn, const qvec *ls, const qvec *ge, const unsigned char *cube0, const unsigned char *cube1, int cube1_from,
+                       u64 *rgbaq_out, const int *slot_first, const int *slot_list, u32 *slot_spec)
+{
+	int j, m = (n + 2) / 3 * 3, k;
+	int ix[SPEC_BATCH];
+
+	for (j = 0; j < m; j++) ix[j] = idx[j < n ? j : n - 1];       /* the last vertex again to fill the last three */
+	spec_vu0_load_a(spec_a_consts);
+	for (j = 0; j < m; j += 3)
+		spec_vu0_a(&wp[ix[j]], &wp[ix[j + 1]], &wp[ix[j + 2]], &wn[ix[j]], &wn[ix[j + 1]], &wn[ix[j + 2]], &spec_refl[j], &spec_refl[j + 1], &spec_refl[j + 2], &spec_fs[j], &spec_fs[j + 1], &spec_fs[j + 2]);
+	for (j = 0; j < m; j++)
+	{
+		float rgb[3];
+
+		cube_sample(ix[j] < cube1_from ? cube0 : cube1, spec_refl[j].v, rgb);
+		spec_cube[j].v[0] = rgb[0]; spec_cube[j].v[1] = rgb[1]; spec_cube[j].v[2] = rgb[2]; spec_cube[j].v[3] = 0.f;
+	}
+	spec_vu0_load_c(spec_c_consts);
+	for (j = 0; j < m; j += 3)
+		spec_vu0_c(&spec_cube[j], &spec_cube[j + 1], &spec_cube[j + 2], &spec_fs[j], &spec_fs[j + 1], &spec_fs[j + 2], &ls[ix[j]], &ls[ix[j + 1]], &ls[ix[j + 2]],
+		           &ge[ix[j]], &ge[ix[j + 1]], &ge[ix[j + 2]], &spec_out[j], &spec_out[j + 1], &spec_out[j + 2]);
+	for (j = 0; j < n; j++)
+	{
+		const int *b = (const int *)spec_out[j].v;
+		u64 sp = GS_SETREG_RGBAQ((unsigned char)b[0], (unsigned char)b[1], (unsigned char)b[2], 0x80, 0x00);
+
+#ifdef SPEC_CHECK
+		{
+			static unsigned long long sum_diff, count; static int worst;
+			u64 ref = specular_rgbaq(ix[j] < cube1_from ? cube0 : cube1, wn[ix[j]].v, wp[ix[j]].v, ls[ix[j]].v);
+			int c, d;
+
+			for (c = 0; c < 3; c++)
+			{
+				d = (int)((ref >> (8 * c)) & 255) - (int)((sp >> (8 * c)) & 255);
+				if (d < 0) d = -d;
+				sum_diff += d; if (d > worst) worst = d;
+			}
+			count += 3;
+			if ((count % 30000) < 3) printf("SPEC_CHECK: %llu channels, mean |diff| %.4f levels, worst %d\n", count, (double)sum_diff / (double)count, worst);
+		}
+#endif
+#ifdef NO_SPECULAR_PASS
+		sp = 0;
+#endif
+		rgbaq_out[ix[j]] = sp;
+		for (k = slot_first[ix[j]]; k < slot_first[ix[j] + 1]; k++) slot_spec[slot_list[k]] = (u32)sp;
+	}
+}
+
+static void spec_setup_constants(void)
+{
+	static const float poly[4] = SPEC_VU0_POLY;
+	int c;
+
+	for (c = 0; c < 3; c++) { spec_a_consts[0].v[c] = cam_pos[c]; spec_a_consts[1].v[c] = light_dir[0][c]; }
+	spec_a_consts[0].v[3] = 0.f; spec_a_consts[1].v[3] = 0.f;
+	spec_a_consts[2].v[0] = 1.f; spec_a_consts[2].v[1] = spec_a_consts[2].v[2] = spec_a_consts[2].v[3] = 0.f;
+	spec_c_consts[0].v[0] = 0.456f; spec_c_consts[0].v[1] = 0.228f; spec_c_consts[0].v[2] = 1.254f; spec_c_consts[0].v[3] = 0.25f;   /* 1.14 * 0.40, 1.14 * 0.40 * 0.5, 1.14 * 1.1, 1/4 */
+	for (c = 0; c < 3; c++) spec_c_consts[1].v[c] = spec_tint[c];
+	spec_c_consts[1].v[3] = 0.f;
+	for (c = 0; c < 4; c++) spec_c_consts[2].v[c] = poly[c];
+	spec_c_consts[3].v[0] = 128.f; spec_c_consts[3].v[1] = spec_c_consts[3].v[2] = spec_c_consts[3].v[3] = 0.f;
+}
+#endif
+
 static void vu_spec_update(int frame)
 {
 	const int visor_first = CHIEF_VERTS - 69, full = !spec_primed;
 	int i, j, k = spec_phase;
+#ifdef SPEC_ON_VU0
+	int idx[SPEC_BATCH], n = 0;
 
+	(void)j;
+	spec_setup_constants();
+	for (i = 0; i < CHIEF_VERTS; i++)
+	{
+		if (i < visor_first && (k == 0 || full))
+		{
+			idx[n++] = i;
+			if (n == SPEC_BATCH)
+			{
+				spec_batch(idx, n, chief_wp[frame], chief_wn[frame], chief_ls[frame], chief_ge[frame], armor_cube, armor_cube, 0, chief_spec_rgbaq, chief_slot_first, chief_slot_list, chief_vu_spec);
+				n = 0;
+			}
+		}
+		if (++k == SPEC_SPREAD) k = 0;
+	}
+	if (n) spec_batch(idx, n, chief_wp[frame], chief_wn[frame], chief_ls[frame], chief_ge[frame], armor_cube, armor_cube, 0, chief_spec_rgbaq, chief_slot_first, chief_slot_list, chief_vu_spec);
+	n = 0;
+	for (i = 0; i < RIFLE_VERTS; i++)
+	{
+		if (k == 0 || full)
+		{
+			idx[n++] = i;
+			if (n == SPEC_BATCH)
+			{
+				spec_batch(idx, n, rifle_wp[frame], rifle_wn[frame], rifle_ls[frame], rifle_ge[frame], rifle_grip_cube, rifle_gun_cube, RIFLE_GRIP_VERTS, rifle_spec_rgbaq, rifle_slot_first, rifle_slot_list, rifle_vu_spec);
+				n = 0;
+			}
+		}
+		if (++k == SPEC_SPREAD) k = 0;
+	}
+	if (n) spec_batch(idx, n, rifle_wp[frame], rifle_wn[frame], rifle_ls[frame], rifle_ge[frame], rifle_grip_cube, rifle_gun_cube, RIFLE_GRIP_VERTS, rifle_spec_rgbaq, rifle_slot_first, rifle_slot_list, rifle_vu_spec);
+#else
 	for (i = 0; i < CHIEF_VERTS; i++)
 	{
 		if (i < visor_first && (k == 0 || full))
@@ -2056,6 +2187,7 @@ static void vu_spec_update(int frame)
 		}
 		if (++k == SPEC_SPREAD) k = 0;
 	}
+#endif
 	spec_primed = 1;
 	if (++spec_phase == SPEC_SPREAD) spec_phase = 0;
 	SyncDCache(chief_vu_spec, chief_vu_spec + VU_PAD(CHIEF_SLOTS));
