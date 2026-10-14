@@ -197,7 +197,9 @@ errata that GCC works around).
 Write `source/rasterizer/ps2/` to the `rasterizer.h` interface. The EE
 builds packet chains, VU1 microprograms transform, clip, light and fog the
 vertices, and the GS draws them. The converter prepares data offline, so
-the run-time work is small.
+the run-time work is small. The design of that renderer's skeleton (where it
+plugs in, the frame's chains, the VU1 programs, the texture cache, the
+hardware gate, the first milestone) is [ps2_renderer_design.md](ps2_renderer_design.md).
 
 | Halo feature | PS2 method |
 | --- | --- |
