@@ -222,11 +222,14 @@ static const float spec_tint[3] = { 1.f, 0.97f, 0.9f };   /* the highlight's col
 
 /* ---------- textures ---------- */
 
-typedef struct { GSTEXTURE t; int tw, th; } texture;   /* tw, th: log2 of the size, for TEX0 */
+/* tw, th: log2 of the size, for TEX0. levels: the mip levels of the map's textures (0 or 1: none), the
+   levels after the first at video memory tbp (in 256-byte units) with buffer width tbw, for MIPTBP1 and 2 */
+typedef struct { GSTEXTURE t; int tw, th, levels; unsigned mip_tbp[7], mip_tbw[7]; } texture;
 
 static texture chief_tex, rifle_tex, mask_tex, rifle_mask_tex, display_tex;
 
-static void texture_setup_wh(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut)
+/* shared_clut: the video memory address of a palette already uploaded (the grey ones), or 0 to allocate */
+static void texture_setup_clut(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
 {
 	GSTEXTURE *t = &x->t;
 
@@ -240,12 +243,39 @@ static void texture_setup_wh(GSGLOBAL *gs, texture *x, int width, int height, co
 	t->Clut = (u32 *)clut;
 	t->Filter = GS_FILTER_LINEAR;
 	t->Vram = gsKit_vram_alloc(gs, gsKit_texture_size(t->Width, t->Height, t->PSM), GSKIT_ALLOC_USERBUFFER);
-	t->VramClut = gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, t->ClutPSM), GSKIT_ALLOC_USERBUFFER);
+	t->VramClut = shared_clut ? shared_clut : gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, t->ClutPSM), GSKIT_ALLOC_USERBUFFER);
 	gsKit_texture_upload(gs, t);
 	if (t->Vram == GSKIT_ALLOC_ERROR || t->VramClut == GSKIT_ALLOC_ERROR) printf("texture %dx%d: out of video memory\n", width, height);
 	for (x->tw = 0; (1 << x->tw) < width; x->tw++) ;   /* log2, for TEX0 */
 	for (x->th = 0; (1 << x->th) < height; x->th++) ;
 }
+
+static void texture_setup_wh(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut)
+{
+	texture_setup_clut(gs, x, width, height, pixels, clut, 0);
+}
+
+#ifndef NO_MAP
+/* the same with mip levels, which follow the first in pixels, each half the size of the one before */
+static void texture_setup_mips(GSGLOBAL *gs, texture *x, int width, int height, int levels, const unsigned char *pixels, const unsigned int *clut, unsigned shared_clut)
+{
+	int l;
+
+	texture_setup_clut(gs, x, width, height, pixels, clut, shared_clut);
+	x->levels = levels;
+	pixels += width * height;
+	for (l = 1; l < levels; l++)
+	{
+		int w = width >> l, h = height >> l, tbw = (w + 63) / 64;
+		u32 vram = gsKit_vram_alloc(gs, gsKit_texture_size(w, h, GS_PSM_T8), GSKIT_ALLOC_USERBUFFER);
+
+		if (vram == GSKIT_ALLOC_ERROR) printf("mip level %dx%d: out of video memory\n", w, h);
+		gsKit_texture_send((u32 *)pixels, w, h, vram, GS_PSM_T8, tbw, GS_CLUT_TEXTURE);
+		x->mip_tbp[l] = vram / 256; x->mip_tbw[l] = tbw;
+		pixels += w * h;
+	}
+}
+#endif
 
 static void texture_setup(GSGLOBAL *gs, texture *x, int size, const unsigned char *pixels, const unsigned int *clut)
 {
@@ -442,14 +472,19 @@ static inline u64 uv_reg(float u, float v, float tex_size)
 }
 
 /* the vertex's view-space position to the screen and the 16-bit Z buffer; z_add (world units) nudges its depth toward the camera */
-static inline void project(const float *p, float z_add, svert *o)
+static inline void project_xy(const float *p, float z_add, float *x, float *y, u64 *xyz2)
 {
 	float zc = p[2] < 0.01f ? 0.01f : p[2], inv = 1.f / zc, zd = zc - z_add;
 	int iz = (int)(z_k1 / (zd < z_near ? z_near : zd) - z_k2);
 
-	o->x = screen_cx + p[0] * inv * focal;
-	o->y = screen_cy - p[1] * inv * focal;
-	o->xyz2 = GS_SETREG_XYZ2(to_gs_xy(o->x, gs_offset_x), to_gs_xy(o->y, gs_offset_y), iz < 1 ? 1 : (iz > 65534 ? 65534 : iz));
+	*x = screen_cx + p[0] * inv * focal;
+	*y = screen_cy - p[1] * inv * focal;
+	*xyz2 = GS_SETREG_XYZ2(to_gs_xy(*x, gs_offset_x), to_gs_xy(*y, gs_offset_y), iz < 1 ? 1 : (iz > 65534 ? 65534 : iz));
+}
+
+static inline void project(const float *p, float z_add, svert *o)
+{
+	project_xy(p, z_add, &o->x, &o->y, &o->xyz2);
 }
 
 /* the front-facing triangles of tri[first .. first + count), as a list of vertex indices */
@@ -475,10 +510,14 @@ static int cull(const svert *v, const unsigned short *tri, int first, int count)
 
 /* the primitive type and, for a textured one, its TEX0 and TEX1 (filter): once per mesh, as A+D
    register writes (a PRIM carried in a REGLIST tag is not honoured by PCSX2). fst: 1 when the vertices
-   carry UV (texel coordinates), 0 for ST and Q (perspective-correct, and any range: tiling) */
-static void set_prim(GSGLOBAL *gs, const texture *x, int fst)
+   carry UV (texel coordinates), 0 for ST and Q (perspective-correct, and any range: tiling). clamp: 0
+   repeats the texture, 1 clamps it, -1 leaves the setting as it is */
+static int prim_lod_k;           /* TEX1's K for the next mipmapped texture: the level of detail's bias, in 1/16 */
+
+static void set_prim(GSGLOBAL *gs, const texture *x, int fst, int clamp)
 {
-	int regs = x ? 3 : 1;
+	int mipped = x && x->levels > 1;
+	int regs = x ? (clamp < 0 ? 3 : 4) + (mipped ? 2 : 0) : 1;
 	u64 *p = gsKit_heap_alloc(gs, regs, regs * 16, GIF_AD);
 
 	*p++ = GIF_TAG_AD(regs);
@@ -489,8 +528,21 @@ static void set_prim(GSGLOBAL *gs, const texture *x, int fst)
 	*p++ = GS_SETREG_TEX0(x->t.Vram / 256, x->t.TBW, x->t.PSM, x->tw, x->th, gs->PrimAlphaEnable, 0,
 		x->t.VramClut / 256, x->t.ClutPSM, x->t.ClutStorageMode, 0, GS_CLUT_STOREMODE_LOAD);
 	*p++ = GS_TEX0_1 + gs->PrimContext;
-	*p++ = GS_SETREG_TEX1(0, 0, x->t.Filter, x->t.Filter, 0, 0, 0);
+	/* the level of detail comes from Q (the depth): log2 (1 / Q) + K, a trilinear filter between the levels */
+	*p++ = mipped ? GS_SETREG_TEX1(0, x->levels - 1, 1, 5, 0, 0, prim_lod_k & 0xFFF) : GS_SETREG_TEX1(0, 0, x->t.Filter, x->t.Filter, 0, 0, 0);
 	*p++ = GS_TEX1_1 + gs->PrimContext;
+	if (clamp >= 0)
+	{
+		*p++ = GS_SETREG_CLAMP(clamp, clamp, 0, 0, 0, 0);
+		*p++ = GS_CLAMP_1 + gs->PrimContext;
+	}
+	if (mipped)
+	{
+		*p++ = GS_SETREG_MIPTBP1(x->mip_tbp[1], x->mip_tbw[1], x->mip_tbp[2], x->mip_tbw[2], x->mip_tbp[3], x->mip_tbw[3]);
+		*p++ = GS_MIPTBP1_1 + gs->PrimContext;
+		*p++ = GS_SETREG_MIPTBP2(x->mip_tbp[4], x->mip_tbw[4], x->mip_tbp[5], x->mip_tbw[5], x->mip_tbp[6], x->mip_tbw[6]);
+		*p++ = GS_MIPTBP2_1 + gs->PrimContext;
+	}
 }
 
 /* the mesh's front-facing triangles as one REGLIST packet: RGBAQ, UV and XYZ2 per vertex (the GS
@@ -502,7 +554,7 @@ static void draw_textured(GSGLOBAL *gs, const texture *x, const svert *v, const 
 	u64 *p;
 
 	if (n == 0) return;
-	set_prim(gs, x, 1);
+	set_prim(gs, x, 1, -1);
 	qwords = (n * 3 + 1) / 2;                            /* three registers per vertex, two per quadword */
 	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
@@ -523,7 +575,7 @@ static void draw_flat_gouraud(GSGLOBAL *gs, const svert *v, const unsigned short
 	u64 *p;
 
 	if (n == 0) return;
-	set_prim(gs, NULL, 0);
+	set_prim(gs, NULL, 0, -1);
 	p = gsKit_heap_alloc(gs, n, n * 16, GIF_AD);        /* two registers per vertex: one quadword */
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
 	*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
@@ -606,17 +658,22 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 #define CLIP_MARGIN 1000.f
 #define CLIP_PLANES 5
 #define CLIP_MAX 8                  /* a triangle gains at most one vertex a plane */
-#define ATTRS 5                     /* what a vertex carries through the clip: r, g, b, u, v */
+#define ATTRS 7                     /* what a vertex carries through the clip: r, g, b, u, v and the lightmap's u, v */
 
 typedef struct { float p[3]; float a[ATTRS]; } cvert;
-typedef struct { u64 rgbaq, st, xyz2; } mapv;   /* a vertex as the GS reads it: RGBAQ (Q = 1 / z), ST, XYZ2 */
+/* a projected map vertex: its screen position for culling, and the GS registers of each pass: RGBAQ (the
+   hue; Q = 1 / z), ST for the base and detail maps, ST for the lightmap, XYZ2 */
+typedef struct { float x, y; u64 rgbaq, st, lmst, xyz2; } mvert;
+typedef struct { u64 rgbaq, st, lmst, xyz2; } mapv;       /* the same, as kept for the passes */
 
 static float clip_plane[CLIP_PLANES][4];   /* d = a x + b y + c z + e >= 0 is inside */
 static float map_view[MAP_VERTS][3];
-static svert map_v[MAP_VERTS];
+static mvert map_v[MAP_VERTS];
 static unsigned char map_code[MAP_VERTS];
 static mapv map_out[MAP_TRIS * 3 + 4096];
-static texture map_tex[MAP_TEXTURES];
+static texture map_tex[MAP_TEXTURES], map_detail_tex[MAP_DETAILS], map_lm_tex[MAP_LIGHTMAPS];
+static int span_first[MAP_SPANS], span_verts[MAP_SPANS];   /* each span's vertices in map_out */
+static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2];   /* each pass's K for TEX1 (see map_lod_setup) */
 #ifdef PROFILE
 static u32 prof_map_clipped;
 #endif
@@ -681,66 +738,125 @@ static int clip_triangle(const cvert *tri, cvert *out)
 	return n;
 }
 
-/* the vertex's colour (0..255 a channel, alpha 0x80), Q = 1 / z, and S = u Q, T = v Q: the GS divides by Q
-   per pixel. u and v are affine in view space, so they interpolate exactly along a clipped edge. */
-static inline void set_attrs(svert *o, float r, float g, float b, float u, float v, float zc)
+/* the vertex's hue (0..128 a channel: the GS multiplies by colour / 128; alpha 0x80), Q = 1 / z, and
+   S = u Q, T = v Q for the base map and for the lightmap: the GS divides by Q per pixel. u and v are affine
+   in view space, so they interpolate exactly along a clipped edge. */
+static inline u64 st_reg(float u, float v, float q)
 {
-	float q = 1.f / zc, st[2] = { u * q, v * q };
-	u32 qbits, sbits, tbits;
+	float st[2] = { u * q, v * q };
+	u32 sbits, tbits;
 
-	memcpy(&qbits, &q, 4); memcpy(&sbits, &st[0], 4); memcpy(&tbits, &st[1], 4);
+	memcpy(&sbits, &st[0], 4); memcpy(&tbits, &st[1], 4);
+	return (u64)sbits | ((u64)tbits << 32);
+}
+
+static inline void set_attrs(mvert *o, float r, float g, float b, float u, float v, float lu, float lv, float zc)
+{
+	float q = 1.f / zc;
+	u32 qbits;
+
+	memcpy(&qbits, &q, 4);
 	o->rgbaq = GS_SETREG_RGBAQ((int)(r + 0.5f), (int)(g + 0.5f), (int)(b + 0.5f), 0x80, qbits);
-	o->uv = (u64)sbits | ((u64)tbits << 32);
+	o->st = st_reg(u, v, q);
+	o->lmst = st_reg(lu, lv, q);
 }
 
 /* project a clipped vertex (its depth at least the near plane, give or take rounding) */
-static inline void project_cvert(const cvert *v, svert *o)
+static inline void project_cvert(const cvert *v, mvert *o)
 {
-	project(v->p, 0.f, o);
-	set_attrs(o, v->a[0], v->a[1], v->a[2], v->a[3], v->a[4], v->p[2] < z_near ? z_near : v->p[2]);
+	project_xy(v->p, 0.f, &o->x, &o->y, &o->xyz2);
+	set_attrs(o, v->a[0], v->a[1], v->a[2], v->a[3], v->a[4], v->a[5], v->a[6], v->p[2] < z_near ? z_near : v->p[2]);
 }
 
-static inline float screen_area(const svert *a, const svert *b, const svert *c)
+static inline float screen_area(const mvert *a, const mvert *b, const mvert *c)
 {
 	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
 }
 
-static inline void put_vertex(mapv *out, const svert *v)
+static inline void put_vertex(mapv *out, const mvert *v)
 {
-	out->rgbaq = v->rgbaq; out->st = v->uv; out->xyz2 = v->xyz2;
+	out->rgbaq = v->rgbaq; out->st = v->st; out->lmst = v->lmst; out->xyz2 = v->xyz2;
 }
 
-/* a span's vertices as one REGLIST packet: RGBAQ, ST and XYZ2 each, three registers (24 bytes) a vertex */
-static void send_map_span(GSGLOBAL *gs, const texture *x, const mapv *v, int n)
+/* the detail and lightmap passes only multiply what is there: their colour is white at the same Q (the
+   blend reads the texture's alpha, the palette's grey), and the detail's ST is the base map's times its scale */
+#define PASS_RGBAQ(v) (((v) & 0xFFFFFFFF00000000ULL) | 0x80808080ULL)
+
+static inline u64 scale_st(u64 st, float k)
 {
-	int qwords = (n * 3 + 1) / 2;
+	float s, t;
+	u32 sbits = (u32)st, tbits = (u32)(st >> 32);
+
+	memcpy(&s, &sbits, 4); memcpy(&t, &tbits, 4);
+	s *= k; t *= k;
+	memcpy(&sbits, &s, 4); memcpy(&tbits, &t, 4);
+	return (u64)sbits | ((u64)tbits << 32);
+}
+
+enum { PASS_BASE, PASS_DETAIL, PASS_LIGHTMAP };
+
+static void set_clamp_repeat(GSGLOBAL *gs)
+{
+	u64 *p = gsKit_heap_alloc(gs, 1, 16, GIF_AD);
+
+	*p++ = GIF_TAG_AD(1);
+	*p++ = GIF_AD;
+	*p++ = GS_SETREG_CLAMP(0, 0, 0, 0, 0, 0);
+	*p++ = GS_CLAMP_1 + gs->PrimContext;
+}
+
+/* one pass over a span's vertices as one REGLIST packet: RGBAQ, ST and XYZ2 each, three registers (24 bytes) a vertex */
+static void send_map_pass(GSGLOBAL *gs, const texture *x, int pass, float scale, int lod_k, const mapv *v, int n)
+{
+	int qwords = (n * 3 + 1) / 2, i;
 	u64 *p;
 
-	set_prim(gs, x, 0);
+	prim_lod_k = lod_k;
+	set_prim(gs, x, 0, pass == PASS_LIGHTMAP ? 1 : 0);
 	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
 	*p++ = (u64)GS_RGBAQ | ((u64)GS_ST << 4) | ((u64)GS_XYZ2 << 8);
-	memcpy(p, v, n * sizeof(mapv));
+	if (pass == PASS_BASE)
+		for (i = 0; i < n; i++) { *p++ = v[i].rgbaq; *p++ = v[i].st; *p++ = v[i].xyz2; }
+	else if (pass == PASS_DETAIL)
+		for (i = 0; i < n; i++) { *p++ = PASS_RGBAQ(v[i].rgbaq); *p++ = scale_st(v[i].st, scale); *p++ = v[i].xyz2; }
+	else
+		for (i = 0; i < n; i++) { *p++ = PASS_RGBAQ(v[i].rgbaq); *p++ = v[i].lmst; *p++ = v[i].xyz2; }
+}
+
+/* the passes multiply by alpha: destination * source alpha / 128, so a grey of 128 leaves it as it is */
+static void map_blend_begin(GSGLOBAL *gs)
+{
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(1, 2, 0, 2, 0), 0);
+}
+
+static void map_blend_end(GSGLOBAL *gs)
+{
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
 }
 
 static void draw_map(GSGLOBAL *gs, const xform *view)
 {
-	int i, sp, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
+	int i, sp, n = 0, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
 
 	for (i = 0; i < MAP_VERTS; i++)
 	{
-		svert *o = &map_v[i];
+		mvert *o = &map_v[i];
 
 		apply_point(view, &map_pos[i * 3], map_view[i]);
 		map_code[i] = (unsigned char)outcode(map_view[i]);
 		if (map_code[i]) continue;
-		project(map_view[i], 0.f, o);
-		set_attrs(o, map_color[i * 4], map_color[i * 4 + 1], map_color[i * 4 + 2], map_uv[i * 2], map_uv[i * 2 + 1], map_view[i][2]);
+		project_xy(map_view[i], 0.f, &o->x, &o->y, &o->xyz2);
+		set_attrs(o, map_color[i * 4], map_color[i * 4 + 1], map_color[i * 4 + 2], map_uv[i * 2], map_uv[i * 2 + 1],
+			map_lmuv[i * 2], map_lmuv[i * 2 + 1], map_view[i][2]);
 	}
+	/* cull and clip every span once; the passes below draw what is left */
 	for (sp = 0; sp < MAP_SPANS; sp++)
 	{
-		int tex = map_spans[sp * 3], first = map_spans[sp * 3 + 1], count = map_spans[sp * 3 + 2], n = 0;
+		int first = map_spans[sp * 4 + 2], count = map_spans[sp * 4 + 3];
 
+		span_first[sp] = n;
 		for (i = first; i < first + count; i++)
 		{
 			unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
@@ -749,7 +865,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 			if (ca & cb & cc) continue;                          /* all outside one plane */
 			if ((ca | cb | cc) == 0)
 			{
-				const svert *a = &map_v[ia], *b = &map_v[ib], *c = &map_v[ic];
+				const mvert *a = &map_v[ia], *b = &map_v[ib], *c = &map_v[ic];
 
 				if (screen_area(a, b, c) * CULL_SIGN <= 0.f) continue;
 				if (n + 3 > cap) break;
@@ -758,7 +874,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 			else
 			{
 				cvert in[3], poly[CLIP_MAX];
-				svert sv[CLIP_MAX];
+				mvert sv[CLIP_MAX];
 				int m, k, v, ids[3];
 
 				ids[0] = ia; ids[1] = ib; ids[2] = ic;
@@ -767,6 +883,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 					memcpy(in[v].p, map_view[ids[v]], sizeof(in[v].p));
 					for (k = 0; k < 3; k++) in[v].a[k] = (float)map_color[ids[v] * 4 + k];
 					in[v].a[3] = map_uv[ids[v] * 2]; in[v].a[4] = map_uv[ids[v] * 2 + 1];
+					in[v].a[5] = map_lmuv[ids[v] * 2]; in[v].a[6] = map_lmuv[ids[v] * 2 + 1];
 				}
 				m = clip_triangle(in, poly);
 				for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v]);
@@ -781,10 +898,72 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 #endif
 			}
 		}
+		span_verts[sp] = n - span_first[sp];
 #ifdef PROFILE
-		prof_tris += n / 3;
+		prof_tris += span_verts[sp] / 3;
 #endif
-		if (n) send_map_span(gs, tex < 0 ? NULL : &map_tex[tex], map_out, n);
+	}
+	/* each span's base map lit with the lightmap's hue, then its detail maps multiplied in */
+	for (sp = 0; sp < MAP_SPANS; sp++)
+	{
+		int tex = map_spans[sp * 4];
+		const mapv *v = &map_out[span_first[sp]];
+
+		if (!span_verts[sp]) continue;
+		send_map_pass(gs, tex < 0 ? NULL : &map_tex[tex], PASS_BASE, 1.f, tex < 0 ? 0 : lod_k_base[tex], v, span_verts[sp]);
+#ifndef NO_DETAIL_PASS
+		if (tex >= 0)
+		{
+			int d;
+
+			map_blend_begin(gs);
+			for (d = 0; d < 2; d++)
+				if (map_detail_of[tex].detail[d] >= 0)
+					send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[d]], PASS_DETAIL, map_detail_of[tex].scale[d], lod_k_detail[tex][d], v, span_verts[sp]);
+			map_blend_end(gs);
+		}
+#endif
+	}
+	/* the lightmap's brightness, a page at a time */
+#ifndef NO_LIGHTMAP_PASS
+	map_blend_begin(gs);
+	for (i = 0; i < MAP_LM_SPANS; i++)
+	{
+		sp = map_lm_order[i];
+		if (!span_verts[sp]) continue;
+		send_map_pass(gs, &map_lm_tex[map_spans[sp * 4 + 1]], PASS_LIGHTMAP, 1.f, 0, &map_out[span_first[sp]], span_verts[sp]);
+	}
+	map_blend_end(gs);
+#endif
+	set_clamp_repeat(gs);                                        /* the Chief's draws expect the repeat */
+}
+
+/* The GS picks a mip level from the depth alone: level = log2 (1 / Q) + K. A pass's texels a pixel, at depth z,
+   are density * size * scale * z / focal (density: texture repeats a world unit of surface, from the exporter;
+   size: the texture's sides' geometric mean), so K = log2 (density * size * scale / focal), plus a bias toward the
+   blurrier level. In 1/16, as TEX1 holds it. */
+#define LOD_BIAS 0.3f
+
+static int lod_k(float density, float size, float scale)
+{
+	int k = (int)floorf((log2f(density * size * scale / focal) + LOD_BIAS) * 16.f + 0.5f);
+
+	return k < -2048 ? -2048 : (k > 2047 ? 2047 : k);
+}
+
+static void map_lod_setup(void)
+{
+	int t, d;
+
+	for (t = 0; t < MAP_TEXTURES; t++)
+	{
+		lod_k_base[t] = lod_k(map_tex_density[t], sqrtf((float)map_textures[t].width * map_textures[t].height), 1.f);
+		for (d = 0; d < 2; d++)
+		{
+			int id = map_detail_of[t].detail[d];
+
+			lod_k_detail[t][d] = id < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[id].width, map_detail_of[t].scale[d]);
+		}
 	}
 }
 
@@ -1069,7 +1248,12 @@ int main(void)
 	texture_setup(gs, &display_tex, 256, display_tex_pixels, display_tex_clut);
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
-		texture_setup_wh(gs, &map_tex[i], map_textures[i].width, map_textures[i].height, map_textures[i].pixels, map_textures[i].clut);
+		texture_setup_mips(gs, &map_tex[i], map_textures[i].width, map_textures[i].height, map_textures[i].levels, map_textures[i].pixels, map_textures[i].clut, 0);
+	for (i = 0; i < MAP_DETAILS; i++)         /* the grey textures share one palette: alpha = index */
+		texture_setup_mips(gs, &map_detail_tex[i], map_details[i].width, map_details[i].height, map_details[i].levels, map_details[i].pixels, map_gray_clut, i ? map_detail_tex[0].t.VramClut : 0);
+	for (i = 0; i < MAP_LIGHTMAPS; i++)
+		texture_setup_clut(gs, &map_lm_tex[i], map_lightmaps[i].width, map_lightmaps[i].height, map_lightmaps[i].pixels, map_gray_clut, map_detail_tex[0].t.VramClut);
+	for (i = 0; i < MAP_LIGHTMAPS; i++) map_lm_tex[i].t.Filter = GS_FILTER_LINEAR;
 #endif
 
 	printf("VRAM: %u of 4194304 bytes allocated\n", (unsigned)gs->CurrentPointer);
@@ -1112,6 +1296,7 @@ int main(void)
 #ifndef NO_MAP
 	clip_setup(gs);
 	placement_setup();
+	map_lod_setup();
 #endif
 
 	refresh = gs->Mode == GS_MODE_PAL ? 50.f : 60.f;

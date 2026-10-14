@@ -56,37 +56,52 @@ What the EE does slowly, and what the per-vertex path does instead:
   wrote TEX0 (with a CLUT reload), TEX1 and PRIM for each. The PRIM is not carried in the tag:
   PCSX2 ignores PRE on a REGLIST tag.
 
-## The map (Blood Gulch port, phase 1: base maps and baked lightmap light)
+## The map (Blood Gulch port: base maps, detail maps, lightmap pages, mip maps)
 
 `export_map.py` reads the map's structure BSP (`bsp.py`; 5,503 triangles and 5,790 vertices in 79
 materials: the terrain, the cliffs and the two round metal bases; scenery is not in the BSP) and bakes:
 
 - positions, texture coordinates (they tile, over several units) and the triangles, wound
-  counter-clockwise from outside and sorted into one span per base map;
-- the ten base maps the environment shaders use, as 8-bit palettised textures (DXT decoded, cut to
-  256 pixels on a side unless 1,000 or more triangles use the map: the ground stays 512x512), 864 KB;
-- a colour per vertex: the lightmap sampled at the vertex (the lightmaps are RGB565, swizzled; their
-  unused texels are a red and yellow checker, left out of the sample), times 2 because the GS
-  multiplies the texel by colour / 128 (`LM_SCALE` changes it). The few vertices of the other shaders
-  (lights, the teleporter shield) get a flat colour;
+  counter-clockwise from outside and sorted into spans by base map, then lightmap page (36);
+- the ten base maps the environment shaders use, as 8-bit palettised textures with mip levels (DXT
+  decoded, cut to 256 pixels on a side unless 1,000 or more triangles use the map: the ground stays
+  512x512), 1.1 MB;
+- each shader's primary and micro detail maps as 8-bit grey textures, 128 pixels a side with mips, the last
+  level their average (a detail map tiles visibly far away, so it fades out); 7 of them, 148 KB;
+- the lightmap pages (RGB565, swizzled; their unused texels are a red and yellow checker, filled in from the
+  used ones) as 8-bit grey textures of the brightest channel, 127 KB, and at each vertex the lightmap's
+  hue (colour / brightest channel). The few vertices of the other shaders (lights, the teleporter shield)
+  get a flat colour;
+- the texture repeats a world unit of surface, per base map, for the mip level;
 - the ground under the Chief: he stands on open ground in front of a base (`CHIEF_X`, `CHIEF_Y`).
 
 On the EE (`draw_map`) every vertex is transformed (FPU, not VU0 yet), and a triangle with a vertex behind
 the near plane or more than 1000 pixels off the screen is clipped in view space before projection: the
 camera stands inside the map, and the GS's coordinates reach only about 1700 pixels around the screen.
-Each span goes to the GS as one REGLIST packet of RGBAQ, ST and XYZ2, with Q = 1 / z, so the base maps
-are perspective-correct and may tile beyond the 1024 texels UV allows. The Z value is `k1 / z - k2`, so
-it is affine in screen space as the GS interpolates it (the linear Z the Chief-only scene used bends
-across a large triangle).
+Each span is culled and clipped once, and its vertices drawn in passes, each one REGLIST packet of RGBAQ, ST
+and XYZ2 with Q = 1 / z (so the textures are perspective-correct and may tile beyond the 1024 texels UV
+allows):
+
+1. the base map times the lightmap's hue (the GS multiplies the texel by colour / 128);
+2. the primary and micro detail maps: the destination times the texture's alpha / 128 (`ALPHA(1, 2, 0, 2, 0)`),
+   the alpha taken from a palette whose entry i has alpha i, so a detail map's grey d multiplies by 2 d (the
+   shader's "double biased multiply"); the detail's ST is the base map's times the shader's scale;
+3. after all spans, the lightmap pages the same way (the brightness x 2, clamped to the page).
+
+The GS picks a mip level from Q alone (log2 (1 / Q) + K), so K is worked out for each pass from the exporter's
+texture repeats a world unit, the texture's size and its scale. The Z value is `k1 / z - k2`, so it is affine
+in screen space as the GS interpolates it (the linear Z the Chief-only scene used bends across a large
+triangle). `-DNO_DETAIL_PASS` and `-DNO_LIGHTMAP_PASS` leave a pass out, to compare.
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
-  32 bits). Video memory in use with the Chief's and the map's textures: 3.54 MB of 4 MB (2.64 MB
-  before the map's). With 32-bit buffers the Chief alone is 3.79 MB.
+  32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
+  Video memory: 4.14 MB of 4.19 MB in use with the Chief's and the map's textures.
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
-- In PCSX2: 30 fps, the EE at about 22.5 of 33.3 ms: the Chief 13.6 ms, the map 8.8 ms (`-DPROFILE`).
-  Checked only in PCSX2.
+- In PCSX2: 30 fps, the EE at about 24 of 33.3 ms: the Chief 13.6 ms, the map 10.6 ms (`-DPROFILE`). PCSX2
+  does not time the GS. Checked only in PCSX2.
+- The lightmap's brightness is the shader's overbright (x 2) as far as can be told without the Xbox's
+  pixel shaders; shadowed ground comes out dark. `LM_SCALE` in the exporter's environment scales the
+  pages' brightness (default 1).
 
-Not yet: the detail maps (the ground's grain comes from a sand map tiled 100 times, so it looks smooth
-without), the lightmap itself as a texture pass (the vertex sample loses its sharp shadow edges), mip
-maps, the sky, the shader's bump and reflection.
+Not yet: the sky, the shader's bump and reflection, the lights' glow, scenery.
