@@ -254,8 +254,17 @@ static void tick(fp_player *p, float forward, float strafe, int jump, int crouch
 		speed *= slope_speed_scale(move[2]);
 		desired[0] = move[0] * speed; desired[1] = move[1] * speed; desired[2] = move[2] * speed;
 		approach(p->vel, desired, 3, acceleration);
-		p->vel[0] -= ground_n[0] * (1.f / 128.f);
-		p->vel[1] -= ground_n[1] * (1.f / 128.f);
+		/* the original presses the player into the ground (a 1/128 push along the normal) and its collision clips what the ground
+		   stops; here the ground is stood on, not collided with, so the clip is the velocity along the plane. Without it
+		   the push's sideways part on a slope would slide a player standing still. */
+		{
+			float nx = ground_n[0], ny = ground_n[1], into = (p->vel[0] - nx * (1.f / 128.f)) * nx + (p->vel[1] - ny * (1.f / 128.f)) * ny
+				+ (p->vel[2] - ground_nz * (1.f / 128.f)) * ground_nz;
+
+			p->vel[0] -= nx * (1.f / 128.f) + nx * into;
+			p->vel[1] -= ny * (1.f / 128.f) + ny * into;
+			p->vel[2] -= ground_nz * (1.f / 128.f) + ground_nz * into;
+		}
 	}
 
 	/* the horizontal move: all of it, else along one axis (sliding along a wall), else none */

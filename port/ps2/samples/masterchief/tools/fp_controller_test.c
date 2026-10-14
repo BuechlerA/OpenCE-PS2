@@ -36,6 +36,27 @@ int main(void)
 	CHECK(fabsf(target[0] - eye[0] + 1.f) < 1e-3f, "not looking along -x: %f", target[0] - eye[0]);
 	printf("spawn (%.2f, %.2f, %.3f)\n", p.pos[0], p.pos[1], p.pos[2]);
 
+	/* standing still stays still, on flat ground and on slopes: a grid of places over the valley, each 3 s with no input */
+	{
+		float x, y, worst = 0.f, wx = 0, wy = 0, g, nz;
+		int places = 0, slopes = 0;
+
+		for (x = 10.f; x < 130.f; x += 3.7f)
+			for (y = -185.f; y < -45.f; y += 3.9f)
+			{
+				float drift;
+
+				if (!fp_ground(x, y, 3.f, &g, &nz, NULL) || nz < 0.8f) continue;
+				fp_init(&p, x, y, 0.f);
+				run(&p, &idle, 3.f);
+				drift = hypotf(p.pos[0] - x, p.pos[1] - y);
+				places++; if (nz < 0.97f) slopes++;
+				if (drift > worst) { worst = drift; wx = x; wy = y; }
+			}
+		printf("standing still 3 s at %d places (%d on slopes): the most drift %.5f units (at %.1f, %.1f)\n", places, slopes, worst, wx, wy);
+		CHECK(worst < 1e-4f, "slides %.5f units standing still at (%.1f, %.1f)", worst, wx, wy);
+	}
+
 	/* the dead zone: a stick at 9000 does nothing, at full is 1.0 */
 	{
 		fp_pad small = { 9000, 9000, 9000, -9000, 0 }; fp_input in;

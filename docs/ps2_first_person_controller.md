@@ -83,7 +83,8 @@ slipping physics of the original on steep ground. A fall into the void puts the 
 - `cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/fp_controller.c src/map_assets.c -lm`,
   run in `port/ps2/samples/masterchief` after `export_map.py`: the dead zone and the square stick, the look rates
   and their acceleration, the pitch stop, the run speed (2.23 of 2.25 on a slope), the jump (0.65 peak, lands), the
-  crouch, and 36 headings x 60 s of holding forward: finite, never off the ground, never out of the map.
+  crouch, standing still for 3 s at 508 places over the valley (133 of them on slopes: no drift at all), and 36
+  headings x 60 s of holding forward: finite, never off the ground, never out of the map.
 - `tools/fp_demo_test.c` (the command is in its header): the demo plans the walk, and the controller, given only the pad
   the demo makes, arrives next to the Chief, four times in 100 s, jumping four times a walk and facing him, never
   stuck; a touch of the pad takes over and Start restarts the demo.
@@ -96,6 +97,9 @@ slipping physics of the original on steep ground. A fall into the void puts the 
 
 ## Pitfalls met
 
+- The original presses the player into the ground each tick (a 1/128 push along the ground's normal) and its collision
+  clips what the ground stops. Ported without the clip, the push's sideways part slid a player standing on a slope
+  (0.4 units in 3 s at one place): the grounded velocity is now clipped to the ground plane.
 - The Chief's passes (VU1's microprogram, the EE's visor and display) do not clip: with the camera behind him the
   perspective divide mirrored him across the screen, and close up or far to a side his vertices passed the GS's
   2048-pixel limit and wrapped. The orbit never showed either. `chief_in_view` (main.c) tests his bounding sphere
