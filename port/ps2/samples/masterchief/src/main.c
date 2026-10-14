@@ -2119,6 +2119,27 @@ static void camera_look(const float *eye, const float *target)
 	cam_up[2] = cam_right[0] * cam_fwd[1] - cam_right[1] * cam_fwd[0];
 }
 
+#if defined(FIRST_PERSON) && !defined(NO_MAP)
+/* The Chief's passes (VU1's, the EE's) project every vertex without clipping: behind the camera the divide mirrors him across the
+   screen, and close up or far to a side his vertices pass the GS's 2048-pixel limit and wrap. The orbit never let either happen;
+   a walking camera does, so he is drawn only where his bounding sphere is in front of the near plane and its projection stays
+   inside what the GS takes. Out of that view he is drawn through a view that sends every vertex to one point: only degenerate
+   triangles, which nothing draws (VU1 still runs its stream, which ends with the FINISH the map's queue waits for). */
+static int chief_in_view(const xform *view)
+{
+	const float r = MODEL_RADIUS * 1.15f;
+	const float centre[3] = { MAP_CHIEF_X, MAP_CHIEF_Y, MAP_CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
+	float v[3], depth, extent;
+
+	apply_point(view, centre, v);
+	depth = v[2] - r;                            /* the nearest any vertex can be */
+	if (depth < z_near + 0.05f) return 0;
+	extent = r / depth * focal;                  /* the most a vertex can be from the centre's projection, in pixels */
+	return fabsf(v[0]) / v[2] * focal_x + extent < 1800.f && fabsf(v[1]) / v[2] * focal + extent < 1800.f
+	    && fabsf(v[0]) / v[2] * focal_x - extent < screen_cx && fabsf(v[1]) / v[2] * focal - extent < screen_cy;
+}
+#endif
+
 static void render_frame(GSGLOBAL *gs, float seconds)
 {
 	float theta = 2.f * (float)M_PI * seconds / ORBIT_SECONDS;
@@ -2127,6 +2148,12 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	float scroll = -ANIM_STRIDE * cycles;
 	float c __attribute__((unused)) = cosf(theta), s __attribute__((unused)) = sinf(theta);   /* the orbit's, not the player's */
 	xform orbit, view, world_to_view;
+#ifdef FIRST_PERSON
+	xform chief_view;               /* what the Chief is drawn through: the view, or one that sends him nowhere */
+#ifndef NO_VU0
+	mat4 chief_view4;
+#endif
+#endif
 #ifdef NO_MAP
 	xform bone, bone_world[NODE_COUNT], rifle_m, rifle_view, rifle_world;
 #endif
@@ -2176,6 +2203,18 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	for (j = 0; j < 3; j++)
 		view.t[j] = -(cam_pos[0] * view.r[0][j] + cam_pos[1] * view.r[1][j] + cam_pos[2] * view.r[2][j]);
 	xform_then(&orbit, &view, &world_to_view);
+#ifdef FIRST_PERSON
+	chief_view = view;
+	if (!chief_in_view(&view)) { memset(&chief_view, 0, sizeof(chief_view)); chief_view.t[2] = 100.f; }
+#ifndef NO_VU0
+	mat4_from_xform(&chief_view4, &chief_view);
+#endif
+#define CHIEF_VIEW chief_view
+#define CHIEF_VIEW4 chief_view4
+#else
+#define CHIEF_VIEW view
+#define CHIEF_VIEW4 view4
+#endif
 
 #ifdef NO_MAP
 	for (i = 0; i < NODE_COUNT; i++)
@@ -2198,7 +2237,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 #ifndef NO_MAP
 	gsKit_clear(gs, GS_SETREG_RGBAQ(0x70, 0x9c, 0xd0, 0x00, 0x00));    /* the sky */
 #ifdef CHIEF_VU1
-	chief_vu1_kick(gs, frame, &view);                                  /* the clear goes out, then VU1 draws the Chief while the EE builds the map */
+	chief_vu1_kick(gs, frame, &CHIEF_VIEW);                                  /* the clear goes out, then VU1 draws the Chief while the EE builds the map */
 	PROF_MARK(P_VU1);
 #endif
 	PROF_MARK(P_SETUP);
@@ -2221,10 +2260,10 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 
 #ifndef NO_MAP
 #ifndef NO_VU0
-	vu0_load_view(&view4);
+	vu0_load_view(&CHIEF_VIEW4);
 	vu0_load_constants(vu_const);
 #endif
-	cached_pose(frame, &view);
+	cached_pose(frame, &CHIEF_VIEW);
 	PROF_MARK(P_RIFLE);
 #else
 #ifndef NO_VU0

@@ -70,6 +70,12 @@ slipping physics of the original on steep ground. A fall into the void puts the 
 
 ## Pitfalls met
 
+- The Chief's passes (VU1's microprogram, the EE's visor and display) do not clip: with the camera behind him the
+  perspective divide mirrored him across the screen, and close up or far to a side his vertices passed the GS's
+  2048-pixel limit and wrapped. The orbit never showed either. `chief_in_view` (main.c) tests his bounding sphere
+  against the near plane and the pixel limit, and when it fails he is drawn through a view that sends every vertex to
+  one point (degenerate triangles; VU1 still runs its stream, which ends with the FINISH the map's queue waits
+  for). He vanishes when the eye is within about 0.7 units of him: the player does not collide with him.
 - The walk can read texture levels the orbit never does (close to the ground, along the cliffs): `tools/mip_floor.json`
   leaves out 433 KB of them (the metal panels, the boulder, the flag base). The default assets are the orbit's, so
   those textures may look softer up close (not compared). `MIP_FLOOR=0 python3 tools/export_map.py` keeps every
