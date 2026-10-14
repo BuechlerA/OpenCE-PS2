@@ -204,9 +204,22 @@ the colour bytes agree with the FPU function to a mean of 0.05 levels, worst 1 o
   [0.03, 3] (the sample's arguments are 0.035 to 2.4); `vsqrt` is 7 cycles against `vrsqrt`'s 13. The static half,
   the curve of a quarter of the lit sum (which is exactly 0.25^(1/2.2) times the curve of the sum), is a per-vertex
   array made with the poses (`chief_ge`, `rifle_ge`: 950 KB), so each vertex takes three square roots, not six.
-- **Next:** the cube lookup (a divide, a branchy face choice) and the scatter are what is left; a coarser cube
-  or choosing the face in stage A would cut the first, a vertex-ordered colour array that VU1 reads by index the
-  second.
+- **What is left, and why it stays:** the cube lookup (117 cycles) and the write of each colour to its slots (75).
+  Both were probed before building anything, and neither pays enough:
+  - *The cube lookup is arithmetic, not cache misses:* with every texel read forced onto one hot cache line it
+    still costs 110 cycles (a divide, two float to integer conversions, the face choice's branches). Choosing the
+    face on VU0 branch-free (`|r|`, a max, three selection masks, the divide, the texel offset) would leave the
+    EE three byte loads (about 35 cycles) and add roughly 45 to 55 cycles of VU0 time that the EE waits for:
+    about 0.07 ms, under 1% of the frame, for a longer generator. Not done.
+  - *The scatter cannot become an index on VU1:* VU1 could read pass 2's colour by vertex from a small per-batch
+    table, but a batch of 12 triangles (36 vertices) touches vertices from all over the mesh: the median batch
+    spans 22 vertex numbers, the tenth worst 870, the worst 1,857 (the armour; the rifle's worst is 332), however
+    the triangles are ordered. A table of the whole mesh does not fit VU1's 16 KB beside the rest.
+  - *Doing the same scatter in a cache-friendly order does not help either:* refreshing the vertices in the order
+    of their first slot, with their slot lists flattened in that order, gave the same pictures and 9.42 ->
+    9.38 ms: the 52 cycles are the roughly 1,900 stores a frame (write-allocating into a 22 KB array) and a
+    vertex's later slots are spread through the mesh whatever the order. Reverted.
+  The next real saving for the Chief is not here: his EE share is now about 0.8 ms of the 9.4.
 
 ## Pitfalls (each cost real time)
 
