@@ -10,7 +10,7 @@ endif
 EE_INCS += -I$(PS2DEV)/gsKit/include
 EE_LDFLAGS += -L$(PS2DEV)/gsKit/lib
 EE_LIBS = -lgskit -ldmakit -lm -lc -lkernel
-EE_CFLAGS += -O2 -std=gnu99 $(EXTRA_CFLAGS)
+EE_CFLAGS += -O3 -ffast-math -funroll-loops -std=gnu99 $(EXTRA_CFLAGS)
 
 all: $(EE_BIN)
 

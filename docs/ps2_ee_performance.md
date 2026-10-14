@@ -82,6 +82,51 @@ honours PRE, but the A+D write costs nothing to keep.
 Culling before packing (`(b - a) x (c - a)` in screen space, about half the
 triangles) is cheap and halves everything after it.
 
+## Drawing a map: what the Blood Gulch scene taught
+
+Measured in PCSX2 taking the Chief standing on the Blood Gulch terrain
+(`port/ps2/samples/masterchief`, 5,500 triangles, up to four passes each)
+from 24 ms of EE time to 8.6 to 13.4 ms. The order they paid off in:
+
+- **Do work once that does not change.** The Chief's pose changes 30 times a
+  second and only the camera moves, so his skinned world positions, normals
+  and diffuse light are cached for all 20 frames at start-up (3.3 MB), and a
+  frame only projects them: 12 ms became 4. What does depend on the camera
+  (his specular colour) is worked out for a third of the vertices a frame.
+- **Cull before transforming.** A grid of 93 chunks with bounding spheres,
+  tested against the five clip planes, lets a frame skip 20 to 70% of the map;
+  its vertices are then transformed and projected only when a visible
+  triangle first needs them (a stamp per vertex), which halved the vertex
+  work again.
+- **One divide a vertex.** q = 1 / z gives the screen position, the depth
+  (k1 q - k2) and every texture coordinate (u q); the position tests (near
+  plane, guard band) are comparisons on the screen position, not plane
+  distances; the registers' floats are stored straight into the record.
+- **Build the packet data once, send it as often as the passes need.** A
+  vertex record of every register any pass uses (48 bytes) is built once per
+  frame; each pass is that record sent whole, as a REGLIST packet in which the
+  registers it does not use are directed at UV (ignored when drawing with ST).
+  Copy with 128-bit loads and stores (`u128`): the EE's `memcpy` moves
+  less.
+- **Compiler flags matter more than expected.** `-O3 -ffast-math
+  -funroll-loops` took 1.7 ms off the heaviest view (the EE's FPU has no IEEE
+  behaviour to give up). Compare stills afterwards.
+- **VU0 macro mode** helped less on the map (a vertex is one point times a
+  matrix, a small part of its cost) than on the skinning: the FPU build was
+  within 10%.
+- A triangle that must be clipped costs about 2,000 cycles even with a lean
+  vertex path; keep the guard band wide (the GS allows 2048 pixels from its
+  origin, gsKit puts that at the screen's corner: 1400 outside the screen
+  fits) so only triangles that cross the near plane and the very large ones
+  are clipped (about 8% of a view's triangles).
+- `mips` is a predefined macro on the EE's GCC: a variable of that name does
+  not compile.
+- A wrong guard band does not fail loudly. At 1700 pixels the right edge
+  (640 + 1700) passes 2048 and the packed coordinates wrap: huge triangles
+  and stretched textures, with the vertex data itself correct. Print a few
+  vertices' view position, screen position and packed XYZ2 before suspecting
+  the packets.
+
 ## How to measure
 
 - **Phases, not guesses.** Read the EE's cycle counter (`cpu_ticks()` from

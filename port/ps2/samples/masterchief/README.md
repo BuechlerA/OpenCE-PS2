@@ -75,12 +75,16 @@ materials: the terrain, the cliffs and the two round metal bases; scenery is not
 - the texture repeats a world unit of surface, per base map, for the mip level;
 - the ground under the Chief: he stands on open ground in front of a base (`CHIEF_X`, `CHIEF_Y`).
 
-On the EE (`draw_map`) every vertex is transformed (FPU, not VU0 yet), and a triangle with a vertex behind
-the near plane or more than 1000 pixels off the screen is clipped in view space before projection: the
-camera stands inside the map, and the GS's coordinates reach only about 1700 pixels around the screen.
-Each span is culled and clipped once, and its vertices drawn in passes, each one REGLIST packet of RGBAQ, ST
-and XYZ2 with Q = 1 / z (so the textures are perspective-correct and may tile beyond the 1024 texels UV
-allows):
+On the EE (`draw_map`) a frame first tests each of the exporter's 93 chunks (a bounding sphere against the five
+planes below), then takes the triangles of the chunks in view, span by span. A triangle's vertices are
+transformed on VU0, projected and given their registers (one divide) the first time a visible triangle needs
+them, once a frame. A triangle with a vertex behind the near plane or more than 1400 pixels off the screen
+(the GS's coordinates are 2048 pixels either side of its origin, and gsKit puts that at the screen's corner:
+more wraps) is clipped in view space before projection: the camera stands inside the map. Each span's
+vertices are kept as 48-byte records (RGBAQ, the ST of the base map, the lightmap and each detail map, XYZ2),
+and each pass is those records sent whole, as one REGLIST packet with six registers a vertex of which the
+pass uses RGBAQ, XYZ2 and one ST; the others go to UV, which perspective-correct drawing ignores. The textures
+are perspective-correct (Q = 1 / z) and may tile beyond the 1024 texels UV allows. The passes:
 
 1. the base map times the lightmap's hue (the GS multiplies the texel by colour / 128);
 2. the primary and micro detail maps: the destination times the texture's alpha / 128 (`ALPHA(1, 2, 0, 2, 0)`),
@@ -98,8 +102,16 @@ triangle). `-DNO_DETAIL_PASS` and `-DNO_LIGHTMAP_PASS` leave a pass out, to comp
   Video memory: 4.14 MB of 4.19 MB in use with the Chief's and the map's textures.
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
-- In PCSX2: 30 fps, the EE at about 24 of 33.3 ms: the Chief 13.6 ms, the map 10.6 ms (`-DPROFILE`). PCSX2
-  does not time the GS. Checked only in PCSX2.
+- In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.6 to 13.4 ms of the
+  16.7 ms frame, by where the camera points (the map 5 to 8 ms, the Chief 4 ms). PCSX2 does not time the GS.
+  Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
+  - The Chief's 20 animation frames are skinned and lit once at the start (his pose only changes 30 times a
+    second and only the camera moves: `cached_pose`); a frame projects the cached positions, and gives each
+    vertex its view-dependent specular colour once in 3 frames (the visor's, 69 vertices, every frame).
+  - The map's chunks, lazy vertices and VU0 transform above, one divide for a vertex, and the records
+    built once for all the passes.
+  - `-O3 -ffast-math -funroll-loops` (the Makefile's): 1.7 ms in the heaviest view; stills match the `-O2`
+    build to within 0.02 of 255 on average.
 - The lightmap's brightness is the shader's overbright (x 2) as far as can be told without the Xbox's
   pixel shaders; shadowed ground comes out dark. `LM_SCALE` in the exporter's environment scales the
   pages' brightness (default 1).

@@ -47,9 +47,16 @@ that only print):
 - `make EXTRA_CFLAGS=-DPROFILE` prints the frame's phases in milliseconds and
   the frame rate; `tools/ps2/pcsx2_run.py` shows them. The target is one
   vsync (60 fps, NTSC). `-DNO_VU0` keeps the transforms on the FPU.
-- Video memory is nearly full (two 640x448 32-bit buffers, a 16-bit Z buffer
-  and five textures: about 3.8 of 4 MB). Work out what a new texture takes
-  before adding it; the rifle's mask is 256x256 for that reason.
+- Video memory is full. The map scene (the default build) has two 640x448
+  16-bit buffers with dithering, a 16-bit Z buffer, the Chief's five textures
+  and the map's: 4.14 of 4.19 MB, and the sample prints what it allocated at
+  start-up (`VRAM: ...`; gsKit prints "Not enough VRAM" when an allocation
+  fails, and goes on). Work out what a new texture takes before adding it.
+- gsKit sizes its buffers from the console's own video mode (PAL: 512 lines)
+  before the sample forces NTSC: set `gs->Height` with `gs->Mode`.
+- GS coordinates are 12.4 fixed point in 16 bits around an origin gsKit puts
+  at the screen's corner: a vertex further than 2048 pixels from it wraps. The
+  map clips at 1400 pixels outside the screen.
 
 ## Rules
 

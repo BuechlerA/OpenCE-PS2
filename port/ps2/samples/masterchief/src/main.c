@@ -31,8 +31,8 @@
 
 #ifdef PROFILE                      /* -DPROFILE: time the frame's phases with the EE's cycle counter */
 #include <timer.h>
-enum { P_SETUP, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
-static const char *prof_name[P_COUNT] = { "setup", "ground/map", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
+enum { P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
+static const char *prof_name[P_COUNT] = { "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
 static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled;
 static void prof_mark(int phase) { u32 t = cpu_ticks(); prof_sum[phase] += t - prof_last; prof_last = t; }
 #define PROF_MARK(p) prof_mark(p)
@@ -144,6 +144,16 @@ static inline void vu0_transform(const mat4 *m, const vec4 *p, const vec4 *n, ve
 		"vmulax.xyz $ACC, $vf20, $vf12x\n" "vmadday.xyz $ACC, $vf21, $vf12y\n" "vmaddaz.xyz $ACC, $vf22, $vf12z\n" "vmaddw.xyz $vf19, $vf23, $vf12w\n"
 		"sqc2 $vf12, 0(%3)\n" "sqc2 $vf15, 0(%4)\n" "sqc2 $vf19, 0(%5)\n"
 		: : "r"(m), "r"(p), "r"(n), "r"(pw), "r"(nw), "r"(pv) : "memory");
+}
+
+/* a point (w 1) into the view, by the matrix in vf20-vf23 */
+static inline void vu0_view_point(const vec4 *p, vec4 *pv)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"vmulax.xyz $ACC, $vf20, $vf1x\n" "vmadday.xyz $ACC, $vf21, $vf1y\n" "vmaddaz.xyz $ACC, $vf22, $vf1z\n" "vmaddw.xyz $vf19, $vf23, $vf1w\n"
+		"sqc2 $vf19, 0(%1)\n"
+		: : "r"(p), "r"(pv) : "memory");
 }
 
 /* the same by two bones, blended by w = (w0, w1, 0, 0); the blended normal is normalised */
@@ -414,19 +424,27 @@ static u64 visor_color(const float *n, const float *pos, float spec_mask)
 	return GS_SETREG_RGBAQ(rgb[0], rgb[1], rgb[2], 0x80, 0x00);
 }
 
-/* a lit, textured vertex: the diffuse colour the GS modulates the base map by, and the colour of its
-   masked second pass (the armour's, the rifle's), added over the first: the shader's reflection
-   (0.06 + 0.40 m) * cube * (0.5 + fresnel) and highlight (0.15 + 1.1 m) * n.h^18, where the mask m
-   comes from the texture (see tools/export_assets.py). What is added is the part that scales with
-   the mask; the GS multiplies it by the mask texel. The sum is in linear light but the frame is
-   gamma encoded, so what is added is the encoded difference it makes on a typical armour pixel. */
-static inline void lit_colors(const unsigned char *cube_map, const float *n, const float *pos, u64 *diffuse, u64 *specular)
+/* the diffuse colour the GS modulates a lit, textured vertex's base map by, from the summed light */
+static inline u64 diffuse_rgbaq(const float *sum)
 {
-	float sum[3], nv, r[3], ndh, cube[3], fres, spec;
-	unsigned char d[3], s[3];
+	unsigned char d[3];
 	int c;
 
-	light_sum(n, sum);
+	for (c = 0; c < 3; c++) d[c] = to_half_byte(gamma_enc_in_range(sum[c]));
+	return GS_SETREG_RGBAQ(d[0], d[1], d[2], 0x80, 0x00);
+}
+
+/* the colour of a masked part's second pass (the armour's, the rifle's), added over the first: the shader's
+   reflection (0.06 + 0.40 m) * cube * (0.5 + fresnel) and highlight (0.15 + 1.1 m) * n.h^18, where the mask m
+   comes from the texture (see tools/export_assets.py). What is added is the part that scales with the mask;
+   the GS multiplies it by the mask texel. The sum is in linear light but the frame is gamma encoded, so what
+   is added is the encoded difference it makes on a typical armour pixel. */
+static inline u64 specular_rgbaq(const unsigned char *cube_map, const float *n, const float *pos, const float *sum)
+{
+	float nv, r[3], ndh, cube[3], fres, spec;
+	unsigned char s[3];
+	int c;
+
 	shade_terms(n, pos, &nv, r, &ndh);
 	cube_sample(cube_map, r, cube);
 	fres = 1.f - nv;
@@ -437,11 +455,18 @@ static inline void lit_colors(const unsigned char *cube_map, const float *n, con
 		float add = 1.14f * (0.40f * cube[c] * (0.5f + fres) + 1.1f * spec * spec_tint[c]);
 		float typical = 0.25f * sum[c];                      /* a mid-tone armour pixel, lit: encoded, a quarter's worth of enc */
 
-		d[c] = to_half_byte(enc);
 		s[c] = to_half_byte(gamma_enc_in_range(typical + add) - QUARTER_GAMMA * enc);
 	}
-	*diffuse = GS_SETREG_RGBAQ(d[0], d[1], d[2], 0x80, 0x00);
-	*specular = GS_SETREG_RGBAQ(s[0], s[1], s[2], 0x80, 0x00);
+	return GS_SETREG_RGBAQ(s[0], s[1], s[2], 0x80, 0x00);
+}
+
+static inline void lit_colors(const unsigned char *cube_map, const float *n, const float *pos, u64 *diffuse, u64 *specular)
+{
+	float sum[3];
+
+	light_sum(n, sum);
+	*diffuse = diffuse_rgbaq(sum);
+	*specular = specular_rgbaq(cube_map, n, pos, sum);
 }
 
 /* ---------- drawing ---------- */
@@ -652,36 +677,49 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 /* ---------- the map: static geometry drawn as one Gouraud mesh ---------- */
 
 /* The camera stands inside the map, so triangles cross the near plane and run far off the screen. The
-   GS's coordinates reach about +-1700 pixels around the screen, so a triangle with a vertex behind the
+   GS's coordinates reach 2048 pixels from the screen's corner, so a triangle with a vertex behind the
    near plane or beyond CLIP_MARGIN pixels outside the screen is clipped against those five planes in
    view space (Sutherland-Hodgman) before projection; the rest go straight through. */
-#define CLIP_MARGIN 1000.f
+#define CLIP_MARGIN 1400.f      /* the GS's coordinates are 2048 pixels either side of its origin, which gsKit puts at the screen's corner */
 #define CLIP_PLANES 5
 #define CLIP_MAX 8                  /* a triangle gains at most one vertex a plane */
 #define ATTRS 7                     /* what a vertex carries through the clip: r, g, b, u, v and the lightmap's u, v */
 
 typedef struct { float p[3]; float a[ATTRS]; } cvert;
-/* a projected map vertex: its screen position for culling, and the GS registers of each pass: RGBAQ (the
-   hue; Q = 1 / z), ST for the base and detail maps, ST for the lightmap, XYZ2 */
-typedef struct { float x, y; u64 rgbaq, st, lmst, xyz2; } mvert;
-typedef struct { u64 rgbaq, st, lmst, xyz2; } mapv;       /* the same, as kept for the passes */
+/* What the passes send for a vertex, six registers (48 bytes) in this order: RGBAQ (the lightmap's hue; Q = 1 / z,
+   and alpha 0x80, which the blended passes read), ST for the base map, ST for the lightmap, ST for each of
+   the two detail maps (the base map's times the detail's scale), and XYZ2, which kicks the vertex. A pass is
+   this record sent whole with the registers it does not use listed as NOP, so a span's triangles are built
+   once, whatever the number of passes. */
+typedef struct { u64 rgbaq, st, lmst, d0st, d1st, xyz2; } mapv;
+typedef struct { mapv m; float x, y, pad[2]; } mvert __attribute__((aligned(16)));   /* and the screen position, for culling */
 
 static float clip_plane[CLIP_PLANES][4];   /* d = a x + b y + c z + e >= 0 is inside */
-static float map_view[MAP_VERTS][3];
+static float clip_length[CLIP_PLANES];     /* the length of each plane's normal, for a sphere's distance */
+static float clip_x_min, clip_x_max, clip_y_min, clip_y_max;   /* the guard band on the screen */
+static unsigned map_rgb32[MAP_VERTS];      /* each vertex's hue as the low half of RGBAQ: r, g, b, alpha 0x80 */
+static float map_view[MAP_VERTS][4] __attribute__((aligned(16)));    /* view-space positions, w unused */
 static mvert map_v[MAP_VERTS];
 static unsigned char map_code[MAP_VERTS];
-static mapv map_out[MAP_TRIS * 3 + 4096];
+static unsigned map_stamp[MAP_VERTS], map_frame;       /* a vertex is transformed, projected and given its registers when a visible triangle first needs it, once a frame */
+static unsigned char chunk_visible[MAP_CHUNKS];
+static float detail_scale[MAP_TEXTURES + 1][2];        /* each base map's two detail scales (0: none; the last entry is for no texture) */
+static mapv map_out[MAP_TRIS * 3 + 4096] __attribute__((aligned(64)));
 static texture map_tex[MAP_TEXTURES], map_detail_tex[MAP_DETAILS], map_lm_tex[MAP_LIGHTMAPS];
 static int span_first[MAP_SPANS], span_verts[MAP_SPANS];   /* each span's vertices in map_out */
 static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2];   /* each pass's K for TEX1 (see map_lod_setup) */
+#ifndef NO_VU0
+static vec4 map_p4[MAP_VERTS];                         /* positions as quads, w 1, for the VU */
+#endif
 #ifdef PROFILE
-static u32 prof_map_clipped;
+static u32 prof_map_clipped, prof_map_vertices, prof_map_chunks, prof_t_vertex, prof_t_clip, prof_clip_near, prof_clip_side;
 #endif
 
 static void clip_setup(const GSGLOBAL *gs)
 {
 	float w = (float)gs->Width, h = (float)gs->Height;
 	static float q[CLIP_PLANES][4];
+	int i;
 
 	q[0][2] = 1.f; q[0][3] = -z_near;                                    /* near */
 	q[1][0] = focal; q[1][2] = screen_cx + CLIP_MARGIN;                  /* left */
@@ -689,6 +727,8 @@ static void clip_setup(const GSGLOBAL *gs)
 	q[3][1] = -focal; q[3][2] = screen_cy + CLIP_MARGIN;                 /* top */
 	q[4][1] = focal; q[4][2] = h + CLIP_MARGIN - screen_cy;              /* bottom */
 	memcpy(clip_plane, q, sizeof(q));
+	clip_x_min = -CLIP_MARGIN; clip_x_max = w + CLIP_MARGIN; clip_y_min = -CLIP_MARGIN; clip_y_max = h + CLIP_MARGIN;
+	for (i = 0; i < CLIP_PLANES; i++) clip_length[i] = sqrtf(q[i][0] * q[i][0] + q[i][1] * q[i][1] + q[i][2] * q[i][2]);
 }
 
 static inline float plane_dist(int pl, const float *p)
@@ -710,16 +750,24 @@ static inline int outcode(const float *p)
 static int clip_triangle(const cvert *tri, cvert *out)
 {
 	cvert a[CLIP_MAX], b[CLIP_MAX], *src = a, *dst = b, *swap;
-	int n = 3, pl, i, k, m;
+	float d[CLIP_MAX];
+	int n = 3, pl, i, k, m, inside;
 
 	memcpy(a, tri, 3 * sizeof(cvert));
-	for (pl = 0; pl < CLIP_PLANES && n > 0; pl++)
+	for (pl = 0; pl < CLIP_PLANES; pl++)
 	{
+		for (i = 0, inside = 0; i < n; i++)
+		{
+			d[i] = plane_dist(pl, src[i].p);
+			inside += d[i] >= 0.f;
+		}
+		if (inside == n) continue;                      /* nothing to cut off here */
+		if (inside == 0) return 0;
 		m = 0;
 		for (i = 0; i < n; i++)
 		{
-			const cvert *c = &src[i], *q = &src[(i + n - 1) % n];
-			float dc = plane_dist(pl, c->p), dq = plane_dist(pl, q->p);
+			const cvert *c = &src[i], *q = &src[i ? i - 1 : n - 1];
+			float dc = d[i], dq = d[i ? i - 1 : n - 1];
 
 			if ((dc >= 0.f) != (dq >= 0.f))
 			{
@@ -739,8 +787,8 @@ static int clip_triangle(const cvert *tri, cvert *out)
 }
 
 /* the vertex's hue (0..128 a channel: the GS multiplies by colour / 128; alpha 0x80), Q = 1 / z, and
-   S = u Q, T = v Q for the base map and for the lightmap: the GS divides by Q per pixel. u and v are affine
-   in view space, so they interpolate exactly along a clipped edge. */
+   S = u Q, T = v Q for the base map, the lightmap and each detail map: the GS divides by Q per pixel. u and v
+   are affine in view space, so they interpolate exactly along a clipped edge. */
 static inline u64 st_reg(float u, float v, float q)
 {
 	float st[2] = { u * q, v * q };
@@ -749,38 +797,6 @@ static inline u64 st_reg(float u, float v, float q)
 	memcpy(&sbits, &st[0], 4); memcpy(&tbits, &st[1], 4);
 	return (u64)sbits | ((u64)tbits << 32);
 }
-
-static inline void set_attrs(mvert *o, float r, float g, float b, float u, float v, float lu, float lv, float zc)
-{
-	float q = 1.f / zc;
-	u32 qbits;
-
-	memcpy(&qbits, &q, 4);
-	o->rgbaq = GS_SETREG_RGBAQ((int)(r + 0.5f), (int)(g + 0.5f), (int)(b + 0.5f), 0x80, qbits);
-	o->st = st_reg(u, v, q);
-	o->lmst = st_reg(lu, lv, q);
-}
-
-/* project a clipped vertex (its depth at least the near plane, give or take rounding) */
-static inline void project_cvert(const cvert *v, mvert *o)
-{
-	project_xy(v->p, 0.f, &o->x, &o->y, &o->xyz2);
-	set_attrs(o, v->a[0], v->a[1], v->a[2], v->a[3], v->a[4], v->a[5], v->a[6], v->p[2] < z_near ? z_near : v->p[2]);
-}
-
-static inline float screen_area(const mvert *a, const mvert *b, const mvert *c)
-{
-	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
-}
-
-static inline void put_vertex(mapv *out, const mvert *v)
-{
-	out->rgbaq = v->rgbaq; out->st = v->st; out->lmst = v->lmst; out->xyz2 = v->xyz2;
-}
-
-/* the detail and lightmap passes only multiply what is there: their colour is white at the same Q (the
-   blend reads the texture's alpha, the palette's grey), and the detail's ST is the base map's times its scale */
-#define PASS_RGBAQ(v) (((v) & 0xFFFFFFFF00000000ULL) | 0x80808080ULL)
 
 static inline u64 scale_st(u64 st, float k)
 {
@@ -793,7 +809,26 @@ static inline u64 scale_st(u64 st, float k)
 	return (u64)sbits | ((u64)tbits << 32);
 }
 
-enum { PASS_BASE, PASS_DETAIL, PASS_LIGHTMAP };
+/* tex: the vertex's base map, or MAP_TEXTURES for none, for its detail scales */
+static inline void set_attrs(mvert *o, float r, float g, float b, float u, float v, float lu, float lv, float zc, int tex)
+{
+	float q = 1.f / zc;
+	u32 qbits;
+
+	memcpy(&qbits, &q, 4);
+	o->m.rgbaq = GS_SETREG_RGBAQ((int)(r + 0.5f), (int)(g + 0.5f), (int)(b + 0.5f), 0x80, qbits);
+	o->m.st = st_reg(u, v, q);
+	o->m.lmst = st_reg(lu, lv, q);
+	o->m.d0st = scale_st(o->m.st, detail_scale[tex][0]);
+	o->m.d1st = scale_st(o->m.st, detail_scale[tex][1]);
+}
+
+static inline float screen_area(const mvert *a, const mvert *b, const mvert *c)
+{
+	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
+}
+
+enum { PASS_BASE, PASS_LIGHTMAP, PASS_DETAIL0, PASS_DETAIL1 };
 
 static void set_clamp_repeat(GSGLOBAL *gs)
 {
@@ -805,23 +840,43 @@ static void set_clamp_repeat(GSGLOBAL *gs)
 	*p++ = GS_CLAMP_1 + gs->PrimContext;
 }
 
-/* one pass over a span's vertices as one REGLIST packet: RGBAQ, ST and XYZ2 each, three registers (24 bytes) a vertex */
-static void send_map_pass(GSGLOBAL *gs, const texture *x, int pass, float scale, int lod_k, const mapv *v, int n)
+/* a pass over a span's vertices: the records as they are, one REGLIST packet with six registers a vertex, of
+   which this pass reads RGBAQ, XYZ2 and the one ST it needs (the other three are NOP) */
+/* a vertex record is three quadwords */
+static inline void copy_record(mapv *dst, const mapv *src)
 {
-	int qwords = (n * 3 + 1) / 2, i;
+	u128 *d = (u128 *)dst;
+	const u128 *sr = (const u128 *)src;
+
+	d[0] = sr[0]; d[1] = sr[1]; d[2] = sr[2];
+}
+
+/* 128-bit copies: the EE's memcpy moves less than a quadword at a time */
+static inline void copy_quads(void *dst, const void *src, int quads)
+{
+	u128 *d = (u128 *)dst;
+	const u128 *s = (const u128 *)src;
+
+	for (; quads >= 4; quads -= 4, d += 4, s += 4) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3]; }
+	for (; quads > 0; quads--) *d++ = *s++;
+}
+
+static void send_map_pass(GSGLOBAL *gs, const texture *x, int pass, int lod_k, const mapv *v, int n)
+{
+	static const u64 regs[4] = {
+		(u64)GS_RGBAQ | ((u64)GS_ST << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_UV << 16) | ((u64)GS_XYZ2 << 20),
+		(u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_ST << 8) | ((u64)GS_UV << 12) | ((u64)GS_UV << 16) | ((u64)GS_XYZ2 << 20),
+		(u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_ST << 12) | ((u64)GS_UV << 16) | ((u64)GS_XYZ2 << 20),
+		(u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_ST << 16) | ((u64)GS_XYZ2 << 20) };
+	int qwords = n * 3;
 	u64 *p;
 
 	prim_lod_k = lod_k;
 	set_prim(gs, x, 0, pass == PASS_LIGHTMAP ? 1 : 0);
 	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
-	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
-	*p++ = (u64)GS_RGBAQ | ((u64)GS_ST << 4) | ((u64)GS_XYZ2 << 8);
-	if (pass == PASS_BASE)
-		for (i = 0; i < n; i++) { *p++ = v[i].rgbaq; *p++ = v[i].st; *p++ = v[i].xyz2; }
-	else if (pass == PASS_DETAIL)
-		for (i = 0; i < n; i++) { *p++ = PASS_RGBAQ(v[i].rgbaq); *p++ = scale_st(v[i].st, scale); *p++ = v[i].xyz2; }
-	else
-		for (i = 0; i < n; i++) { *p++ = PASS_RGBAQ(v[i].rgbaq); *p++ = v[i].lmst; *p++ = v[i].xyz2; }
+	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 6);
+	*p++ = regs[pass];
+	copy_quads(p, v, qwords);
 }
 
 /* the passes multiply by alpha: destination * source alpha / 128, so a grey of 128 leaves it as it is */
@@ -836,66 +891,161 @@ static void map_blend_end(GSGLOBAL *gs)
 	gs->PrimAlphaEnable = GS_SETTING_OFF;
 }
 
-static void draw_map(GSGLOBAL *gs, const xform *view)
+/* a vertex the visible triangles need: into view space and, when it is in front of the near plane and in the
+   guard band (the same planes the clipper uses, as bounds on the screen position), onto the screen with its
+   registers. One divide: q = 1 / z gives the position, the depth and every texture coordinate. The registers'
+   floats are stored straight into the record. */
+
+/* the screen position, depth and registers of a vertex at view position pv in front of the near plane; a vertex
+   outside the guard band is left alone and its code returned, unless force (a vertex the clipper made lies on the
+   band's edge, give or take rounding: its position is clamped into it) */
+static inline int fill_vertex(mvert *o, const float *pv, unsigned rgb32, float u, float v, float lu, float lv, const float *scale, int force)
 {
-	int i, sp, n = 0, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
+	float q = 1.f / pv[2], k = q * focal, sx = screen_cx + pv[0] * k, sy = screen_cy - pv[1] * k, s, t, *f = (float *)&o->m.st;
+	int code = (sx < clip_x_min ? 2 : 0) | (sx > clip_x_max ? 4 : 0) | (sy < clip_y_min ? 8 : 0) | (sy > clip_y_max ? 16 : 0);
+	int ix, iy, iz;
+	u32 qbits;
 
-	for (i = 0; i < MAP_VERTS; i++)
+	if (code && !force) return code;
+	if (force)
 	{
-		mvert *o = &map_v[i];
-
-		apply_point(view, &map_pos[i * 3], map_view[i]);
-		map_code[i] = (unsigned char)outcode(map_view[i]);
-		if (map_code[i]) continue;
-		project_xy(map_view[i], 0.f, &o->x, &o->y, &o->xyz2);
-		set_attrs(o, map_color[i * 4], map_color[i * 4 + 1], map_color[i * 4 + 2], map_uv[i * 2], map_uv[i * 2 + 1],
-			map_lmuv[i * 2], map_lmuv[i * 2 + 1], map_view[i][2]);
+		sx = sx < clip_x_min ? clip_x_min : (sx > clip_x_max ? clip_x_max : sx);
+		sy = sy < clip_y_min ? clip_y_min : (sy > clip_y_max ? clip_y_max : sy);
 	}
-	/* cull and clip every span once; the passes below draw what is left */
+	o->x = sx; o->y = sy;
+	ix = (int)(sx * 16.f) + gs_offset_x;
+	iy = (int)(sy * 16.f) + gs_offset_y;
+	iz = (int)(z_k1 * q - z_k2);
+	iz = iz < 1 ? 1 : (iz > 65534 ? 65534 : iz);
+	o->m.xyz2 = GS_SETREG_XYZ2(ix & 0xFFFF, iy & 0xFFFF, iz);
+	memcpy(&qbits, &q, 4);
+	o->m.rgbaq = (u64)rgb32 | ((u64)qbits << 32);
+	s = u * q; t = v * q;
+	f[0] = s; f[1] = t;                                    /* st */
+	f[2] = lu * q; f[3] = lv * q;                          /* lmst */
+	f[4] = s * scale[0]; f[5] = t * scale[0];              /* d0st */
+	f[6] = s * scale[1]; f[7] = t * scale[1];              /* d1st */
+	return 0;
+}
+
+/* project a clipped vertex (it is inside the planes, give or take rounding) */
+static inline void project_cvert(const cvert *v, mvert *o, int tex)
+{
+	float pv[3] = { v->p[0], v->p[1], v->p[2] < z_near ? z_near : v->p[2] };
+	unsigned rgb32 = (unsigned)(v->a[0] + 0.5f) | ((unsigned)(v->a[1] + 0.5f) << 8) | ((unsigned)(v->a[2] + 0.5f) << 16) | (0x80u << 24);
+
+	fill_vertex(o, pv, rgb32, v->a[3], v->a[4], v->a[5], v->a[6], detail_scale[tex], 1);
+}
+
+static inline void map_vertex(int i, int tex, const xform *view)
+{
+	const float *pv = map_view[i];
+#ifdef PROFILE
+	u32 t0 = cpu_ticks();
+#endif
+
+#ifndef NO_VU0
+	vu0_view_point(&map_p4[i], (vec4 *)map_view[i]);
+	(void)view;
+#else
+	apply_point(view, &map_pos[i * 3], map_view[i]);
+#endif
+	map_stamp[i] = map_frame;
+	if (pv[2] < z_near) { map_code[i] = 1; return; }
+	map_code[i] = (unsigned char)fill_vertex(&map_v[i], pv, map_rgb32[i], map_uv[i * 2], map_uv[i * 2 + 1], map_lmuv[i * 2], map_lmuv[i * 2 + 1], detail_scale[tex], 0);
+#ifdef PROFILE
+	prof_map_vertices++;
+	prof_t_vertex += cpu_ticks() - t0;
+#endif
+}
+
+static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
+{
+	int i, sp, b, c, n = 0, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
+
+#ifndef NO_VU0
+	vu0_load_view((const mat4 *)view4);
+#else
+	(void)view4;
+#endif
+	if (++map_frame == 0) { memset(map_stamp, 0, sizeof(map_stamp)); map_frame = 1; }
+	/* the chunks in view: a bounding sphere against the five planes */
+	for (c = 0; c < MAP_CHUNKS; c++)
+	{
+		float v[3], r = map_chunks[c * 4 + 3];
+		int pl, vis = 1;
+
+		apply_point(view, &map_chunks[c * 4], v);
+		for (pl = 0; pl < CLIP_PLANES; pl++)
+			if (plane_dist(pl, v) < -r * clip_length[pl]) { vis = 0; break; }
+		chunk_visible[c] = (unsigned char)vis;
+#ifdef PROFILE
+		prof_map_chunks += vis;
+#endif
+	}
+	PROF_MARK(P_MAPV);
+	/* cull and clip every span once, from the chunks in view; the passes below draw what is left */
 	for (sp = 0; sp < MAP_SPANS; sp++)
 	{
-		int first = map_spans[sp * 4 + 2], count = map_spans[sp * 4 + 3];
+		int tex = map_spans[sp * 6], ts = tex < 0 ? MAP_TEXTURES : tex;
 
 		span_first[sp] = n;
-		for (i = first; i < first + count; i++)
+		for (b = map_spans[sp * 6 + 4]; b < map_spans[sp * 6 + 4] + map_spans[sp * 6 + 5]; b++)
 		{
-			unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
-			int ca = map_code[ia], cb = map_code[ib], cc = map_code[ic];
+			int first = map_batches[b * 3 + 1], count = map_batches[b * 3 + 2];
 
-			if (ca & cb & cc) continue;                          /* all outside one plane */
-			if ((ca | cb | cc) == 0)
+			if (!chunk_visible[map_batches[b * 3]]) continue;
+			for (i = first; i < first + count; i++)
 			{
-				const mvert *a = &map_v[ia], *b = &map_v[ib], *c = &map_v[ic];
+				unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
+				int ca, cb, cc;
 
-				if (screen_area(a, b, c) * CULL_SIGN <= 0.f) continue;
-				if (n + 3 > cap) break;
-				put_vertex(&map_out[n++], a); put_vertex(&map_out[n++], b); put_vertex(&map_out[n++], c);
-			}
-			else
-			{
-				cvert in[3], poly[CLIP_MAX];
-				mvert sv[CLIP_MAX];
-				int m, k, v, ids[3];
+				if (map_stamp[ia] != map_frame) map_vertex(ia, ts, view);
+				if (map_stamp[ib] != map_frame) map_vertex(ib, ts, view);
+				if (map_stamp[ic] != map_frame) map_vertex(ic, ts, view);
+				ca = map_code[ia]; cb = map_code[ib]; cc = map_code[ic];
+				if (ca & cb & cc) continue;                          /* all outside one plane */
+				if ((ca | cb | cc) == 0)
+				{
+					const mvert *va = &map_v[ia], *vb = &map_v[ib], *vc = &map_v[ic];
 
-				ids[0] = ia; ids[1] = ib; ids[2] = ic;
-				for (v = 0; v < 3; v++)
-				{
-					memcpy(in[v].p, map_view[ids[v]], sizeof(in[v].p));
-					for (k = 0; k < 3; k++) in[v].a[k] = (float)map_color[ids[v] * 4 + k];
-					in[v].a[3] = map_uv[ids[v] * 2]; in[v].a[4] = map_uv[ids[v] * 2 + 1];
-					in[v].a[5] = map_lmuv[ids[v] * 2]; in[v].a[6] = map_lmuv[ids[v] * 2 + 1];
-				}
-				m = clip_triangle(in, poly);
-				for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v]);
-				for (k = 1; k + 1 < m; k++)
-				{
-					if (screen_area(&sv[0], &sv[k], &sv[k + 1]) * CULL_SIGN <= 0.f) continue;
+					if (screen_area(va, vb, vc) * CULL_SIGN <= 0.f) continue;
 					if (n + 3 > cap) break;
-					put_vertex(&map_out[n++], &sv[0]); put_vertex(&map_out[n++], &sv[k]); put_vertex(&map_out[n++], &sv[k + 1]);
+					copy_record(&map_out[n++], &va->m); copy_record(&map_out[n++], &vb->m); copy_record(&map_out[n++], &vc->m);
 				}
+				else
+				{
+					cvert in[3], poly[CLIP_MAX];
+					mvert sv[CLIP_MAX];
+					int m, k, v, ids[3];
 #ifdef PROFILE
-				prof_map_clipped++;
+					u32 t0 = cpu_ticks();
 #endif
+#ifdef PROFILE
+					if ((ca | cb | cc) & 1) prof_clip_near++; else prof_clip_side++;
+#endif
+
+					ids[0] = ia; ids[1] = ib; ids[2] = ic;
+					for (v = 0; v < 3; v++)
+					{
+						memcpy(in[v].p, map_view[ids[v]], sizeof(in[v].p));
+						for (k = 0; k < 3; k++) in[v].a[k] = (float)map_color[ids[v] * 4 + k];
+						in[v].a[3] = map_uv[ids[v] * 2]; in[v].a[4] = map_uv[ids[v] * 2 + 1];
+						in[v].a[5] = map_lmuv[ids[v] * 2]; in[v].a[6] = map_lmuv[ids[v] * 2 + 1];
+					}
+					m = clip_triangle(in, poly);
+					for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v], ts);
+					for (k = 1; k + 1 < m; k++)
+					{
+						if (screen_area(&sv[0], &sv[k], &sv[k + 1]) * CULL_SIGN <= 0.f) continue;
+						if (n + 3 > cap) break;
+						copy_record(&map_out[n++], &sv[0].m); copy_record(&map_out[n++], &sv[k].m); copy_record(&map_out[n++], &sv[k + 1].m);
+					}
+#ifdef PROFILE
+					prof_map_clipped++;
+					prof_t_clip += cpu_ticks() - t0;
+#endif
+				}
 			}
 		}
 		span_verts[sp] = n - span_first[sp];
@@ -903,14 +1053,15 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 		prof_tris += span_verts[sp] / 3;
 #endif
 	}
+	PROF_MARK(P_MAPT);
 	/* each span's base map lit with the lightmap's hue, then its detail maps multiplied in */
 	for (sp = 0; sp < MAP_SPANS; sp++)
 	{
-		int tex = map_spans[sp * 4];
+		int tex = map_spans[sp * 6];
 		const mapv *v = &map_out[span_first[sp]];
 
 		if (!span_verts[sp]) continue;
-		send_map_pass(gs, tex < 0 ? NULL : &map_tex[tex], PASS_BASE, 1.f, tex < 0 ? 0 : lod_k_base[tex], v, span_verts[sp]);
+		send_map_pass(gs, tex < 0 ? NULL : &map_tex[tex], PASS_BASE, tex < 0 ? 0 : lod_k_base[tex], v, span_verts[sp]);
 #ifndef NO_DETAIL_PASS
 		if (tex >= 0)
 		{
@@ -919,7 +1070,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 			map_blend_begin(gs);
 			for (d = 0; d < 2; d++)
 				if (map_detail_of[tex].detail[d] >= 0)
-					send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[d]], PASS_DETAIL, map_detail_of[tex].scale[d], lod_k_detail[tex][d], v, span_verts[sp]);
+					send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[d]], PASS_DETAIL0 + d, lod_k_detail[tex][d], v, span_verts[sp]);
 			map_blend_end(gs);
 		}
 #endif
@@ -931,7 +1082,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 	{
 		sp = map_lm_order[i];
 		if (!span_verts[sp]) continue;
-		send_map_pass(gs, &map_lm_tex[map_spans[sp * 4 + 1]], PASS_LIGHTMAP, 1.f, 0, &map_out[span_first[sp]], span_verts[sp]);
+		send_map_pass(gs, &map_lm_tex[map_spans[sp * 6 + 1]], PASS_LIGHTMAP, 0, &map_out[span_first[sp]], span_verts[sp]);
 	}
 	map_blend_end(gs);
 #endif
@@ -953,7 +1104,19 @@ static int lod_k(float density, float size, float scale)
 
 static void map_lod_setup(void)
 {
-	int t, d;
+	int t, d, i;
+
+#ifndef NO_VU0
+	for (i = 0; i < MAP_VERTS; i++)
+	{
+		map_p4[i].v[0] = map_pos[i * 3]; map_p4[i].v[1] = map_pos[i * 3 + 1]; map_p4[i].v[2] = map_pos[i * 3 + 2]; map_p4[i].v[3] = 1.f;
+	}
+#endif
+	for (i = 0; i < MAP_VERTS; i++)
+		map_rgb32[i] = map_color[i * 4] | (map_color[i * 4 + 1] << 8) | (map_color[i * 4 + 2] << 16) | (0x80u << 24);
+	for (t = 0; t < MAP_TEXTURES; t++)
+		for (d = 0; d < 2; d++)
+			detail_scale[t][d] = map_detail_of[t].detail[d] < 0 ? 0.f : map_detail_of[t].scale[d];
 
 	for (t = 0; t < MAP_TEXTURES; t++)
 	{
@@ -994,6 +1157,7 @@ static int vsync_handler(int cause)
 	return 0;
 }
 
+#ifdef NO_MAP
 /* each vertex: skinned by its two bones into the (orbited) world, where it is lit, then into the
    view and onto the screen */
 #ifndef NO_VU0
@@ -1057,6 +1221,146 @@ static void skin_chief(const xform *bone_world, const xform *view, int visor_fir
 	}
 }
 #endif
+#endif
+
+#ifndef NO_MAP
+/* ---------- the Chief's poses, cached ----------
+   In the map scene he stands still and only the camera moves, so what the 20 frames of his run cycle do to his
+   vertices (the skinned position and normal in the world, and the diffuse light, which the fixed lights give
+   and the camera does not change) is worked out once at the start. A frame then projects the cached
+   positions, takes the cached diffuse colour, and gives each vertex its view-dependent specular colour once in
+   SPEC_SPREAD frames (the camera moves a degree and a half a frame; the visor's colour, 69 vertices, every frame). */
+#define SPEC_SPREAD 3
+
+typedef struct { float v[4]; } __attribute__((aligned(16))) qvec;
+static qvec chief_wp[ANIM_FRAMES][CHIEF_VERTS], chief_wn[ANIM_FRAMES][CHIEF_VERTS], chief_ls[ANIM_FRAMES][CHIEF_VERTS];
+static u64 chief_dif[ANIM_FRAMES][CHIEF_VERTS];
+static qvec rifle_wp[ANIM_FRAMES][RIFLE_VERTS], rifle_wn[ANIM_FRAMES][RIFLE_VERTS], rifle_ls[ANIM_FRAMES][RIFLE_VERTS];
+static u64 rifle_dif[ANIM_FRAMES][RIFLE_VERTS];
+static qvec display_wp[ANIM_FRAMES][DISPLAY_VERTS];
+static int spec_phase, spec_primed;
+
+static inline void qset(qvec *q, const float *v, float w)
+{
+	q->v[0] = v[0]; q->v[1] = v[1]; q->v[2] = v[2]; q->v[3] = w;
+}
+
+static void pose_cache_build(void)
+{
+	int f, i, c;
+
+	for (f = 0; f < ANIM_FRAMES; f++)
+	{
+		xform bone, bone_world[NODE_COUNT], rifle_m, rifle_world;
+		float sum[3];
+
+		for (i = 0; i < NODE_COUNT; i++)
+		{
+			xform_from_array(&bone, &anim_skin[(f * NODE_COUNT + i) * 12]);
+			xform_then(&bone, &chief_placement, &bone_world[i]);
+		}
+		xform_from_array(&rifle_m, &anim_rifle[f * 12]);
+		xform_then(&rifle_m, &chief_placement, &rifle_world);
+		for (i = 0; i < CHIEF_VERTS; i++)
+		{
+			const float *p = &chief_pos[i * 3], *n = &chief_nrm[i * 3];
+			const xform *b0 = &bone_world[chief_node[i * 2]], *b1 = &bone_world[chief_node[i * 2 + 1]];
+			float w = chief_weight[i], w1 = 1.f - w, a[3], b[3], pw[3], na[3], nb[3], nw[3];
+
+			apply_point(b0, p, a);
+			apply_point(b1, p, b);
+			for (c = 0; c < 3; c++) pw[c] = a[c] * w + b[c] * w1;
+			apply_vector(b0, n, na);
+			apply_vector(b1, n, nb);
+			for (c = 0; c < 3; c++) nw[c] = na[c] * w + nb[c] * w1;
+			normalise(nw);
+			qset(&chief_wp[f][i], pw, 1.f); qset(&chief_wn[f][i], nw, 0.f);
+			light_sum(nw, sum);
+			qset(&chief_ls[f][i], sum, 0.f);
+			chief_dif[f][i] = diffuse_rgbaq(sum);
+		}
+		for (i = 0; i < RIFLE_VERTS; i++)
+		{
+			float pw[3], nw[3];
+
+			apply_point(&rifle_world, &rifle_pos[i * 3], pw);
+			apply_vector(&rifle_world, &rifle_nrm[i * 3], nw);
+			normalise(nw);
+			qset(&rifle_wp[f][i], pw, 1.f); qset(&rifle_wn[f][i], nw, 0.f);
+			light_sum(nw, sum);
+			qset(&rifle_ls[f][i], sum, 0.f);
+			rifle_dif[f][i] = diffuse_rgbaq(sum);
+		}
+		for (i = 0; i < DISPLAY_VERTS; i++)
+		{
+			float pw[3];
+
+			apply_point(&rifle_world, &display_pos[i * 3], pw);
+			qset(&display_wp[f][i], pw, 1.f);
+		}
+	}
+	/* what a frame never changes: each vertex's texture coordinates */
+	for (i = 0; i < CHIEF_VERTS; i++) chief_v[i].uv = uv_reg(chief_uv[i * 2], chief_uv[i * 2 + 1], 512.f);
+	for (i = 0; i < RIFLE_VERTS; i++) rifle_v[i].uv = uv_reg(rifle_uv[i * 2], rifle_uv[i * 2 + 1], 512.f);
+	for (i = 0; i < DISPLAY_VERTS; i++)
+	{
+		display_v[i].uv = uv_reg(display_uv[i * 2], display_uv[i * 2 + 1], 256.f);
+		display_v[i].rgbaq = GS_SETREG_RGBAQ(128, 128, 128, 0x80, 0x00);
+	}
+}
+
+/* a cached world position into the view and onto the screen */
+static inline void view_project(const qvec *wp, float z_add, const xform *view, svert *o)
+{
+	qvec pv;
+
+#ifndef NO_VU0
+	vu0_view_point((const vec4 *)wp, (vec4 *)&pv);
+	(void)view;
+#else
+	apply_point(view, wp->v, pv.v);
+#endif
+	project(pv.v, z_add, o);
+}
+
+/* the Chief, his rifle and its display for animation frame `frame` (the view's VU matrix loaded by the caller) */
+static void cached_pose(int frame, const xform *view)
+{
+	const int visor_first = CHIEF_VERTS - 69, full = !spec_primed;
+	int i, k = spec_phase;
+
+	for (i = 0; i < CHIEF_VERTS; i++)
+	{
+		svert *o = &chief_v[i];
+
+		view_project(&chief_wp[frame][i], 0.f, view, o);
+		if (i >= visor_first)
+			o->rgbaq = visor_color(chief_wn[frame][i].v, chief_wp[frame][i].v, visor_spec[i - visor_first]);
+		else
+		{
+			o->rgbaq = chief_dif[frame][i];
+			if (k == 0 || full) chief_spec_rgbaq[i] = specular_rgbaq(armor_cube, chief_wn[frame][i].v, chief_wp[frame][i].v, chief_ls[frame][i].v);
+		}
+		if (++k == SPEC_SPREAD) k = 0;
+	}
+	PROF_MARK(P_SKIN);
+	for (i = 0; i < RIFLE_VERTS; i++)
+	{
+		svert *o = &rifle_v[i];
+
+		view_project(&rifle_wp[frame][i], 0.f, view, o);
+		o->rgbaq = rifle_dif[frame][i];
+		if (k == 0 || full)
+			rifle_spec_rgbaq[i] = specular_rgbaq(i < RIFLE_GRIP_VERTS ? rifle_grip_cube : rifle_gun_cube, rifle_wn[frame][i].v, rifle_wp[frame][i].v, rifle_ls[frame][i].v);
+		if (++k == SPEC_SPREAD) k = 0;
+	}
+	/* the ammo display sits on the rifle's top, a hair above it: unlit (it glows), and nudged toward the
+	   camera so the 16-bit Z buffer doesn't let the receiver through */
+	for (i = 0; i < DISPLAY_VERTS; i++) view_project(&display_wp[frame][i], DISPLAY_NUDGE, view, &display_v[i]);
+	spec_primed = 1;
+	if (++spec_phase == SPEC_SPREAD) spec_phase = 0;
+}
+#endif
 
 /* the camera's axes for an eye and a target (z up) */
 static void camera_look(const float *eye, const float *target)
@@ -1082,9 +1386,15 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	int frame = (int)(fmodf(cycles, 1.f) * ANIM_FRAMES) % ANIM_FRAMES;
 	float scroll = -ANIM_STRIDE * cycles;
 	float c = cosf(theta), s = sinf(theta);
-	xform orbit, view, world_to_view, bone, bone_world[NODE_COUNT], rifle_m, rifle_view, rifle_world;
+	xform orbit, view, world_to_view;
+#ifdef NO_MAP
+	xform bone, bone_world[NODE_COUNT], rifle_m, rifle_view, rifle_world;
+#endif
 #ifndef NO_VU0
-	mat4 bone_world4[NODE_COUNT], view4, rifle_world4;
+	mat4 view4;
+#ifdef NO_MAP
+	mat4 bone_world4[NODE_COUNT], rifle_world4;
+#endif
 #endif
 	int i, j;
 
@@ -1118,6 +1428,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 		view.t[j] = -(cam_pos[0] * view.r[0][j] + cam_pos[1] * view.r[1][j] + cam_pos[2] * view.r[2][j]);
 	xform_then(&orbit, &view, &world_to_view);
 
+#ifdef NO_MAP
 	for (i = 0; i < NODE_COUNT; i++)
 	{
 		xform_from_array(&bone, &anim_skin[(frame * NODE_COUNT + i) * 12]);
@@ -1131,11 +1442,18 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	mat4_from_xform(&view4, &view);
 	mat4_from_xform(&rifle_world4, &rifle_world);
 #endif
+#elif !defined(NO_VU0)
+	mat4_from_xform(&view4, &view);
+#endif
 
 #ifndef NO_MAP
 	gsKit_clear(gs, GS_SETREG_RGBAQ(0x70, 0x9c, 0xd0, 0x00, 0x00));    /* the sky */
 	PROF_MARK(P_SETUP);
-	draw_map(gs, &view);
+#ifndef NO_VU0
+	draw_map(gs, &view, &view4);
+#else
+	draw_map(gs, &view, NULL);
+#endif
 	(void)scroll; (void)world_to_view;
 	PROF_MARK(P_GROUND);
 #else
@@ -1148,6 +1466,13 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	PROF_MARK(P_GROUND);
 #endif
 
+#ifndef NO_MAP
+#ifndef NO_VU0
+	vu0_load_view(&view4);
+#endif
+	cached_pose(frame, &view);
+	PROF_MARK(P_RIFLE);
+#else
 #ifndef NO_VU0
 	skin_chief(bone_world4, &view4, CHIEF_VERTS - 69);
 	PROF_MARK(P_SKIN);
@@ -1191,6 +1516,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 		o->rgbaq = GS_SETREG_RGBAQ(128, 128, 128, 0x80, 0x00);
 	}
 	PROF_MARK(P_RIFLE);
+#endif
 
 	draw_textured(gs, &chief_tex, chief_v, NULL, chief_tri, CHIEF_ARMOR_FIRST_TRI, CHIEF_ARMOR_TRIS);
 	draw_flat_gouraud(gs, chief_v, chief_tri, CHIEF_VISOR_FIRST_TRI, CHIEF_VISOR_TRIS);
@@ -1296,6 +1622,7 @@ int main(void)
 #ifndef NO_MAP
 	clip_setup(gs);
 	placement_setup();
+	pose_cache_build();
 	map_lod_setup();
 #endif
 
@@ -1332,13 +1659,23 @@ int main(void)
 			printf("PROFILE %d frames in %d vsyncs: %.1f fps, %.2f ms/frame; %u tris drawn + %u culled per frame\n",
 				frames, vsyncs, frames * refresh / vsyncs, (vsyncs * 1000.f / refresh) / frames, prof_tris / frames, prof_tris_culled / frames);
 #ifndef NO_MAP
-			printf("PROFILE   %u map triangles a frame were clipped\n", prof_map_clipped / frames);
-			prof_map_clipped = 0;
+			printf("PROFILE   map: %u of %d chunks in view, %u vertices processed, %u triangles clipped a frame\n",
+				prof_map_chunks / frames, MAP_CHUNKS, prof_map_vertices / frames, prof_map_clipped / frames);
+			printf("PROFILE   map vertex work %.2f ms, clipping %.2f ms (%u near-plane, %u guard-band)\n", prof_t_vertex * ms_per_tick / frames, prof_t_clip * ms_per_tick / frames, prof_clip_near / frames, prof_clip_side / frames);
+			prof_clip_near = prof_clip_side = 0;
+			prof_t_vertex = prof_t_clip = 0;
+			prof_map_clipped = prof_map_vertices = prof_map_chunks = 0;
 #endif
-			for (p = 0; p < P_COUNT; p++)
 			{
-				printf("PROFILE   %-11s %6.2f ms\n", prof_name[p], prof_sum[p] * ms_per_tick / frames);
-				prof_sum[p] = 0;
+				float busy = 0.f;
+
+				for (p = 0; p < P_COUNT; p++)
+				{
+					printf("PROFILE   %-11s %6.2f ms\n", prof_name[p], prof_sum[p] * ms_per_tick / frames);
+					if (p != P_FLIP) busy += prof_sum[p] * ms_per_tick / frames;
+					prof_sum[p] = 0;
+				}
+				printf("PROFILE   EE busy %.2f ms of %.2f\n", busy, 1000.f / refresh);
 			}
 			prof_tris = prof_tris_culled = 0;
 			frames = 0;

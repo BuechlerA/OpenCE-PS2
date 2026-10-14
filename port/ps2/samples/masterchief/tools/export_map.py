@@ -12,6 +12,8 @@
     GS; a textured vertex's colour is the lightmap's hue there (colour / brightest channel), which the
     base pass multiplies in. Vertices of other shaders (lights, the teleporter shield) get a flat colour
     from a small table.
+  - the triangles grouped into chunks (a grid of CHUNK_CELL units on a side; each with a bounding sphere), so
+    that the EE skips what is out of view: a span is a run of batches, each the triangles of one chunk
   - where the Chief stands: the ground height under MAP_CHIEF_X/Y
 
   HALO_MAP (default assets/maps/bloodgulch.map), CHIEF_X, CHIEF_Y, CHIEF_BELOW (the highest ground that
@@ -36,6 +38,7 @@ TAG_BASE = 0x803a6000
 BASE_MAP = 0x88                    # offsets in a shader_environment: the base map's tag reference ...
 PRIMARY_DETAIL, SECONDARY_DETAIL, MICRO_DETAIL = 0xB4, 0xD4, 0xF8   # ... and each detail map's scale, then its reference
 DETAIL_SIZE = int(os.environ.get('DETAIL_SIZE', 128))
+CHUNK_CELL = float(os.environ.get('CHUNK_CELL', 12))
 BIG_TRIANGLES = 1000               # a base map under this many triangles is cut to 256 pixels
 
 def flat(a): return np.asarray(a).reshape(-1)
@@ -235,15 +238,28 @@ def main():
     P = np.concatenate(P).astype(np.float32); UV = np.concatenate(UV).astype(np.float32); LMUV = np.concatenate(LMUV).astype(np.float32)
     C = np.concatenate(C); T = np.concatenate(T); TEX = np.array(TEX); PAGE = np.array(PAGE)
     assert base < 65536
+    # chunks: the cell of a grid its centre falls in, numbered from 0
+    centre = P[T].astype(np.float64).mean(1)
+    cell = np.floor((centre[:, :2] - centre[:, :2].min(0)) / CHUNK_CELL).astype(np.int64)
+    _, CHUNK = np.unique(cell[:, 0] * 100000 + cell[:, 1], return_inverse=True)
+    nchunks = int(CHUNK.max()) + 1
+    assert nchunks < 1000
     key = np.where(TEX < 0, 1 << 20, TEX) * 1000 + (PAGE + 1)           # by base map, then lightmap page; the flat ones last
-    order = np.argsort(key, kind='stable')
-    T = T[order]; TEX = TEX[order]; PAGE = PAGE[order]; key = key[order]
-    spans = []                       # base map (-1: none), lightmap page (-1: none), first triangle, triangle count
-    for k in sorted(set(key.tolist())):
-        first = int(np.argmax(key == k))
-        spans += [int(TEX[first]), int(PAGE[first]), first, int((key == k).sum())]
-    nspans = len(spans) // 4
-    lm_order = sorted((i for i in range(nspans) if spans[i * 4 + 1] >= 0), key=lambda i: spans[i * 4 + 1])
+    order = np.argsort(key * 1000 + CHUNK, kind='stable')               # and by chunk within a span
+    T = T[order]; TEX = TEX[order]; PAGE = PAGE[order]; key = key[order]; CHUNK = CHUNK[order]
+    spans, batches = [], []          # spans: base map (-1: none), lightmap page (-1: none), first triangle, triangle count, first batch, batch count
+    for k in sorted(set(key.tolist())):                                 # batches: chunk, first triangle, triangle count
+        idx = np.nonzero(key == k)[0]; first = int(idx[0])
+        runs = [0] + [i for i in range(1, len(idx)) if CHUNK[idx[i]] != CHUNK[idx[i - 1]]] + [len(idx)]
+        spans += [int(TEX[first]), int(PAGE[first]), first, len(idx), len(batches) // 3, len(runs) - 1]
+        for a, b in zip(runs[:-1], runs[1:]): batches += [int(CHUNK[idx[a]]), first + a, b - a]
+    nspans = len(spans) // 6
+    bounds = []
+    for c in range(nchunks):
+        v = P[T[CHUNK == c]].reshape(-1, 3).astype(np.float64)
+        ctr = (v.min(0) + v.max(0)) / 2
+        bounds += [*ctr, float(np.linalg.norm(v - ctr, axis=1).max()) + 1e-3]
+    lm_order = sorted((i for i in range(nspans) if spans[i * 6 + 1] >= 0), key=lambda i: spans[i * 6 + 1])
     # how many texture repeats a world unit of surface spans, per base map: what the GS's level of detail needs (it
     # works from the depth alone). The median over the triangles, by their area.
     densities = []
@@ -262,8 +278,8 @@ def main():
     zb = ground_height(P.astype(np.float64), T, CHIEF_X, CHIEF_Y, CHIEF_BELOW)
     print('%d materials, %d verts, %d tris (%d flipped), %d textures (%d KB of pixels), %d spans; ground under (%.1f, %.1f): %s'
           % (len(mats), len(P), len(T), flipped, len(textures), sum(len(t['pixels']) for t in textures) // 1024, nspans, CHIEF_X, CHIEF_Y, zb))
-    print('%d detail maps (%d KB with mips), %d lightmap pages (%d KB), %d spans in the lightmap pass'
-          % (len(details), sum(len(d[0]) for d in details) // 1024, len(pages), sum(p['w'] * p['h'] for p in pages) // 1024, len(lm_order)))
+    print('%d detail maps (%d KB with mips), %d lightmap pages (%d KB), %d spans in the lightmap pass; %d chunks, %d batches'
+          % (len(details), sum(len(d[0]) for d in details) // 1024, len(pages), sum(p['w'] * p['h'] for p in pages) // 1024, len(lm_order), nchunks, len(batches) // 3))
     assert zb is not None, 'no ground under the Chief'
     os.makedirs(OUT, exist_ok=True)
     c = open(os.path.join(OUT, 'map_assets.c'), 'w')
@@ -274,6 +290,8 @@ def main():
     c.write(cstr_array('map_color', flat(rgba), 'unsigned char', 16))
     c.write(cstr_array('map_tri', flat(T.astype(np.uint16)), 'unsigned short', 16))
     c.write(cstr_array('map_spans', spans, 'int', 16))
+    c.write(cstr_array('map_batches', batches, 'int', 16))
+    c.write(cstr_array('map_chunks', bounds, 'float', 16))
     c.write(cstr_array('map_lm_order', lm_order, 'int', 16))
     c.write(cstr_array('map_gray_clut', flat(gs_gray_clut()), 'unsigned int', 64))
     for i, (d, _levels) in enumerate(details):
@@ -308,6 +326,8 @@ def main():
 #define MAP_TEXTURES %d
 #define MAP_SPANS %d
 #define MAP_LM_SPANS %d
+#define MAP_CHUNKS %d
+#define MAP_BATCHES %d
 #define MAP_DETAILS %d
 #define MAP_LIGHTMAPS %d
 #define MAP_CHIEF_X %rf
@@ -320,14 +340,16 @@ extern const float map_pos[], map_uv[];
 extern const unsigned char map_color[];
 extern const unsigned short map_tri[];
 extern const float map_lmuv[], map_tex_density[];   /* texture repeats a world unit of surface, per base map */
-extern const int map_spans[];                /* base map (-1: none), lightmap page (-1: none), first triangle, triangle count; MAP_SPANS times */
+extern const int map_spans[];                /* base map (-1: none), lightmap page (-1: none), first triangle, triangle count, first batch, batch count; MAP_SPANS times */
+extern const int map_batches[];              /* chunk, first triangle, triangle count; MAP_BATCHES times: a span's triangles by chunk */
+extern const float map_chunks[];             /* centre x, y, z and radius; MAP_CHUNKS times */
 extern const int map_lm_order[];             /* the spans that have a lightmap page, by page */
 extern const unsigned int map_gray_clut[];
 extern const map_gray_texture map_details[], map_lightmaps[];
 extern const map_detail_data map_detail_of[];
 extern const map_texture_data map_textures[];
 #endif
-''' % (len(P), len(T), len(textures), nspans, len(lm_order), len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb)))
+''' % (len(P), len(T), len(textures), nspans, len(lm_order), nchunks, len(batches) // 3, len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb)))
     h.close()
     print('wrote', os.path.abspath(OUT))
 
