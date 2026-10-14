@@ -25,6 +25,8 @@ from tools.ninja_syntax import Writer
 
 PS2_DIR = Path("port/ps2")
 PS2_CONFIG = PS2_DIR / "port.json"
+# where the tag cache is: halo_port_capacity.h has it too, and says so if they differ
+TAG_CACHE_ADDRESS = "0xEB0000"
 PREFIX = PS2_DIR / "include" / "halo_ps2_prefix.h"
 # the files that call variadic functions without their prototype, which the
 # Android build gives them (tools/android_abi_check.py finds them): the EE's
@@ -186,7 +188,18 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
     n.build(outputs=stub_object, rule="ps2_cc", inputs=stubs,
             variables={"cflags": " ".join([*EE_FLAGS, "-std=gnu11", "-w", OPTIMISATION])})
 
-    ldflags = [f"-T{sdk / 'ee/startup/linkfile'}", OPTIMISATION, f"-L{sdk / 'ee/lib'}", "-Wl,-zmax-page-size=128",
+    # ps2sdk's link file, with a heap that ends where the tag cache is
+    # (HALO_PORT_TAG_CACHE_ADDRESS, halo_port_capacity.h), which is the same in
+    # every build: its _heap_size is -1, up to the thread stack (--defsym does not
+    # take _end, a symbol of the link file)
+    linkfile = (sdk / "ee/startup/linkfile").read_text()
+    if "PROVIDE(_heap_size = -1);" not in linkfile:
+        raise SystemExit(f"{sdk / 'ee/startup/linkfile'}: no _heap_size to set")
+    heap_linkfile = build_dir / "linkfile"
+    heap_linkfile.parent.mkdir(parents=True, exist_ok=True)
+    heap_linkfile.write_text(linkfile.replace("PROVIDE(_heap_size = -1);",
+                                              f"PROVIDE(_heap_size = {TAG_CACHE_ADDRESS} - _end);"))
+    ldflags = [f"-T{heap_linkfile}", OPTIMISATION, f"-L{sdk / 'ee/lib'}", "-Wl,-zmax-page-size=128",
                "-Wl,--gc-sections"]
     n.build(outputs=output, rule="ps2_link", inputs=[*objects, stub_object],
             variables={"ldflags": " ".join(ldflags)})

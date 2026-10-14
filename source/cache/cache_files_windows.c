@@ -1780,7 +1780,9 @@ static short ps2_cached_map_file_open(
 		map_file->header.file_length != (long)GetFileSize(map_file->file, NULL) ||
 		/* (the converter's mark: it has reset the tags' runtime values, which
 		the tag validator does on the other builds) */
-		memcmp(map_file->header.reserved68, "ps2\001", 4) != 0)
+		memcmp(map_file->header.reserved68, "ps2\002", 4) != 0 ||
+		/* (and the PS2's tag cache is where it moved the tags) */
+		*(unsigned long *)(map_file->header.reserved68 + 4) != HALO_PORT_TAG_CACHE_ADDRESS)
 	{
 		if (map_file->file != INVALID_HANDLE_VALUE)
 		{

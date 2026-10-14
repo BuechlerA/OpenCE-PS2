@@ -45,7 +45,6 @@ data and which the game takes as models (tag_schema_custom_edition_groups).
 
 #include <stdarg.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* ---------- constants */
@@ -213,15 +212,7 @@ static struct
 
 /* a bit for each byte of the tag cache that a tag's root, block or data
 holds */
-#ifdef HALO_PS2
-/* port: held only while a map's tags or a bsp are checked (the PS2 has 1.2 MB
-for each 9 MB of tag cache only then): see claims_acquire */
-static unsigned long *tag_validate_claims;
-#define CLAIMS_SIZE (CLAIM_WORDS * sizeof(unsigned long))
-#else
 static unsigned long tag_validate_claims[CLAIM_WORDS];
-#define CLAIMS_SIZE sizeof(tag_validate_claims)
-#endif
 
 static char const tag_validate_empty_name[] = "";
 
@@ -1166,13 +1157,13 @@ static void validation_begin(
 	tag_validate_globals.tag_cache_size = tag_cache_size;
 	tag_validate_globals.custom_edition = custom_edition;
 	snprintf(tag_validate_globals.map_name, sizeof(tag_validate_globals.map_name), "%s", map_name);
-	memset(tag_validate_claims, 0, CLAIMS_SIZE);
+	memset(tag_validate_claims, 0, sizeof(tag_validate_claims));
 	validation_new(validation, tag_header, (unsigned long)tag_data_size);
 
 	return;
 }
 
-static boolean validate_tags(
+boolean tag_validate_tags(
 	void *tag_header,
 	long tag_data_size,
 	long file_length,
@@ -1212,50 +1203,6 @@ static boolean validate_tags(
 	return validate_tag_table(&validation, header->instances, header->tag_count);
 }
 
-#ifdef HALO_PS2
-static boolean claims_acquire(
-	void)
-{
-	/* (malloc and free are the game's, cseries.h) */
-	tag_validate_claims = malloc(CLAIMS_SIZE);
-	if (tag_validate_claims)
-		memset(tag_validate_claims, 0, CLAIMS_SIZE);
-	return tag_validate_claims != NULL;
-}
-
-static void claims_release(
-	void)
-{
-	free(tag_validate_claims);
-	tag_validate_claims = NULL;
-}
-#else
-#define claims_acquire() TRUE
-#define claims_release()
-#endif
-
-boolean tag_validate_tags(
-	void *tag_header,
-	long tag_data_size,
-	long file_length,
-	char const *map_name)
-{
-	boolean valid = FALSE;
-
-#ifdef HALO_PS2
-	/* the PS2 reads the converter's maps (tools/ps2/convert_map.py), whose
-	runtime values it has reset, and has no memory for the claims */
-	return TRUE;
-#endif
-	if (claims_acquire())
-	{
-		valid = validate_tags(tag_header, tag_data_size, file_length, map_name);
-		claims_release();
-	}
-
-	return valid;
-}
-
 boolean tag_validate_custom_edition_tags(
 	void *tag_header,
 	long loaded_size,
@@ -1268,10 +1215,6 @@ boolean tag_validate_custom_edition_tags(
 	struct tag_validation validation;
 	short range_index;
 
-#ifdef HALO_PS2
-	/* (the PS2 plays no Custom Edition map) */
-	return FALSE;
-#endif
 	validation_begin(&validation, tag_header, loaded_size, tag_cache_size, TRUE, map_name);
 	for (range_index = 0; range_index < file_range_count && range_index < MAXIMUM_TAG_VALIDATE_FILE_RANGES; range_index++)
 		tag_validate_globals.file_ranges[range_index] = file_ranges[range_index];
@@ -1300,7 +1243,7 @@ boolean tag_validate_custom_edition_tags(
 	return validate_tag_table(&validation, header->instances, header->tag_count);
 }
 
-static boolean validate_structure_bsp(
+boolean tag_validate_structure_bsp(
 	long tag_index,
 	void *base,
 	long size)
@@ -1353,25 +1296,6 @@ static boolean validate_structure_bsp(
 	return !validation.refused;
 }
 
-boolean tag_validate_structure_bsp(
-	long tag_index,
-	void *base,
-	long size)
-{
-	boolean valid = FALSE;
-
-#ifdef HALO_PS2
-	return TRUE;
-#endif
-	if (claims_acquire())
-	{
-		valid = validate_structure_bsp(tag_index, base, size);
-		claims_release();
-	}
-
-	return valid;
-}
-
 long tag_validate_corrections(
 	void)
 {
@@ -1385,8 +1309,7 @@ boolean tag_validate_claimed(
 {
 	unsigned long offset = (unsigned long)address - (unsigned long)tag_validate_globals.header;
 
-	if (!tag_validate_claims || !tag_validate_globals.header ||
-		(unsigned long)address < (unsigned long)tag_validate_globals.header ||
+	if (!tag_validate_globals.header || (unsigned long)address < (unsigned long)tag_validate_globals.header ||
 		offset >= tag_validate_globals.tag_cache_size)
 	{
 		return FALSE;
@@ -1405,8 +1328,7 @@ boolean tag_validate_any_claimed(
 	unsigned long offset = (unsigned long)address - (unsigned long)tag_validate_globals.header;
 	unsigned long bit;
 
-	if (!tag_validate_claims || !tag_validate_globals.header ||
-		(unsigned long)address < (unsigned long)tag_validate_globals.header ||
+	if (!tag_validate_globals.header || (unsigned long)address < (unsigned long)tag_validate_globals.header ||
 		offset > tag_validate_globals.tag_cache_size || size > tag_validate_globals.tag_cache_size - offset)
 	{
 		return TRUE;

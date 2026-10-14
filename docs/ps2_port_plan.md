@@ -753,13 +753,23 @@ Done so far:
 
 - The converter's first pass (`tools/ps2/convert_map.py`, run once on the
   PC): it inflates an Xbox map to what the Xbox's own copy writes to its
-  hard disk (byte for byte, checked on `ui` and `wizard`) and sets the tag
-  schema's runtime values to what they start with, as the tag validator
-  does on the other builds, then marks the header. The PS2 build opens
-  such a map in place from `d:\maps` (`ps2_cached_map_file_open`), makes
-  no cache files (730 MB) and copies no map, and refuses a map without the
-  mark. It does not yet relocate the tags: that is still done as the map
-  loads (`tag_relocate.c`).
+  hard disk (byte for byte, checked on `ui` and `wizard`), sets the tag
+  schema's runtime values to what they start with (as the tag validator does
+  on the other builds; the schema now says what to: `tag_schema.json`), and
+  moves the tags and each structure BSP to the PS2's tag cache, which is at
+  one address in every build (`HALO_PORT_TAG_CACHE_ADDRESS`, 0xEB0000: the
+  program's heap ends there, `tools/ps2_build.py`), with the pointers found
+  as `relocation_check.py` finds them. Run in PCSX2 on `ui` and `wizard`, the
+  game's own relocation (`tag_relocate.c`) of the unconverted map to the same
+  address gives the same bytes, word for word (the same hash of the BSP; of
+  the tags too, but for the four bytes of each BSP reference that say where
+  it is read, which the converter sets). The header is marked with it and the
+  address (`ps2\2`), which the PS2 asks for. The PS2 build opens such a map
+  in place from `d:\maps` (`ps2_cached_map_file_open`), makes no cache files
+  (730 MB) and copies no map. It does none of the work of loading Custom
+  Edition maps, of validating the tags or of relocating them, and has none
+  of the code, the tag schema (tables, and 262 KB of working memory) or 0.4
+  MB of the state they have (`port/ps2/port.json`, `ps2_null_game.c`).
 
 Measured in PCSX2 (`pcsx2_bench.py`, 300 to 600 ticks, one local player
 and no AI; the EE's cycle counter, which in PCSX2 counts emulated cycles
@@ -811,16 +821,14 @@ are where Phase 5 begins (VU0 for the matrix maths, the scratchpad for the
 hot loops), and the animation tolerance of Phase 2 (fewer keyframes to
 interpolate) helps the first.
 
-The memory for it: the tag cache is 17.2 MB (`halo_port_capacity.h`) and 0.4
+The memory for it: the tag cache is 17.2 MB (`halo_port_capacity.h`) and 1.0
 MB of the 32 MB is never taken. To make room, the converter makes the maps
 what the other builds make them as they load (the tag validator, 1.2 MB of
-claims for each 9 MB of cache, is out of the PS2 build); the texture cache
-is 256 KB (no copy of a map to buffer), the threads' stacks 64 KB and the
-saved game is read into the game state, not beside it (3.4 MB); the AI's
-line of sight records are 64, not 16384. Another campaign level needs the
-converter's reductions (Phase 2), and the margin is gone: removing the
-tag schema and the relocation from the PS2 build (the converter relocating
-the tags once, to a tag cache address that never changes) is the next 0.8 MB.
+claims for each 9 MB of cache, and the relocation, with the schema, are out
+of the PS2 build); the texture cache is 256 KB (no copy of a map to
+buffer), the threads' stacks 64 KB and the saved game is read into the game
+state, not beside it (3.4 MB); the AI's line of sight records are 64, not
+16384. Another campaign level needs the converter's reductions (Phase 2).
 
 Still to do:
 

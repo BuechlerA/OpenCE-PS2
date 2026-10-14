@@ -23,6 +23,7 @@ Each block is logged: the boot's log is the memory map.
 
 #include <malloc.h>
 #include <string.h>
+#include <unistd.h>
 
 #define PAGE_SIZE_BYTES 0x1000UL
 
@@ -33,8 +34,24 @@ LPVOID WINAPI XPhysicalAlloc(SIZE_T size, ULONG_PTR physical_address, ULONG_PTR 
 	unsigned long boundary = alignment > PAGE_SIZE_BYTES ? (unsigned long)alignment : PAGE_SIZE_BYTES;
 	void *result;
 
-	(void)physical_address;
 	(void)protect;
+	if (physical_address != (ULONG_PTR)-1)
+	{
+		/* a block at an address of its own: the end of the memory the heap
+		leaves (tools/ps2_build.py) up to the thread stack's */
+		if (physical_address < (ULONG_PTR)sbrk(0) || physical_address + size > 0x2000000UL - 0x20000UL)
+		{
+			platform_log("memory: no room for %lu bytes at 0x%08lx (the heap ends at 0x%08lx)", (unsigned long)size,
+				(unsigned long)physical_address, (unsigned long)sbrk(0));
+			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+			return NULL;
+		}
+		memset((void *)physical_address, 0, size);
+		allocated_bytes += size;
+		platform_log("memory: %lu bytes at 0x%08lx-0x%08lx (fixed)", (unsigned long)size, (unsigned long)physical_address,
+			(unsigned long)physical_address + (unsigned long)size);
+		return (LPVOID)physical_address;
+	}
 	result = memalign(boundary, size ? size : 1);
 	if (!result)
 	{
@@ -51,7 +68,9 @@ LPVOID WINAPI XPhysicalAlloc(SIZE_T size, ULONG_PTR physical_address, ULONG_PTR 
 
 VOID WINAPI XPhysicalFree(LPVOID address)
 {
-	free(address);
+	/* (a block at an address of its own is not the heap's) */
+	if ((unsigned long)address < (unsigned long)sbrk(0))
+		free(address);
 }
 
 /* no page protection: everything stays readable and writable */

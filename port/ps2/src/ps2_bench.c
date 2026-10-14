@@ -21,6 +21,7 @@ Called from the game (main.c, game_time.c).
 
 #include "platform.h"
 #include "port_config.h"
+#include "halo_port_capacity.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -30,6 +31,7 @@ Called from the game (main.c, game_time.c).
 
 /* the game's */
 void main_set_map_name(char const *map_name);
+void *physical_memory_get_tag_cache_base_address(void);
 long game_time_get(void);
 
 /* the EE's CPU clock, the rate of cpu_ticks */
@@ -185,6 +187,17 @@ void ps2_bench_update(unsigned char main_menu_scenario_loaded, unsigned char gam
 			{
 				platform_log("bench: %s is loaded; %ld ticks to play", config_string("debug.bench_map"),
 					config_integer("debug.bench_ticks"));
+				/* a hash of the tag cache as loaded (the tags, the bsp, and
+				what is left of the fill): two ways of making the tags what
+				they are, the converter's and the game's, give the same */
+				{
+					unsigned long *word = physical_memory_get_tag_cache_base_address();
+					unsigned long hash = 2166136261UL, count;
+
+					for (count = 0; count < HALO_PORT_TAG_CACHE_SIZE / 4; count++)
+						hash = (hash ^ word[count]) * 16777619UL;
+					platform_log("bench: tag cache hash %08lx", hash);
+				}
 				bench.first_game_time = (unsigned long)game_time_get();
 				bench.state = _bench_running;
 			}
@@ -199,9 +212,9 @@ void ps2_bench_update(unsigned char main_menu_scenario_loaded, unsigned char gam
 				bench.total_ticks, milliseconds(bench.total_cycles / bench.total_ticks),
 				milliseconds((double)bench.total_longest), bench.over_budget, BUDGET_MILLISECONDS);
 			/* the memory the heap has not taken yet: from its end (malloc's
-			sbrk) to the main thread's stack, 128 KB below the 32 MB */
-			platform_log("bench: heap: %lu bytes never taken (of 32 MB), its end at 0x%lx",
-				0x2000000UL - 0x20000UL - (unsigned long)sbrk(0), (unsigned long)sbrk(0));
+			sbrk) to where the tag cache is */
+			platform_log("bench: heap: %lu bytes never taken, its end at 0x%lx",
+				(unsigned long)HALO_PORT_TAG_CACHE_ADDRESS - (unsigned long)sbrk(0), (unsigned long)sbrk(0));
 			/* the sections, the longest first */
 			{
 				long first, second;
