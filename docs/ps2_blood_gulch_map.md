@@ -18,9 +18,9 @@ document is about the data and the design.
 | Scene | The Chief (2,192-vertex armour, the assault rifle) on Blood Gulch's terrain, a camera circling him every 4 seconds; sky, scenery, shadows from the lightmap, detail, bump and reflection |
 | Geometry in the frame | 10,765 triangles and 11,498 vertices of map (5,503 and 5,790 of them the BSP, 5,202 triangles of scenery, 60 of sky), 26 base textures, 53 spans, 152 chunks |
 | Frame rate | 60 fps (one NTSC vsync) through the whole orbit |
-| EE time (PCSX2) | 8.9 to 13.3 ms of the 16.7 ms frame, by where the camera points; the worst single frame 15.2 ms |
-| Video memory | 3.39 of 4.19 MB, about 790 KB spare |
-| Left out | The vehicles, the sky's clouds, the lights' glow, fog, shadows of objects (see "Not done") |
+| EE time (PCSX2) | 8.9 to 13.3 ms of the 16.7 ms frame, by where the camera points; the worst single frame 15.2 ms (since then, with the Chief on VU1 and the fog: 7.8 to 12.4 ms, 10.1 on average, the worst frame 14.5; see [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)) |
+| Video memory | 3.39 of 4.19 MB, about 790 KB spare (since then 2.43 MB, 1.76 MB spare: [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)) |
+| Left out | The vehicles, the sky's clouds, the lights' glow, shadows of objects (see "Not done"); the fog came later |
 
 ## What the map is made of
 
@@ -157,6 +157,10 @@ Reads the map, writes `src/map_assets.[ch]` (gitignored: they are the game's dat
 
 ### Video memory
 
+The numbers below are as of e90fbcec (3.39 MB). Where the memory went afterwards (the Chief's small textures, the mip
+audit, 512-wide buffers: 2.43 MB) and why the Chief's specular maps were never the big spender is in
+[ps2_vram_and_vu1.md](ps2_vram_and_vu1.md).
+
 | | KB |
 | --- | --- |
 | Two 640x448 16-bit frame buffers and a 16-bit Z buffer | 1,680 |
@@ -255,7 +259,7 @@ bump and reflection left out. What the sample does instead, and why:
 - **Vehicles** (8 of them: many large textures; no video memory for them).
 - **The sky's clouds** (33 triangles, an alpha mask times a colour map: about 20
   KB of video memory and an alpha-blended span) and the ring and horizon quads.
-- **The lights' glow, fog, and objects' shadows.**
+- **The lights' glow and objects' shadows.** (Fog is done: [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md).)
 - **The lightmap's overbright (x 2) is an assumption.** The Xbox's pixel
   shaders were not read; shadowed ground comes out dark. `LM_SCALE` scales the
   pages if it is wrong.

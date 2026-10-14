@@ -12,6 +12,7 @@ him) as a PS2 program: EE code skins, lights and projects every vertex; the GS d
     python3 tools/export_map.py        # the map's structure BSP -> src/map_assets.[ch]
     make                               # PS2DEV, PS2SDK set; writes masterchief.elf
     make NO_MAP=1                      # the Chief alone, on the old ground grid (needs no map_assets)
+    make NO_CHIEF_VU1=1                # the Chief drawn by the EE, not VU1 (the map scene's default)
     PCSX2 -nogui -batch -elf masterchief.elf
 
 `export_assets.py` needs Python 3 with numpy and Pillow. It bakes the Chief's colour change into his
@@ -24,12 +25,13 @@ through the specular mask (multipurpose red) as a 4-bit grey texture (16 levels,
 looks the same as 8-bit and takes half the video memory), so only the masked panels shine. The rifle
 gets the same pass with its own specular mask and its two reflection cube maps (grip, gun). A mask
 is the size of the base map it is drawn with, because the pass reuses the base map's UV registers
-(texels). The base maps are exported at 256x256, half their sources: the Chief is about 250 pixels
-tall in the map scene (`BASE_TEX_SIZE=512 python3 tools/export_assets.py` keeps them full size, for
-384 KB more). The visor's gold reflection and highlight are computed per vertex
-on the EE.
+(texels), except the Chief's, which is smaller than his base map and has its own UV registers. The Chief's base
+map is exported at 256x256, half its source: he is about 125 pixels tall in the map scene
+(`BASE_TEX_SIZE=512 python3 tools/export_assets.py` keeps it full size, for 192 KB more); the rifle's base map and
+both masks are 128x128 (box filtered; it covers about 500 pixels). The visor's gold reflection and highlight
+are computed per vertex on the EE.
 
-The rifle's ammo display (its own 256x256 map, the shader's blue self-illumination baked in) is drawn
+The rifle's ammo display (its own 32x32 map, the shader's blue self-illumination baked in; it covers about 3 pixels) is drawn
 unlit, nudged toward the camera so the 16-bit Z buffer doesn't hide it in the receiver.
 
 Left out: the rifle's HUD panels (compass, numbers, data: transparent shaders), mip maps, and the soft
@@ -133,13 +135,17 @@ triangle).
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
   32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
-  Video memory: 3.39 MB of 4.19 MB in use with the Chief's and the map's textures (the program prints
-  the budget at start-up, `VRAM: ...`, and stops if a texture did not fit: gsKit's failed allocation is
-  address 0, the frame buffer, and the texture would draw from it).
+  Video memory: 2.43 MB of 4.19 MB in use (1.76 MB spare) with the Chief's and the map's textures (the program
+  prints the budget at start-up, `VRAM: ...`, and stops if a texture did not fit: gsKit's failed allocation is
+  address 0, the frame buffer, and the texture would draw from it). How it got there from 3.39 MB: the Chief's
+  small textures, the mip levels the orbit never reads (`tools/mip_floor.json`), 512-wide buffers; see
+  [docs/ps2_vram_and_vu1.md](../../../../docs/ps2_vram_and_vu1.md).
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
-- In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.9 to 13.3 ms of the
-  16.7 ms frame (its worst frame 15.2 ms), by where the camera points. PCSX2 does not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
+- In PCSX2 (`-DPROFILE`, which steps the orbit by frame so that builds see the same views): 60 fps through the whole
+  4-second orbit; the EE is busy 7.8 to 12.4 ms of the 16.7 ms frame by where the camera points (10.1 ms on average,
+  its worst frame 14.5 ms) with the Chief on VU1 and the fog on (the EE's path: 9.6 to 14.2, mean 11.9). PCSX2 does
+  not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
   - The Chief's 20 animation frames are skinned and lit once at the start (his pose only changes 30 times a
     second and only the camera moves: `cached_pose`); a frame projects the cached positions, and gives each
     vertex its view-dependent specular colour once in 3 frames (the visor's, 69 vertices, every frame).
@@ -150,5 +156,22 @@ triangle).
 - The lightmap's brightness is the shader's overbright (x 2) as far as can be told without the Xbox's
   pixel shaders; shadowed ground comes out dark. `LM_SCALE` in the exporter's environment scales the
   pages' brightness (default 1).
+
+## Fog, 512-wide buffers, the mip audit and VU1
+
+All in [docs/ps2_vram_and_vu1.md](../../../../docs/ps2_vram_and_vu1.md), with the measurements:
+
+- **Fog** from the sky tag's atmospheric fog, by the GS's own fog unit: a coefficient per vertex (the top byte of XYZF2),
+  blended toward FOGCOL in the base pass (+0.5 ms; `FOG_HAZE_GAIN` scales the haze down for the lightmap's multiply).
+  `-DFOG_EXACT_PASS` does it as the Xbox does, in one more pass (+2.1 ms); `-DNO_FOG` leaves it out.
+- **512x448 frame buffers** (`SCREEN_WIDTH`; the display stretches them to the same picture, so there are two focal
+  lengths): 344 KB less video memory, a little soft across. `-DSCREEN_WIDTH=640` restores the old picture.
+- **The mip audit** (`-DMIP_AUDIT`, `tools/mip_audit.py`, `tools/mip_floor.json`): the mip levels the camera's orbit
+  never reads are left out of video memory, 433 KB, and the picture is identical. It describes the orbit's one path;
+  `MIP_FLOOR=0 python3 tools/export_map.py` keeps every level.
+- **The Chief on VU1** (`src/chief_vu1.vsm`, the map scene's default; needs `dvp-as` from the ps2dev toolchain on PATH):
+  his armour and rifle, each two textured passes, are transformed, culled and drawn by a VU1 microprogram from a
+  prebuilt VIF1 chain per animation frame; the EE keeps the specular colours, the visor and the ammo display. The
+  picture equals the EE path's to 0.007/255; the EE saves 1.8 ms a frame.
 
 Not yet: the lights' glow, the sky's clouds, the vehicles.
