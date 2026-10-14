@@ -16,7 +16,8 @@ enum
 	FP_DPAD_LEFT = 1 << 2,
 	FP_DPAD_RIGHT = 1 << 3,
 	FP_JUMP = 1 << 4,       /* the Xbox's A */
-	FP_CROUCH = 1 << 5      /* its left stick click */
+	FP_CROUCH = 1 << 5,     /* its left stick click */
+	FP_START = 1 << 6       /* its Start: not the controller's, the demo's (fp_demo.h) */
 };
 
 typedef struct

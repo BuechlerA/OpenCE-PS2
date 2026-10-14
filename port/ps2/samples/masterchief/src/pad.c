@@ -39,23 +39,6 @@ static short stick(int value, int sign)
 	return (short)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
 }
 
-#ifdef FP_SCRIPT
-/* a walk: stand and look at the Chief, run, turn right, run on, jump, crouch, again */
-static int scripted(fp_pad *pad, float seconds)
-{
-	float t = seconds - 10.f * (int)(seconds / 10.f);
-
-	memset(pad, 0, sizeof(*pad));
-	if (t >= 1.f && t < 3.f) pad->left_y = 32767;
-	if (t >= 3.f && t < 4.f) pad->right_x = 32767;
-	if (t >= 4.f && t < 6.f) { pad->left_y = 32767; pad->left_x = 20000; }
-	if (t >= 6.f && t < 6.2f) pad->buttons |= FP_JUMP;
-	if (t >= 6.2f && t < 7.5f) pad->left_y = 32767;
-	if (t >= 7.5f && t < 9.f) pad->buttons |= FP_CROUCH;
-	if (t >= 7.5f && t < 9.f) pad->right_y = 12000;
-	return 1;
-}
-#endif
 
 int pad_read(fp_pad *pad, float seconds)
 {
@@ -63,9 +46,6 @@ int pad_read(fp_pad *pad, float seconds)
 	int state, mode;
 	unsigned buttons;
 
-#ifdef FP_SCRIPT
-	return scripted(pad, seconds);
-#endif
 	(void)seconds;
 	memset(pad, 0, sizeof(*pad));
 	if (!opened) return 0;
@@ -92,6 +72,7 @@ int pad_read(fp_pad *pad, float seconds)
 	if (buttons & PAD_RIGHT) pad->buttons |= FP_DPAD_RIGHT;
 	if (buttons & PAD_CROSS) pad->buttons |= FP_JUMP;
 	if (buttons & PAD_L3) pad->buttons |= FP_CROUCH;
+	if (buttons & PAD_START) pad->buttons |= FP_START;
 	mode = padInfoMode(0, 0, PAD_MODECURID, 0);
 	if (mode == PAD_TYPE_ANALOG || mode == PAD_TYPE_DUALSHOCK)      /* a digital pad has no sticks: its bytes are not at rest */
 	{

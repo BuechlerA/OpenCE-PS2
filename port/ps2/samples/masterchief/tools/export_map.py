@@ -51,6 +51,11 @@ CHIEF_X = float(os.environ.get('CHIEF_X', 68.5))
 CHIEF_Y = float(os.environ.get('CHIEF_Y', -97.5))
 CHIEF_BELOW = float(os.environ.get('CHIEF_BELOW', 6.0))
 LM_SCALE = float(os.environ.get('LM_SCALE', 1.0))
+# the first-person demo walks from the front of the north fortress to the middle of the valley, between the two bases, where the Chief waits
+DEMO_START = (float(os.environ.get('DEMO_START_X', 68.5)), float(os.environ.get('DEMO_START_Y', -97.5)))
+DEMO_CHIEF = (float(os.environ.get('DEMO_CHIEF_X', 62.0)), float(os.environ.get('DEMO_CHIEF_Y', -121.0)))
+# the route bends over the rise east of the fortress and down into the valley (the player's planner joins these up on the ground)
+DEMO_VIA = [(78.0, -104.0), (82.0, -114.0), (72.0, -120.0)]
 TAG_BASE = 0x803a6000
 BASE_MAP = 0x88                    # offsets in a shader_environment: the base map's tag reference ...
 PRIMARY_DETAIL, SECONDARY_DETAIL, MICRO_DETAIL = 0xB4, 0xD4, 0xF8   # ... and each detail map's scale, then its reference
@@ -656,6 +661,10 @@ def main():
     c.write(cstr_array('map_chunks', bounds, 'float', 16))
     c.write(cstr_array('map_lm_order', lm_order, 'int', 16))
     c.write(cstr_array('map_gray_clut', flat(gs_gray_clut()), 'unsigned int', 64))
+    demo_z = ground_height(col_P.astype(np.float64), col_T, DEMO_CHIEF[0], DEMO_CHIEF[1], CHIEF_BELOW)
+    assert demo_z is not None, 'no ground under the demo Chief'
+    demo_heading = float(np.arctan2(DEMO_START[1] - DEMO_CHIEF[1], DEMO_START[0] - DEMO_CHIEF[0]))   # he faces the one who walks up to him
+    print('demo: from (%.1f, %.1f) to the Chief at (%.1f, %.1f, %.2f), facing %.0f degrees' % (DEMO_START[0], DEMO_START[1], DEMO_CHIEF[0], DEMO_CHIEF[1], demo_z, np.degrees(demo_heading)))
     col_lo, col_w, col_h, col_start, col_items = collision_grid(col_P, col_T)
     tunings, look_function = player_tunings(mf)
     print('collision: %d triangles, %d vertices, a %dx%d grid of %g-unit cells (%d entries)' % (len(col_T), len(col_P), col_w, col_h, GRID_CELL, len(col_items)))
@@ -756,6 +765,9 @@ extern const unsigned short map_col_items[];
 extern const float map_look_function[];
 ''' % (len(col_T), float(col_lo[0]), float(col_lo[1]), GRID_CELL, col_w, col_h, len(look_function)))
     for name, value in tunings: h.write('#define MAP_%s %rf\n' % (name, float(value)))
+    h.write('/* the first-person demo: where the walk starts (feet), the points it bends round, and where the Chief stands at its end (feet) and faces */\n#define MAP_DEMO_VIA_COUNT %d\n#define MAP_DEMO_VIA_POINTS %s\n' % (len(DEMO_VIA), ', '.join('{ %rf, %rf }' % v for v in DEMO_VIA)))
+    for name, value in (('DEMO_START_X', DEMO_START[0]), ('DEMO_START_Y', DEMO_START[1]), ('DEMO_CHIEF_X', DEMO_CHIEF[0]), ('DEMO_CHIEF_Y', DEMO_CHIEF[1]), ('DEMO_CHIEF_Z', demo_z), ('DEMO_CHIEF_HEADING', demo_heading)):
+        h.write('#define MAP_%s %rf\n' % (name, float(value)))
     h.write('#endif\n')
     h.close()
     print('wrote', os.path.abspath(OUT))

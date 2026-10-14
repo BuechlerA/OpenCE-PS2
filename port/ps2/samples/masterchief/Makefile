@@ -6,11 +6,12 @@ ifdef NO_MAP
 override EXTRA_CFLAGS += -DNO_MAP
 else
 EE_OBJS += src/map_assets.o
-# the map scene is first person (src/fp_controller.c reads the DualShock through src/pad.c): make FP_SCRIPT=1 plays a scripted walk
-# instead of the pad, ORBIT_CAMERA=1 keeps the camera orbiting the Chief (builds for the stills and the profile do)
-EE_OBJS += src/fp_controller.o src/pad.o
-ifdef FP_SCRIPT
-override EXTRA_CFLAGS += -DFP_SCRIPT
+# the map scene is first person (src/fp_controller.c reads the DualShock through src/pad.c, src/fp_demo.c walks it when no hand is on the
+# pad): make FP_NO_DEMO=1 leaves the player standing for the pad alone, ORBIT_CAMERA=1 keeps the camera orbiting the Chief (builds for
+# the stills and the profile do)
+EE_OBJS += src/fp_controller.o src/fp_demo.o src/pad.o
+ifdef FP_NO_DEMO
+override EXTRA_CFLAGS += -DFP_NO_DEMO
 endif
 ifdef ORBIT_CAMERA
 override EXTRA_CFLAGS += -DORBIT_CAMERA
@@ -39,7 +40,7 @@ all: $(EE_BIN)
 	$(EE_DVP) $< -o $@
 
 clean:
-	rm -f $(EE_BIN) $(EE_OBJS) src/chief_vu1.o src/fp_controller.o src/pad.o
+	rm -f $(EE_BIN) $(EE_OBJS) src/chief_vu1.o src/fp_controller.o src/fp_demo.o src/pad.o
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal

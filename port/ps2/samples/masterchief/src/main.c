@@ -40,6 +40,7 @@
 #endif
 #ifdef FIRST_PERSON
 #include "fp_controller.h"
+#include "fp_demo.h"
 #include "pad.h"
 #endif
 
@@ -279,12 +280,23 @@ static void pack_vertices(void)
 #define MAP_CAMERA_HEIGHT 0.35f     /* ... this far above his centre */
 #define MAP_NEAR 0.15f
 #define MAP_FAR 500.f
+#ifdef FIRST_PERSON                 /* the walk ends at the Chief in the middle of the valley, and he faces the one who comes */
+#define CHIEF_X MAP_DEMO_CHIEF_X
+#define CHIEF_Y MAP_DEMO_CHIEF_Y
+#define CHIEF_Z MAP_DEMO_CHIEF_Z
+#define CHIEF_HEADING MAP_DEMO_CHIEF_HEADING
+#else
+#define CHIEF_X MAP_CHIEF_X
+#define CHIEF_Y MAP_CHIEF_Y
+#define CHIEF_Z MAP_CHIEF_Z
 #define CHIEF_HEADING 0.f           /* radians about the vertical */
+#endif
 #endif
 
 static float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
 #ifdef FIRST_PERSON
 static fp_player player;
+static fp_demo demo;
 #endif
 /* The frame buffers are SCREEN_WIDTH pixels wide and 448 high; the display stretches them over the same 640x448 picture
    (gsKit sets the horizontal magnification from the width), so at 512 each pixel is 1.25 times as wide as it is high
@@ -1520,9 +1532,9 @@ static void placement_setup(void)
 	memset(&chief_placement, 0, sizeof(chief_placement));
 	chief_placement.r[0][0] = c; chief_placement.r[0][1] = s; chief_placement.r[1][0] = -s; chief_placement.r[1][1] = c; chief_placement.r[2][2] = 1.f;
 	apply_vector(&chief_placement, foot, rf);
-	chief_placement.t[0] = MAP_CHIEF_X - rf[0];
-	chief_placement.t[1] = MAP_CHIEF_Y - rf[1];
-	chief_placement.t[2] = MAP_CHIEF_Z - rf[2];
+	chief_placement.t[0] = CHIEF_X - rf[0];
+	chief_placement.t[1] = CHIEF_Y - rf[1];
+	chief_placement.t[2] = CHIEF_Z - rf[2];
 }
 #endif
 
@@ -2128,7 +2140,7 @@ static void camera_look(const float *eye, const float *target)
 static int chief_in_view(const xform *view)
 {
 	const float r = MODEL_RADIUS * 1.15f;
-	const float centre[3] = { MAP_CHIEF_X, MAP_CHIEF_Y, MAP_CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
+	const float centre[3] = { CHIEF_X, CHIEF_Y, CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
 	float v[3], depth, extent;
 
 	apply_point(view, centre, v);
@@ -2177,7 +2189,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	}
 #else
 	{
-		const float target[3] = { MAP_CHIEF_X, MAP_CHIEF_Y, MAP_CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
+		const float target[3] = { CHIEF_X, CHIEF_Y, CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
 		const float eye[3] = { target[0] + MAP_CAMERA_DISTANCE * c, target[1] + MAP_CAMERA_DISTANCE * s, target[2] + MAP_CAMERA_HEIGHT };
 
 		camera_look(eye, target);
@@ -2445,7 +2457,22 @@ int main(void)
 	gsKit_add_vsync_handler(vsync_handler);
 #ifdef FIRST_PERSON
 	if (!pad_init()) printf("PAD: the pad modules did not load; no one can walk\n");
-	fp_init(&player, MAP_CHIEF_X + MAP_CAMERA_DISTANCE, MAP_CHIEF_Y, (float)M_PI);      /* where the orbit starts, looking at the Chief */
+	/* the demo walks from the front of the fortress to the Chief (2.4 units short of him, on the way from where it started), the
+	   pad takes the player over; -DFP_NO_DEMO stands the player at the start for the pad alone */
+	{
+		static const float via[][2] = { MAP_DEMO_VIA_POINTS };
+		float dx = MAP_DEMO_START_X - MAP_DEMO_CHIEF_X, dy = MAP_DEMO_START_Y - MAP_DEMO_CHIEF_Y, n = sqrtf(dx * dx + dy * dy);
+		float goal_x = MAP_DEMO_CHIEF_X + dx / n * 2.4f, goal_y = MAP_DEMO_CHIEF_Y + dy / n * 2.4f;
+
+		fp_init(&player, MAP_DEMO_START_X, MAP_DEMO_START_Y, atan2f(-dy, -dx));
+#ifndef FP_NO_DEMO
+		if (!fp_demo_init(&demo, &player, MAP_DEMO_START_X, MAP_DEMO_START_Y, goal_x, goal_y, MAP_DEMO_CHIEF_X, MAP_DEMO_CHIEF_Y, via, MAP_DEMO_VIA_COUNT))
+			printf("DEMO: no way from the start to the Chief; the pad alone walks\n");
+		else printf("DEMO: %d points, %.1f units\n", demo.count, demo.length);
+#else
+		(void)via; (void)goal_x; (void)goal_y;
+#endif
+	}
 	printf("PLAYER: starts at (%.2f, %.2f, %.3f)\n", player.pos[0], player.pos[1], player.pos[2]);
 #endif
 #ifdef MIP_AUDIT                     /* the whole orbit in half-degree steps, then the report */
@@ -2486,12 +2513,13 @@ int main(void)
 			float now = vsync_count / refresh;
 #endif
 			static float last_now;
-			fp_pad pad;
+			fp_pad user, pad;
 			float dt = now - last_now;
 
 			last_now = now;
 			if (dt < 0.f || dt > 0.1f) dt = 0.f;
-			pad_read(&pad, now);
+			pad_read(&user, now);
+			fp_demo_pad(&demo, &player, &user, &pad, dt);      /* the demo's pad until a hand touches the real one (a demo that could not plan passes it through) */
 			fp_update(&player, &pad, dt);
 		}
 #endif
