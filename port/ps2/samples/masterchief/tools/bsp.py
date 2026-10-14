@@ -15,6 +15,8 @@ import numpy as np
 from xmap import load
 from extract import B
 from mesh import decode_vec
+from bmp import bitmap_info
+from dxt import decode_dxt1
 
 SCENARIO_BSP_REFERENCES = 0x5A4
 SB_SURFACES, SB_LIGHTMAPS = 0xF8, 0x104
@@ -24,16 +26,72 @@ MAT_SIZE = 256
 def _name(td, ptr):
     return td[ptr - B:td.index(b'\0', ptr - B)].decode('latin1') if ptr else None
 
-def load_bsp(path, index=0):
+class MapFile:
+    """a map's tags by group and name, and its bitmaps decoded"""
+    def __init__(self, path):
+        self.full, _off, _size, self.td, self.h = load(path)
+        self.tags = {}
+        for i in range(self.h[2]):
+            o = (self.h[0] - B) + i * 0x20
+            group = self.td[o:o + 4][::-1]
+            name, addr = struct.unpack_from('<II', self.td, o + 0x10)
+            self.tags[(group, _name(self.td, name))] = addr
+
+    def ref(self, o):
+        """the name a tag reference at td offset o points at"""
+        _g, name, _n, _i = struct.unpack_from('<4sIII', self.td, o)
+        return _name(self.td, name)
+
+    def bitmaps(self, name):
+        return bitmap_info(self.td, self.tags[(b'bitm', name)])
+
+    def rgb(self, info):
+        """one bitmap's first level as floats (h, w, 3): DXT1/3/5 (the alpha ignored) or R5G6B5"""
+        w, h, fmt, po = info['w'], info['h'], info['fmt'], info['pixoff']
+        if fmt in (14, 15, 16):
+            assert not info['flags'] & 8, 'compressed bitmaps are not swizzled'
+            size = ((w + 3) // 4) * ((h + 3) // 4) * (8 if fmt == 14 else 16)
+            return decode_dxt1(self.full[po:po + size], w, h, dxt5=fmt != 14)[..., :3].astype(np.float64) / 255
+        if fmt == 6:
+            raw = np.frombuffer(self.full, dtype='<u2', count=w * h, offset=po).astype(np.uint32)
+            if info['flags'] & 8: raw = unswizzle(raw, w, h)
+            raw = raw.reshape(h, w)
+            return np.stack([((raw >> 11) & 31) / 31, ((raw >> 5) & 63) / 63, (raw & 31) / 31], -1)
+        raise ValueError('bitmap format %d' % fmt)
+
+def swizzle_masks(w, h):
+    """rasterizer_swizzle.c's compute_swizzle_masks: x and y bits interleaved, a finished axis skipped"""
+    size, bit, xm, ym = 1, 1, 0, 0
+    while True:
+        adv = 0
+        if size < w: xm |= bit; bit <<= 1; adv = bit
+        if size < h: ym |= bit; bit <<= 1; adv = bit
+        size <<= 1
+        if not adv: return xm, ym
+
+def _spread(n, mask):
+    out = np.zeros_like(n); i = 0
+    for b in range(32):
+        if mask >> b & 1:
+            out |= ((n >> i) & 1) << b; i += 1
+    return out
+
+def unswizzle(raw, w, h):
+    xm, ym = swizzle_masks(w, h)
+    x = np.arange(w, dtype=np.uint32)[None, :]; y = np.arange(h, dtype=np.uint32)[:, None]
+    return raw[(_spread(x, xm) | _spread(y, ym)).reshape(-1)]
+
+def load_bsp(mf, index=0):
     """-> list of materials: dict(shader, group, lightmap, verts (n, 8 floats), normals (n, 3), tris (m, 3) local, lm (k, 4) u16)"""
-    full, _off, _size, td, h = load(path)
-    tag_index, scenario_tag, tag_count = h[0], h[1], h[2]
+    full, td, h = mf.full, mf.td, mf.h
+    tag_index, scenario_tag = h[0], h[1]
     inst = (tag_index - B) + (scenario_tag & 0xFFFF) * 0x20
     scenario = struct.unpack_from('<I', td, inst + 0x14)[0] - B
     count, ref = struct.unpack_from('<iI', td, scenario + SCENARIO_BSP_REFERENCES)
     file_offset, file_size, base = struct.unpack_from('<iiI', td, ref - B + index * 0x20)
     buf = full[file_offset:file_offset + file_size]
     sb = struct.unpack_from('<I', buf, 0)[0] - base
+    lightmap_group = _name(td, struct.unpack_from('<I', buf, sb + 4)[0])
     def block(o):
         c, a, _ = struct.unpack_from('<iII', buf, o)
         return c, a - base
@@ -60,7 +118,7 @@ def load_bsp(path, index=0):
             lm = np.frombuffer(buf, dtype='<u2', count=lcount * 4, offset=d + vcount * 32).reshape(lcount, 4) if lcount else None
             t = surfaces[first:first + tris].astype(np.int64)
             assert t.size == 0 or t.max() < vcount
-            out.append(dict(shader=_name(td, name_ptr), group=group[::-1], lightmap=bitmap_index,
+            out.append(dict(shader=_name(td, name_ptr), group=group[::-1], lightmap=bitmap_index, lightmap_group=lightmap_group,
                             verts=v, normals=normals, tris=t, lm=lm))
     return out
 

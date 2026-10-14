@@ -226,24 +226,30 @@ typedef struct { GSTEXTURE t; int tw, th; } texture;   /* tw, th: log2 of the si
 
 static texture chief_tex, rifle_tex, mask_tex, rifle_mask_tex, display_tex;
 
-static void texture_setup(GSGLOBAL *gs, texture *x, int size, const unsigned char *pixels, const unsigned int *clut)
+static void texture_setup_wh(GSGLOBAL *gs, texture *x, int width, int height, const unsigned char *pixels, const unsigned int *clut)
 {
 	GSTEXTURE *t = &x->t;
 
 	memset(x, 0, sizeof(*x));
-	t->Width = size;
-	t->Height = size;
+	t->Width = width;
+	t->Height = height;
 	t->PSM = GS_PSM_T8;
 	t->ClutPSM = GS_PSM_CT32;
-	t->TBW = size / 64;
+	t->TBW = width / 64;
 	t->Mem = (u32 *)pixels;
 	t->Clut = (u32 *)clut;
 	t->Filter = GS_FILTER_LINEAR;
 	t->Vram = gsKit_vram_alloc(gs, gsKit_texture_size(t->Width, t->Height, t->PSM), GSKIT_ALLOC_USERBUFFER);
 	t->VramClut = gsKit_vram_alloc(gs, gsKit_texture_size(16, 16, t->ClutPSM), GSKIT_ALLOC_USERBUFFER);
 	gsKit_texture_upload(gs, t);
-	for (x->tw = 0; (1 << x->tw) < size; x->tw++) ;   /* log2, for TEX0 */
-	x->th = x->tw;
+	if (t->Vram == GSKIT_ALLOC_ERROR || t->VramClut == GSKIT_ALLOC_ERROR) printf("texture %dx%d: out of video memory\n", width, height);
+	for (x->tw = 0; (1 << x->tw) < width; x->tw++) ;   /* log2, for TEX0 */
+	for (x->th = 0; (1 << x->th) < height; x->th++) ;
+}
+
+static void texture_setup(GSGLOBAL *gs, texture *x, int size, const unsigned char *pixels, const unsigned int *clut)
+{
+	texture_setup_wh(gs, x, size, size, pixels, clut);
 }
 
 /* ---------- the slow functions, tabulated ---------- */
@@ -468,15 +474,16 @@ static int cull(const svert *v, const unsigned short *tri, int first, int count)
 }
 
 /* the primitive type and, for a textured one, its TEX0 and TEX1 (filter): once per mesh, as A+D
-   register writes (a PRIM carried in a REGLIST tag is not honoured by PCSX2) */
-static void set_prim(GSGLOBAL *gs, const texture *x)
+   register writes (a PRIM carried in a REGLIST tag is not honoured by PCSX2). fst: 1 when the vertices
+   carry UV (texel coordinates), 0 for ST and Q (perspective-correct, and any range: tiling) */
+static void set_prim(GSGLOBAL *gs, const texture *x, int fst)
 {
 	int regs = x ? 3 : 1;
 	u64 *p = gsKit_heap_alloc(gs, regs, regs * 16, GIF_AD);
 
 	*p++ = GIF_TAG_AD(regs);
 	*p++ = GIF_AD;
-	*p++ = GS_SETREG_PRIM(GS_PRIM_PRIM_TRIANGLE, 1, x ? 1 : 0, gs->PrimFogEnable, gs->PrimAlphaEnable, gs->PrimAAEnable, x ? 1 : 0, gs->PrimContext, 0);
+	*p++ = GS_SETREG_PRIM(GS_PRIM_PRIM_TRIANGLE, 1, x ? 1 : 0, gs->PrimFogEnable, gs->PrimAlphaEnable, gs->PrimAAEnable, fst, gs->PrimContext, 0);
 	*p++ = GS_PRIM;
 	if (!x) return;
 	*p++ = GS_SETREG_TEX0(x->t.Vram / 256, x->t.TBW, x->t.PSM, x->tw, x->th, gs->PrimAlphaEnable, 0,
@@ -495,7 +502,7 @@ static void draw_textured(GSGLOBAL *gs, const texture *x, const svert *v, const 
 	u64 *p;
 
 	if (n == 0) return;
-	set_prim(gs, x);
+	set_prim(gs, x, 1);
 	qwords = (n * 3 + 1) / 2;                            /* three registers per vertex, two per quadword */
 	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
@@ -516,7 +523,7 @@ static void draw_flat_gouraud(GSGLOBAL *gs, const svert *v, const unsigned short
 	u64 *p;
 
 	if (n == 0) return;
-	set_prim(gs, NULL);
+	set_prim(gs, NULL, 0);
 	p = gsKit_heap_alloc(gs, n, n * 16, GIF_AD);        /* two registers per vertex: one quadword */
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
 	*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
@@ -602,13 +609,14 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 #define ATTRS 5                     /* what a vertex carries through the clip: r, g, b, u, v */
 
 typedef struct { float p[3]; float a[ATTRS]; } cvert;
-typedef struct { u64 rgbaq, xyz2; } flatv;
+typedef struct { u64 rgbaq, st, xyz2; } mapv;   /* a vertex as the GS reads it: RGBAQ (Q = 1 / z), ST, XYZ2 */
 
 static float clip_plane[CLIP_PLANES][4];   /* d = a x + b y + c z + e >= 0 is inside */
 static float map_view[MAP_VERTS][3];
 static svert map_v[MAP_VERTS];
 static unsigned char map_code[MAP_VERTS];
-static flatv map_out[MAP_TRIS * 3 + 4096];
+static mapv map_out[MAP_TRIS * 3 + 4096];
+static texture map_tex[MAP_TEXTURES];
 #ifdef PROFILE
 static u32 prof_map_clipped;
 #endif
@@ -673,16 +681,23 @@ static int clip_triangle(const cvert *tri, cvert *out)
 	return n;
 }
 
-static inline u64 flat_rgbaq(const float *a)
+/* the vertex's colour (0..255 a channel, alpha 0x80), Q = 1 / z, and S = u Q, T = v Q: the GS divides by Q
+   per pixel. u and v are affine in view space, so they interpolate exactly along a clipped edge. */
+static inline void set_attrs(svert *o, float r, float g, float b, float u, float v, float zc)
 {
-	return GS_SETREG_RGBAQ((int)(a[0] + 0.5f), (int)(a[1] + 0.5f), (int)(a[2] + 0.5f), 0x80, 0x00);
+	float q = 1.f / zc, st[2] = { u * q, v * q };
+	u32 qbits, sbits, tbits;
+
+	memcpy(&qbits, &q, 4); memcpy(&sbits, &st[0], 4); memcpy(&tbits, &st[1], 4);
+	o->rgbaq = GS_SETREG_RGBAQ((int)(r + 0.5f), (int)(g + 0.5f), (int)(b + 0.5f), 0x80, qbits);
+	o->uv = (u64)sbits | ((u64)tbits << 32);
 }
 
 /* project a clipped vertex (its depth at least the near plane, give or take rounding) */
 static inline void project_cvert(const cvert *v, svert *o)
 {
 	project(v->p, 0.f, o);
-	o->rgbaq = flat_rgbaq(v->a);
+	set_attrs(o, v->a[0], v->a[1], v->a[2], v->a[3], v->a[4], v->p[2] < z_near ? z_near : v->p[2]);
 }
 
 static inline float screen_area(const svert *a, const svert *b, const svert *c)
@@ -690,10 +705,27 @@ static inline float screen_area(const svert *a, const svert *b, const svert *c)
 	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
 }
 
+static inline void put_vertex(mapv *out, const svert *v)
+{
+	out->rgbaq = v->rgbaq; out->st = v->uv; out->xyz2 = v->xyz2;
+}
+
+/* a span's vertices as one REGLIST packet: RGBAQ, ST and XYZ2 each, three registers (24 bytes) a vertex */
+static void send_map_span(GSGLOBAL *gs, const texture *x, const mapv *v, int n)
+{
+	int qwords = (n * 3 + 1) / 2;
+	u64 *p;
+
+	set_prim(gs, x, 0);
+	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
+	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
+	*p++ = (u64)GS_RGBAQ | ((u64)GS_ST << 4) | ((u64)GS_XYZ2 << 8);
+	memcpy(p, v, n * sizeof(mapv));
+}
+
 static void draw_map(GSGLOBAL *gs, const xform *view)
 {
-	int i, n = 0, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
-	u64 *p;
+	int i, sp, cap = (int)(sizeof(map_out) / sizeof(map_out[0]));
 
 	for (i = 0; i < MAP_VERTS; i++)
 	{
@@ -703,61 +735,57 @@ static void draw_map(GSGLOBAL *gs, const xform *view)
 		map_code[i] = (unsigned char)outcode(map_view[i]);
 		if (map_code[i]) continue;
 		project(map_view[i], 0.f, o);
-		o->rgbaq = GS_SETREG_RGBAQ(map_color[i * 4], map_color[i * 4 + 1], map_color[i * 4 + 2], map_color[i * 4 + 3], 0x00);
+		set_attrs(o, map_color[i * 4], map_color[i * 4 + 1], map_color[i * 4 + 2], map_uv[i * 2], map_uv[i * 2 + 1], map_view[i][2]);
 	}
-	for (i = 0; i < MAP_TRIS; i++)
+	for (sp = 0; sp < MAP_SPANS; sp++)
 	{
-		unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
-		int ca = map_code[ia], cb = map_code[ib], cc = map_code[ic];
+		int tex = map_spans[sp * 3], first = map_spans[sp * 3 + 1], count = map_spans[sp * 3 + 2], n = 0;
 
-		if (ca & cb & cc) continue;                          /* all outside one plane */
-		if ((ca | cb | cc) == 0)
+		for (i = first; i < first + count; i++)
 		{
-			const svert *a = &map_v[ia], *b = &map_v[ib], *c = &map_v[ic];
+			unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
+			int ca = map_code[ia], cb = map_code[ib], cc = map_code[ic];
 
-			if (screen_area(a, b, c) * CULL_SIGN <= 0.f) continue;
-			if (n + 3 > cap) break;
-			map_out[n].rgbaq = a->rgbaq; map_out[n++].xyz2 = a->xyz2;
-			map_out[n].rgbaq = b->rgbaq; map_out[n++].xyz2 = b->xyz2;
-			map_out[n].rgbaq = c->rgbaq; map_out[n++].xyz2 = c->xyz2;
-		}
-		else
-		{
-			cvert in[3], poly[CLIP_MAX];
-			svert sv[CLIP_MAX];
-			int m, k, v, ids[3];
+			if (ca & cb & cc) continue;                          /* all outside one plane */
+			if ((ca | cb | cc) == 0)
+			{
+				const svert *a = &map_v[ia], *b = &map_v[ib], *c = &map_v[ic];
 
-			ids[0] = ia; ids[1] = ib; ids[2] = ic;
-			for (v = 0; v < 3; v++)
-			{
-				memcpy(in[v].p, map_view[ids[v]], sizeof(in[v].p));
-				for (k = 0; k < 3; k++) in[v].a[k] = (float)map_color[ids[v] * 4 + k];
-				in[v].a[3] = in[v].a[4] = 0.f;
-			}
-			m = clip_triangle(in, poly);
-			for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v]);
-			for (k = 1; k + 1 < m; k++)
-			{
-				if (screen_area(&sv[0], &sv[k], &sv[k + 1]) * CULL_SIGN <= 0.f) continue;
+				if (screen_area(a, b, c) * CULL_SIGN <= 0.f) continue;
 				if (n + 3 > cap) break;
-				map_out[n].rgbaq = sv[0].rgbaq; map_out[n++].xyz2 = sv[0].xyz2;
-				map_out[n].rgbaq = sv[k].rgbaq; map_out[n++].xyz2 = sv[k].xyz2;
-				map_out[n].rgbaq = sv[k + 1].rgbaq; map_out[n++].xyz2 = sv[k + 1].xyz2;
+				put_vertex(&map_out[n++], a); put_vertex(&map_out[n++], b); put_vertex(&map_out[n++], c);
 			}
+			else
+			{
+				cvert in[3], poly[CLIP_MAX];
+				svert sv[CLIP_MAX];
+				int m, k, v, ids[3];
+
+				ids[0] = ia; ids[1] = ib; ids[2] = ic;
+				for (v = 0; v < 3; v++)
+				{
+					memcpy(in[v].p, map_view[ids[v]], sizeof(in[v].p));
+					for (k = 0; k < 3; k++) in[v].a[k] = (float)map_color[ids[v] * 4 + k];
+					in[v].a[3] = map_uv[ids[v] * 2]; in[v].a[4] = map_uv[ids[v] * 2 + 1];
+				}
+				m = clip_triangle(in, poly);
+				for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v]);
+				for (k = 1; k + 1 < m; k++)
+				{
+					if (screen_area(&sv[0], &sv[k], &sv[k + 1]) * CULL_SIGN <= 0.f) continue;
+					if (n + 3 > cap) break;
+					put_vertex(&map_out[n++], &sv[0]); put_vertex(&map_out[n++], &sv[k]); put_vertex(&map_out[n++], &sv[k + 1]);
+				}
 #ifdef PROFILE
-			prof_map_clipped++;
+				prof_map_clipped++;
 #endif
+			}
 		}
-	}
 #ifdef PROFILE
-	prof_tris += n / 3;
+		prof_tris += n / 3;
 #endif
-	if (n == 0) return;
-	set_prim(gs, NULL);
-	p = gsKit_heap_alloc(gs, n, n * 16, GIF_AD);             /* two registers a vertex: one quadword */
-	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
-	*p++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
-	memcpy(p, map_out, n * sizeof(flatv));
+		if (n) send_map_span(gs, tex < 0 ? NULL : &map_tex[tex], map_out, n);
+	}
 }
 
 /* the camera orbits the Chief; he stands where the exporter found the ground */
@@ -1014,7 +1042,7 @@ int main(void)
 	dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
 	dmaKit_chan_init(DMA_CHANNEL_GIF);
 
-	gs = gsKit_init_global_custom(1024 * 1024, 16 * 1024);
+	gs = gsKit_init_global_custom(2 * 1024 * 1024, 16 * 1024);   /* the map's textured packets alone take about 0.4 MB */
 	gs->Mode = GS_MODE_NTSC;        /* 60 Hz whatever the console's region: the scene is timed for it */
 	gs->Height = 448;               /* gsKit sized the buffers for the console's own mode (PAL: 512 lines) before this */
 #if defined(FB16) || !defined(NO_MAP)
@@ -1039,6 +1067,10 @@ int main(void)
 	texture_setup(gs, &mask_tex, 512, mask_tex_pixels, mask_tex_clut);
 	texture_setup(gs, &rifle_mask_tex, 256, rifle_mask_pixels, rifle_mask_clut);
 	texture_setup(gs, &display_tex, 256, display_tex_pixels, display_tex_clut);
+#ifndef NO_MAP
+	for (i = 0; i < MAP_TEXTURES; i++)
+		texture_setup_wh(gs, &map_tex[i], map_textures[i].width, map_textures[i].height, map_textures[i].pixels, map_textures[i].clut);
+#endif
 
 	printf("VRAM: %u of 4194304 bytes allocated\n", (unsigned)gs->CurrentPointer);
 	tables_setup();
