@@ -21,6 +21,7 @@ fork's `main`.
 | `port/ps2/samples/masterchief/` | A stand-alone PS2 sample, not the game's build: it draws the Master Chief running with the assault rifle on Blood Gulch's terrain (EE, VU0, VU1 and GS, gsKit), from assets its exporters bake out of an Xbox map |
 | `tools/ps2/`, `tools/ps2_build.py` | The PS2 tools (map measuring and converting, PCSX2 runners) and the `ninja ps2` build ([tools/ps2/README.md](tools/ps2/README.md)) |
 | `docs/ps2_port_plan.md` | The plan, the memory budget and the phases |
+| `docs/ps2_renderer_design.md` | The design of the game's PS2 renderer (`source/rasterizer/ps2/`, not written yet): where it plugs in behind `rasterizer.h`, the frame's DMA chains, the VU1 programs, the texture cache, the hardware gate, the first milestone's files and steps |
 | `docs/ps2_ee_performance.md` | What the EE does slowly (measured), how to send primitives to the GS cheaply, how to profile in PCSX2 and its quirks: read before writing per-vertex or per-tick code |
 | `docs/ps2_blood_gulch_map.md` | What Blood Gulch's data is (BSP, shaders, bitmap formats, scenery, sky), how the sample draws it on the GS, the video memory and EE budgets, the pitfalls met, and what is not done |
 | `docs/ps2_vram_and_vu1.md` | Where the sample's video memory goes (measured), the savings and what each cost visually, the mip audit, 512-wide buffers, the GS's fog, the Chief on VU1, what was tried and rejected, and the pitfalls (VIF codes, VU1 flags, PCSX2 capture): read before touching textures, the frame buffers, the GIF paths or VU1 |
