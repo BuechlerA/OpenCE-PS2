@@ -56,6 +56,9 @@ What the EE does slowly, and what the per-vertex path does instead:
   wrote TEX0 (with a CLUT reload), TEX1 and PRIM for each. The PRIM is not carried in the tag:
   PCSX2 ignores PRE on a REGLIST tag.
 
+The findings behind the map (its data, the design, the budgets, the pitfalls and what is not done) are in
+[docs/ps2_blood_gulch_map.md](../../../../docs/ps2_blood_gulch_map.md).
+
 ## The map (Blood Gulch port: base maps, detail maps, lightmap pages, mip maps)
 
 `export_map.py` reads the map's structure BSP (`bsp.py`; 5,503 triangles and 5,790 vertices in 79

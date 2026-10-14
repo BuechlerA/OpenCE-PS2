@@ -209,7 +209,7 @@ def sky_dome(mf):
     so = mf.tags[shader] - TAG_BASE
     count, maps, _ = struct.unpack_from('<iII', mf.td, so + 84); maps -= TAG_BASE
     pics = [mf.ref(maps + i * 220 + 108) for i in range(count)]
-    best = [p for p in pics if mf.bitmaps(p)[0]['fmt'] in (9, 10, 11)] or pics[-1:]
+    best = [p for p in pics if mf.bitmaps(p)[0]['fmt'] in (10, 11)] or pics[-1:]
     img = mf.rgb(mf.bitmaps(best[0])[0])
     P, T = part['pos'], part['tris']
     n = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])

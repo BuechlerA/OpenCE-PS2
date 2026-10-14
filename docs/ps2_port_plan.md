@@ -1,6 +1,9 @@
 # PlayStation 2 port: analysis and plan
 
 Status: planning. Nothing in this document is implemented.
+(Later work has implemented parts of it; the map renderer of the Master Chief sample, a
+stand-alone PS2 scene with Blood Gulch's level, is described in
+[ps2_blood_gulch_map.md](ps2_blood_gulch_map.md).)
 
 Target: a retail PS2 (32 MB). Development uses PCSX2 with the default 32 MB
 of EE memory (not its 128 MB development-kit mode), so that the emulator

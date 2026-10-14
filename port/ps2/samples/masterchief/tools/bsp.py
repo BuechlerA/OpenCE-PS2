@@ -57,7 +57,7 @@ class MapFile:
             if info['flags'] & 8: raw = unswizzle(raw, w, h)
             raw = raw.reshape(h, w)
             return np.stack([((raw >> 11) & 31) / 31, ((raw >> 5) & 63) / 63, (raw & 31) / 31], -1)
-        if fmt in (9, 10, 11):          # x8r8g8b8, a8r8g8b8 (the sky's is 11): 32 bits, alpha ignored here
+        if fmt in (10, 11):             # x8r8g8b8, a8r8g8b8 (the sky's is 11): 32 bits, alpha ignored here
             raw = np.frombuffer(self.full, dtype='<u4', count=w * h, offset=po)
             if info['flags'] & 8: raw = unswizzle(raw.astype(np.uint64), w, h).astype(np.uint32)
             raw = raw.reshape(h, w)
@@ -65,7 +65,7 @@ class MapFile:
         raise ValueError('bitmap format %d' % fmt)
 
     def alpha(self, info):
-        """one bitmap's first level's alpha as floats (h, w): DXT3 (explicit 4 bits), DXT5, A8, A8R8G8B8; 1 for the others"""
+        """one bitmap's first level's alpha as floats (h, w): DXT3 (explicit 4 bits), DXT5, A8, A8R8G8B8 (11); 1 for the others"""
         w, h, fmt, po = info['w'], info['h'], info['fmt'], info['pixoff']
         if fmt == 15:
             n = ((w + 3) // 4) * ((h + 3) // 4)
@@ -79,7 +79,7 @@ class MapFile:
             raw = np.frombuffer(self.full, dtype=np.uint8, count=w * h, offset=po).astype(np.uint32)
             if info['flags'] & 8: raw = unswizzle(raw, w, h)
             return raw.reshape(h, w) / 255.0
-        if fmt in (10, 11):
+        if fmt == 11:
             raw = np.frombuffer(self.full, dtype='<u4', count=w * h, offset=po)
             if info['flags'] & 8: raw = unswizzle(raw.astype(np.uint64), w, h).astype(np.uint32)
             return (raw.reshape(h, w) >> 24).astype(np.float64) / 255

@@ -17,6 +17,7 @@ PS2 status comes first) and [docs/ps2_port_plan.md](docs/ps2_port_plan.md).
 | `tools/ps2/`, `tools/ps2_build.py` | The PS2 tools (map measuring and converting, PCSX2 runners) and the `ninja ps2` build ([tools/ps2/README.md](tools/ps2/README.md)) |
 | `docs/ps2_port_plan.md` | The plan, the memory budget and the phases |
 | `docs/ps2_ee_performance.md` | What the EE does slowly (measured), how to send primitives to the GS cheaply, how to profile in PCSX2 and its quirks: read before writing per-vertex or per-tick code |
+| `docs/ps2_blood_gulch_map.md` | What Blood Gulch's data is (BSP, shaders, bitmap formats, scenery, sky), how the sample draws it on the GS, the video memory and EE budgets, the pitfalls met, and what is not done |
 | `assets/` | Game data for local runs (gitignored) |
 
 ## Building and testing
