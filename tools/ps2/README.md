@@ -26,6 +26,7 @@ repository.
 | `relocation_check.py` | Checks, on each map, that the PS2's tag relocation (`port/linux/game/tag_relocate.c`) knows every pointer in the tags and BSPs: it applies the same rules, then lists every other word that points into them. |
 | `semantics_header.py` | Makes the PS2 build's `halo_msvc_semantics.h` (used by `ninja ps2` and `compile_check.py`). |
 | `unimplemented_stubs.py` | Writes a stub for each function the PS2 build calls and nothing defines yet (used by `ninja ps2`). |
+| `eebench/` | An EE program that prices float operations in cycles (`powf`, software doubles, divides, table lookups, VU-free transforms). Build with `make` in that folder, run with `pcsx2_run.py bench.elf --until "BENCH DONE"`. The results and the rules drawn from them: [docs/ps2_ee_performance.md](../../docs/ps2_ee_performance.md). |
 
 ## Measure the maps
 

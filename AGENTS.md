@@ -16,6 +16,7 @@ PS2 status comes first) and [docs/ps2_port_plan.md](docs/ps2_port_plan.md).
 | `port/ps2/samples/masterchief/` | A stand-alone PS2 sample, not the game's build: it draws the Master Chief running with the assault rifle (EE and GS, gsKit), from assets its exporter bakes out of an Xbox map |
 | `tools/ps2/`, `tools/ps2_build.py` | The PS2 tools (map measuring and converting, PCSX2 runners) and the `ninja ps2` build ([tools/ps2/README.md](tools/ps2/README.md)) |
 | `docs/ps2_port_plan.md` | The plan, the memory budget and the phases |
+| `docs/ps2_ee_performance.md` | What the EE does slowly (measured), how to send primitives to the GS cheaply, how to profile in PCSX2 and its quirks: read before writing per-vertex or per-tick code |
 | `assets/` | Game data for local runs (gitignored) |
 
 ## Building and testing
@@ -39,7 +40,12 @@ that only print):
   never the whole screen, and stop only the process you started.
 - It is time driven, so for a still frame add `EXTRA_CFLAGS="-DDEBUG_SECONDS=1.45f"`
   to `make`; add `-DNO_SPECULAR_PASS` to compare a shading pass with and
-  without it (build both ELFs, capture both).
+  without it (build both ELFs, capture both). Compare stills pixel by pixel
+  (crop the window's title bar first): a change to the shading should move
+  nothing by more than a few levels.
+- `make EXTRA_CFLAGS=-DPROFILE` prints the frame's phases in milliseconds and
+  the frame rate; `tools/ps2/pcsx2_run.py` shows them. The target is one
+  vsync (60 fps, NTSC). `-DNO_VU0` keeps the transforms on the FPU.
 - Video memory is nearly full (two 640x448 32-bit buffers, a 16-bit Z buffer
   and five textures: about 3.8 of 4 MB). Work out what a new texture takes
   before adding it; the rifle's mask is 256x256 for that reason.

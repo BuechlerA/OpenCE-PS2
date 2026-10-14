@@ -15,6 +15,7 @@ Planning. The game does not run on a PS2 yet. This fork contains:
 | Item | Contents |
 | --- | --- |
 | [docs/ps2_port_plan.md](docs/ps2_port_plan.md) | The plan: the hardware gap, the renderer and platform layer, the map converter, the memory budget, the game logic, the phases and their gates, and the risks. |
+| [docs/ps2_ee_performance.md](docs/ps2_ee_performance.md) | Measured costs on the EE (`powf`, doubles, divides, gsKit's per-primitive path), the rules that follow, and how to profile in PCSX2. |
 | [tools/ps2](tools/ps2/README.md) | Tools that measure the Xbox maps for the PS2's memory budget and prototype the map converter. They read the maps and write reports only. |
 
 ## Findings so far

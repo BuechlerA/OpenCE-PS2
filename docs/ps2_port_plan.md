@@ -478,7 +478,10 @@ converted disc fits on a single-layer DVD (4.7 GB).
 ### Game logic: floating point (the largest CPU risk that is easy to fix)
 
 The EE has no double-precision FPU. Each `double` operation is a software
-call that takes tens to hundreds of cycles. The game uses `double` in more
+call that takes tens to hundreds of cycles (measured in PCSX2: a `double`
+add about 320 cycles, a float expression with a `double` literal about
+850, `powf` about 540, against 16 for a divide or a square root; see
+[ps2_ee_performance.md](ps2_ee_performance.md)). The game uses `double` in more
 places than its 144 explicit uses:
 
 - **Implicit promotion.** In C, `float_value * 0.5` is computed in `double`,
@@ -559,7 +562,9 @@ object data into tag definitions (`tag_get`) many times each tick.
   in the emulator.
 - PCSX2 does not emulate the EE's caches or exact cycle timing by default.
   Cache-heavy code runs faster there than on hardware, so PCSX2 profiles
-  are optimistic.
+  are optimistic. It does not time the GS at all, and it ignores PRE on a
+  REGLIST GIF tag. How to profile there, and what its numbers are worth:
+  [ps2_ee_performance.md](ps2_ee_performance.md).
   - Profile with PCSX2's EE cache emulation on (it is slow).
   - Check timing on a real console at each gate. A PS2 that boots homebrew
     (for example with FreeMcBoot) and ps2link over the network adapter is
@@ -869,7 +874,9 @@ texture and geometry streaming from DVD with prefetch.
 
 ### Phase 5: performance (ongoing, 3 or more months)
 
-VU0 macro mode for `matrix_math.c` and `real_math.h`, scratchpad buffers
+VU0 macro mode for `matrix_math.c` and `real_math.h` (the sample's
+skinning in VU0 macro mode takes about a third of the FPU's time:
+[ps2_ee_performance.md](ps2_ee_performance.md)), scratchpad buffers
 for hot loops, data cache layout of hot structures, packet building on the
 scratchpad, the order of AI updates, and per-level caps on particles and
 effects.
