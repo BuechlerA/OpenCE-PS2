@@ -711,23 +711,74 @@ Done so far:
   removing one makes a directory of its name; and there is no
   `ftruncate` (a file is made longer by writing its last byte). In
   PCSX2 the game writes its settings, log and saves, makes the Xbox's six
-  map cache files, finds the maps, allocates its game state and stops in
-  the rasterizer's start: the heap's last 5 MB do not hold the debug
-  drawing's buffers (2 MB, not needed on the PS2). 140 stubs are left.
+  map cache files, finds the maps and allocates its game state.
+- The heap: the debug drawing's buffers are 64 primitives, not 8192
+  (`rasterizer_debug.c`: 2 MB), the AI's debug information is one record
+  of each, shared by the actors and the paths (`ai_debug.h`,
+  `ACTOR_DEBUG_INFO`: 10 MB, which only the debug rendering reads), and
+  the game's threads have 128 KB stacks, not 1 MB (`xbox_kernel.c`).
+- The texture cache's copy buffer: the Xbox copies each map from the DVD
+  to a cache file through a 5 MB buffer stolen from the texture cache,
+  between two 1 MB guard zones of protected pages. On the PS2 the write
+  buffer is 512 KB and there are no guard zones (the PS2 has no page
+  protection), so the copy takes 1.6 MB of the 2 MB cache.
+- The null platform (`port/ps2/src/ps2_null_platform.c`): the 140 stubs
+  are gone. DirectSound fails to start, so the game runs without sound
+  (`sound_dispose_from_old_map` no longer deletes the looping sounds'
+  array when the sound platform never made it valid); Winsock and XNet
+  are down; internet play, voice chat, the PC version's menus and the
+  high-res HUD and text do nothing; and there is no Bink (the game plays
+  no movies). `ps2_input.c` has no gamepad, but for the benchmark's.
+- Atomics: GCC turned `__sync_add_and_fetch_4`'s body, written as
+  `__sync_fetch_and_add_4(...) + value`, back into a call of itself, so
+  any `InterlockedIncrement` whose result the game used (a new thread's
+  id) never returned. Each operation in `ps2_atomic.c` stands alone now.
+- A stack trace on the PS2: the EE's frames do not chain, so the game's
+  stack walk (`stack_walk_windows.c`, used by every assertion) scans the
+  stack for return addresses after a `JAL` or `JALR`. It lists call sites
+  innermost first, with stale ones among them; `addr2line` names them
+  (`mips64r5900el-ps2-elf-addr2line -f -e build/ps2/halo.elf`).
+- The benchmark (`ps2_bench.c`, `tools/ps2/pcsx2_bench.py`,
+  `debug.bench_map`): from the main menu the game loads a level, plays it
+  with a scripted player (the Linux build's `debug.test_input` "bot"
+  pattern, by game time) and logs the time of its simulation ticks every
+  150 ticks, and the totals at the end.
+
+Measured in PCSX2 (`pcsx2_bench.py`, 300 to 600 ticks, one local player
+and no AI; the EE's cycle counter, which in PCSX2 counts emulated cycles
+only, so it leaves out the caches' and the memory's waits and reads low):
+
+| Level | Average tick | Longest | Ticks over 15 ms |
+| --- | --- | --- | --- |
+| bloodgulch | 14.95 ms | 36.9 ms | 94 of 300 |
+| sidewinder | 14.48 ms | 26.2 ms | 121 of 600 |
+| damnation | 6.13 ms | 29.2 ms | 9 of 600 |
+| wizard | 6.19 ms | 28.5 ms | 3 of 300 |
+
+Bloodgulch and sidewinder, the two largest outdoor levels, already take the
+whole 15 ms on emulated cycles with nothing in them to fight. Phase 5
+starts there (VU0 for the matrix maths, the scratchpad for the hot loops).
 
 Still to do:
 
-- The heap: the debug drawing's buffers and other allocations the PS2
-  does not need, until the game's start fits.
+- A campaign level. Their tag data is 21 to 22 MB on the Xbox (14.4 MB
+  after the converter's reductions, Phase 2), and the tag cache is 9 MB,
+  which holds `sidewinder`'s (8.92 MB): `b30` stops at "the cache file is
+  damaged" on its 15.7 MB of tag data. A 14.4 MB cache needs 5.4 MB the
+  map has not got: the null Direct3D's back and depth buffers (2.4 MB)
+  go once nothing reads them, and the rest comes from the code (the ELF
+  has 3.5 MB of it and 5.6 MB of `.bss`) and from the game state's pools.
+- The textures: 2 MB of texture cache holds a few of a level's textures,
+  so the rest are the default one and `debug.txt` says "YOU GOT STABBED"
+  every ten seconds. The renderer's own texture memory replaces this
+  (Phase 3).
 - Maps without the cache files: the Xbox decompresses each map from the
   DVD to its hard disk (`cache_files_windows.c`, six files of 730 MB in
   all). A retail PS2 has no disk, so the PS2 reads the converter's
   maps, already decompressed, straight from the disc. In PCSX2 for now
-  the cache files are on `host:`.
-- A first converter that only relocates the tag data. Test it on Linux
-  first.
-- A null rasterizer and a null sound backend. Load a campaign level,
-  replay recorded input (or a saved film), and log the tick times.
+  the cache files are on `host:`, and the copy works as the Xbox's does.
+- The same benchmark on a real PS2, and the plan for the worst cases
+  (Gate 1, below). Replaying a saved film instead of the scripted player.
 
 **Gate 1:** on a real PS2, a typical campaign tick takes 15 ms or less,
 with a clear plan for the worst cases (large AI fights, many effects).

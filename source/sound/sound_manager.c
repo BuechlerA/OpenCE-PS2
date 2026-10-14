@@ -3256,7 +3256,9 @@ void sound_dispose_from_old_map(
 	}
 
 	sound_stop_all();
-	if (looping_sound_data)
+	/* port: the looping sounds are made valid only once the sound platform has
+	started; the PS2 has none yet (ps2_null_platform.c) */
+	if (looping_sound_data && sound_manager_globals.initialized)
 	{
 		data_delete_all(looping_sound_data);
 	}

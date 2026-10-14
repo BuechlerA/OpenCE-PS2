@@ -74,7 +74,13 @@ symbols in this file:
 
 enum
 {
+#ifdef HALO_PS2
+	/* port: the debug drawing's three buffers took 2 MB of the PS2's heap, and
+	   a null rasterizer draws none of it; overflowing them only warns */
+	MAXIMUM_DEBUG_PRIMITIVES = 64,
+#else
 	MAXIMUM_DEBUG_PRIMITIVES = 8192,
+#endif
 	MAXIMUM_VERTICES_PER_DEBUG_PRIMITIVE = 3
 };
 

@@ -25,7 +25,12 @@ enum
 	MAXIMUM_AI_DEBUG_LINEOFSIGHT_POINTS = 16384,
 	MAXIMUM_AI_DEBUG_LINEOFSIGHT_PAIRS = 8192,
 	NUMBER_OF_AI_DEBUG_ACTOR_RECORDS = 512,
+#ifdef HALO_PS2
+	/* port: one (see ACTOR_DEBUG_INFO) */
+	MAXIMUM_AI_DEBUG_PATH_STORAGE = 1,
+#else
 	MAXIMUM_AI_DEBUG_PATH_STORAGE = 32,
+#endif
 };
 
 enum
@@ -612,6 +617,19 @@ void ai_debug_speak(
 extern struct ai_debug_state ai_debug;
 extern struct actor_debug_info *actor_debug_array;
 extern struct path_debug_storage *actor_path_debug_array;
+
+#ifdef HALO_PS2
+/* port: the debug information is 26 KB an actor and 117 KB a path (10 MB of
+the PS2's 32), and only the debug rendering reads it, which the PS2 does
+not have. The actors share one record, and the paths one. */
+#define AI_DEBUG_ACTOR_COUNT 1
+#define AI_DEBUG_PATH_COUNT 1
+#define ACTOR_DEBUG_INFO(actor_index) (&actor_debug_array[0])
+#else
+#define AI_DEBUG_ACTOR_COUNT MAXIMUM_NUMBER_OF_ACTORS
+#define AI_DEBUG_PATH_COUNT MAXIMUM_NUMBER_OF_ACTOR_PATHS
+#define ACTOR_DEBUG_INFO(actor_index) (&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)])
+#endif
 
 
 extern real_point3d global_ai_debug_drawstack_next_position;

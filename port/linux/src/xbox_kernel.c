@@ -555,8 +555,13 @@ HANDLE WINAPI CreateThread(LPSECURITY_ATTRIBUTES attributes, DWORD stack_size,
 
 	pthread_attr_init(&thread_attributes);
 	pthread_attr_setdetachstate(&thread_attributes, PTHREAD_CREATE_DETACHED);
-	/* Xbox stacks are small; give the host a comfortable minimum */
+	/* Xbox stacks are small; give the host a comfortable minimum (the PS2's
+	32 MB cannot spare 1 MB for each of the game's three threads) */
+#ifdef HALO_PS2
+	pthread_attr_setstacksize(&thread_attributes, stack_size > 0x20000 ? stack_size : 0x20000);
+#else
 	pthread_attr_setstacksize(&thread_attributes, stack_size > 0x100000 ? stack_size : 0x100000);
+#endif
 	if (pthread_create(&thread->thread, &thread_attributes, thread_main, thread) != 0)
 	{
 		pthread_attr_destroy(&thread_attributes);

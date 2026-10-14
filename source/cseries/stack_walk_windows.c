@@ -346,6 +346,9 @@ void stack_walk_with_context(
 			/* the call site (the BL before the return address), for
 			llvm-symbolizer --obj=build/android/halo_guest.elf */
 			unsigned long routine_address = routine_addresses[frame_number] - 4;
+#elif defined(HALO_PS2)
+			/* the call (JAL, then its delay slot), for addr2line */
+			unsigned long routine_address = routine_addresses[frame_number] - 8;
 #else
 			unsigned long routine_address = routine_addresses[frame_number] + *(long *)(routine_addresses[frame_number] - sizeof(long));
 #endif
@@ -831,6 +834,33 @@ static void walk_stack(
 {
 	unsigned long level;
 
+#ifdef HALO_PS2
+	/* port: the EE's frames do not chain, so the stack is scanned for words
+	that return to the instruction after a call (JAL or JALR and its delay
+	slot) in the program's code (0x100000 on): the call sites, innermost
+	first, for addr2line */
+	unsigned long *word = (unsigned long *)__builtin_frame_address(0);
+	unsigned long *top = word + 0x4000;
+
+	(void)ignore_levels;
+	for (level = 0; word < top && level < number_of_levels; word++)
+	{
+		unsigned long address = *word;
+
+		if (address > 0x100008 && address < 0x800000 && !(address & 3))
+		{
+			unsigned long call = ((unsigned long *)address)[-2];
+
+			if ((call >> 26) == 3 || ((call >> 26) == 0 && (call & 0x3F) == 9))
+			{
+				routine_addresses[level++] = address;
+			}
+		}
+	}
+
+	*levels_dumped = level;
+	return;
+#else
 	walk_up_current_frame = (unsigned long)__builtin_frame_address(0);
 	old_ebp = (unsigned long *)walk_up_current_frame;
 
@@ -858,4 +888,5 @@ static void walk_stack(
 
 	*levels_dumped = level;
 	return;
+#endif
 }

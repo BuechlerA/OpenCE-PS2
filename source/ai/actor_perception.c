@@ -2510,8 +2510,7 @@ short actor_visibility_at_point(
 perception_factor_ready:
 				{
 					struct actor_debug_info *debug =
-						&actor_debug_array[
-							DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+						ACTOR_DEBUG_INFO(actor_index);
 
 					if (target_is_player)
 					{
@@ -2692,8 +2691,7 @@ short actor_audibility_at_point(
 
 		{
 			struct actor_debug_info *debug =
-				&actor_debug_array[
-					DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+				ACTOR_DEBUG_INFO(actor_index);
 
 			debug->field_A8 = maximum_distance;
 			debug->field_A4 = TRUE;
@@ -6518,7 +6516,7 @@ void actor_perception_update(
 
 		case _prop_state_becoming_acknowledged:
 			{
-				struct actor_debug_info *debug = &actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+				struct actor_debug_info *debug = ACTOR_DEBUG_INFO(actor_index);
 
 				if (prop->perception == _actor_perception_none)
 				{
