@@ -53,6 +53,7 @@ PRIMARY_DETAIL, SECONDARY_DETAIL, MICRO_DETAIL = 0xB4, 0xD4, 0xF8   # ... and ea
 DETAIL_SIZE = int(os.environ.get('DETAIL_SIZE', 128))
 SCENERY_SIZE = int(os.environ.get('SCENERY_SIZE', 64))      # a scenery base map's longest side, at most
 GROUND_SIZE = int(os.environ.get('GROUND_SIZE', 256))
+CLIFF_SIZE = os.environ.get('CLIFF_SIZE', '128x256')      # 'WxH': the cliff's base map; 'source' keeps the map's own 256x512 (saves 131 KB of video memory at 128x256)
 SUN = None
 EMBOSS_LIGHT = (-0.45, -0.45, 0.77)       # in the bump map's tangent space
 EMBOSS_GAIN = float(os.environ.get('EMBOSS_GAIN', 2.4))
@@ -400,6 +401,8 @@ def main():
             while max(w, h) > cap: w //= 2; h //= 2
         elif name.endswith('blood ground'):
             while max(w, h) > GROUND_SIZE: w //= 2; h //= 2
+        elif name.endswith('blood cliff rock') and CLIFF_SIZE != 'source':
+            w, h = (int(n) for n in CLIFF_SIZE.lower().split('x'))
         elif uses[name] < BIG_TRIANGLES and max(w, h) > 256:
             k = max(w, h) // 256; w //= k; h //= k
         w, h = max(w, 16), max(h, 16)

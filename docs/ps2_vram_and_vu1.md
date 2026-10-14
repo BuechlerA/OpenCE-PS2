@@ -82,7 +82,8 @@ for; `tools/mip_audit.py` turns that into `tools/mip_floor.json` and `export_map
 - It saves 469 KB at 640 wide and 433 KB at 512 (the guard band reaches different vertices). The ground,
   the cliff and every texture near the camera keep their chains; what loses levels are the metal of the
   two bases and a few scenery maps, which the orbit never gets near.
-- The audit counts every vertex that reaches the GS, including those in the 1,400-pixel guard band, so it
+- The audit counts every vertex that reaches the GS, including those in the guard band (1,400 pixels when the audit was
+  run, 64 now: the table is conservative for the narrower band, and the levels it keeps are a superset), so it
   errs toward keeping a level.
 - **Sample-specific.** It describes one camera path. A free camera or a Chief somewhere else needs the audit
   run again or `MIP_FLOOR=0` (every level). The real game streams its textures and will not have a table.
@@ -221,6 +222,61 @@ the colour bytes agree with the FPU function to a mean of 0.05 levels, worst 1 o
     vertex's later slots are spread through the mesh whatever the order. Reverted.
   The next real saving for the Chief is not here: his EE share is now about 0.8 ms of the 9.4.
 
+## 7. The guard band, and detail passes that have faded out
+
+Measured in PCSX2 on the same profile as the rest of this file (EE busy, mean over the orbit); the GS numbers come
+from the triangles a frame sends, since PCSX2 does not time the GS.
+
+**The guard band was the biggest cost left.** `CLIP_MARGIN` (how far off the screen a triangle may reach before it is clipped)
+was 1,400 pixels, and the chunk-visibility test uses the same planes, so the frame processed and sent everything within 1,400
+pixels of the screen: 47 times the screen's area (3,312 by 3,248 pixels for a 512 by 448 screen).
+
+| `CLIP_MARGIN` | EE busy | Chunks in view | Vertices processed | Triangles sent |
+| --- | --- | --- | --- | --- |
+| 1,400 (before) | 10.04 ms | 52 | 2,073 | 2,969 |
+| 256 | 8.15 | 34 | 1,135 | 2,188 |
+| 128 | 7.46 | 28 | 913 | 1,895 |
+| **64 (now)** | **7.01** | 26 | 778 | 1,701 |
+
+The triangles the clipper cuts did not change (about 154 a frame, 1.0 ms: skipping the clip gives 6.02 ms). The picture: stills at
+0.6, 2.6 and 3.4 s differ from the 1,400 build by 0.13 to 0.28/255 on average, one step of the 16-bit buffer's dither on 0.3 to 0.7%
+of the ground's pixels (the clipped triangles interpolate a little differently); the cliffs, sky and Chief are identical, and the
+same build captured twice differs by exactly 0. On the GS, modelling the post-cull triangles (mean 5,269 px^2 against a median of 24)
+gives about 47 Mpixel a frame rasterised at 1,400 pixels (all passes) against 1.4 Mpixel that land on the screen, and about 2 to 3 at 64
+to 128. Whether the GS rejects off-screen pixels cheaply was not measured (no hardware): if it does not, this is the difference
+between 60 fps on a console and not.
+
+**Detail and bump passes where the map is flat.** A detail map's last mip level is its average, so where a pixel's level
+(log2 z + K / 16) reaches it the pass only multiplies by a constant (the grey / 128: 0.93 to 1.81 for these maps). `draw_map` now
+lays each span's triangles out nearest chunk first, leaves a detail or bump pass out for the chunks whose nearest depth is past
+where it flattens (`flat_z`, from the same K the TEX1 setting uses, plus 0.15 of a level) and multiplies their vertex colours by the
+constant instead (`flat_scale`, `scale_colour`: red and blue in one multiply, which needs the channels at 128 or under, so a span
+with a brighter vertex, as scenery has, keeps its passes). Each pass draws a prefix of the span.
+
+| | |
+| --- | --- |
+| Detail and bump vertices sent | 45% fewer (3,356 of 6,071 a frame) |
+| Their pixels (`-DPROFILE_AREA`) | **17.9% fewer** (865 of 1,053 Kpx a frame); the per-pixel model said 28%, a chunk's bounding sphere is coarser |
+| EE busy | 7.01 -> 7.20 ms (+0.19: sorting the chunks and scaling the colours; the pass packets are 0.13 ms cheaper) |
+| Picture | 2.6 and 3.4 s: 0.012 and 0.000/255 from step 1; 0.6 s (the far cliff wall): 1.2/255, a 1% brightening (+1.0, +3.2, +1.8 of 255 in R, G, B) from not truncating in the 16-bit buffer once per pass; no seams |
+
+With the VU0 specular colours of section 6 (measured before it, these steps are 10.02 -> 7.20 ms; it alone takes the Chief's EE share from 1.5 to
+0.85 ms), the whole frame is **6.54 ms** of EE mean over the orbit, the worst window 8.50, 60 fps.
+
+Not worth it, measured at 64 pixels (EE ms each pass costs: detail 0.31, lightmap 0.11, bump 0.05, reflection 0.01, fog 0.27, VU0
+0.9 ms saved): the passes are cheap for the EE; what they cost is the GS's fill.
+
+## 8. The cliff's base map at 128x256
+
+The cliff (1,342 triangles) had the map's own 256x512 base map, 175 KB with its chain. It is 128x256 now (`CLIFF_SIZE`, in the
+exporter: `source` restores the original), which takes the video memory from 2,434,816 to **2,303,744** bytes (free 1,759,488 ->
+**1,890,560**, 131 KB). Compared with the 256x512 build at three camera angles: close up the pictures are nearly the same (mean difference
+1.8 and 2.8/255, the cliff's fine detail energy 99 to 100% of the original: the grain comes from the detail passes, not the base
+map); the base map's colour is a little softer, and the far cliff wall differs by 1.2/255. 256x256 (98 KB) was tried and rejected: only
+the vertical axis is halved, so the level of detail the GS picks (from the geometric mean of the sides) lands half a level sharper
+than the 256x512 map would, and the far wall comes out blotchier (6.7/255) than the smaller 128x256 map, which halves both axes and keeps
+the texel to pixel ratio.
+
 ## Pitfalls (each cost real time)
 
 - **PCSX2 needs an absolute path for `-elf`** (it logs "Failed to read ELF" for a relative one, boots to
@@ -271,6 +327,6 @@ python3 tools/gen_spec_vu0.py > src/spec_vu0.h
 ```
 
 Switches: `NO_VU0_SPEC`, `SPEC_CHECK`, `NO_FOG`, `FOG_EXACT_PASS`, `FOG_HAZE_GAIN=0.5f`, `SCREEN_WIDTH`, `NO_CHIEF_VU1` (make variable),
-`MIP_FLOOR=0` (exporter), `DETAIL_SIZE`, `RIFLE_TEX_SIZE`, `MASK_TEX_SIZE`, `DISPLAY_TEX_SIZE`,
+`CLIP_MARGIN` (default 64), `PROFILE_AREA` (with `PROFILE`: the pixels the detail passes draw), `MIP_FLOOR=0` (exporter), `CLIFF_SIZE`, `DETAIL_SIZE`, `RIFLE_TEX_SIZE`, `MASK_TEX_SIZE`, `DISPLAY_TEX_SIZE`,
 `BASE_TEX_SIZE` (exporters). Compare stills pixel by pixel after cropping the window's content area: a
 change that is meant to move nothing should move less than 0.01/255 on average.

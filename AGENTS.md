@@ -70,8 +70,8 @@ that only print):
   buffers with dithering (displayed at 640 wide: two focal lengths), a 16-bit
   Z buffer, the Chief's five textures (base map 256, rifle 128, masks 128 and
   4-bit, ammo display 32) and the map's, with the mip levels the camera's orbit
-  never reads left out (`tools/mip_floor.json`): 2.43 of 4.19 MB, 1.76 MB
-  spare. The sample prints what it allocated at start-up (`VRAM: ...`) and
+  never reads left out (`tools/mip_floor.json`), the cliff's base map at
+  128x256: 2.30 of 4.19 MB, 1.89 MB spare. The sample prints what it allocated at start-up (`VRAM: ...`) and
   stops if a texture did not fit (gsKit's failed allocation is address 0, the
   frame buffer, and the texture would draw from it). Work out what a new
   texture takes before adding it; masks and other greys go in 4-bit. The
@@ -102,7 +102,9 @@ that only print):
   before the sample forces NTSC: set `gs->Height` with `gs->Mode`.
 - GS coordinates are 12.4 fixed point in 16 bits around an origin gsKit puts
   at the screen's corner: a vertex further than 2048 pixels from it wraps. The
-  map clips at 1400 pixels outside the screen.
+  map clips at 64 pixels outside the screen: that margin also decides which chunks and triangles are processed and sent to the
+  GS, so a wide one costs EE time (1,400 pixels: 3 ms) and GS fill
+  ([docs/ps2_vram_and_vu1.md](docs/ps2_vram_and_vu1.md)); never go over 1,400.
 
 ## Rules
 

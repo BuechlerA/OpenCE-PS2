@@ -762,11 +762,21 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 #ifndef NO_MAP
 /* ---------- the map: static geometry drawn as one Gouraud mesh ---------- */
 
-/* The camera stands inside the map, so triangles cross the near plane and run far off the screen. The
-   GS's coordinates reach 2048 pixels from the screen's corner, so a triangle with a vertex behind the
-   near plane or beyond CLIP_MARGIN pixels outside the screen is clipped against those five planes in
-   view space (Sutherland-Hodgman) before projection; the rest go straight through. */
-#define CLIP_MARGIN 1400.f      /* the GS's coordinates are 2048 pixels either side of its origin, which gsKit puts at the screen's corner */
+/* The camera stands inside the map, so triangles cross the near plane and run far off the screen. A
+   triangle with a vertex behind the near plane or beyond CLIP_MARGIN pixels outside the screen is clipped
+   against those five planes in view space (Sutherland-Hodgman) before projection; the rest go straight
+   through. The same planes cull the chunks.
+
+   The margin is the GS's guard band, but it does more than keep coordinates in range (2048 pixels either
+   side of the origin, which gsKit puts at the screen's corner: a margin over 1,400 wraps). It is also how far
+   off the screen a chunk or a triangle still counts as in view, and everything inside it is processed, packed
+   and sent to the GS, which rasterises the off-screen part of every triangle before its scissor throws the
+   pixels away. At 1,400 pixels the view held 52 of 152 chunks and 2,969 triangles a frame; at 64 it holds 26
+   and 1,701 (EE busy 10.0 -> 7.0 ms), the clipped triangles are as many as before (about 150), and the
+   picture moves by one step of the 16-bit dither on a fraction of a percent of the ground's pixels. */
+#ifndef CLIP_MARGIN
+#define CLIP_MARGIN 64.f
+#endif
 #define CLIP_PLANES 5
 #define CLIP_MAX 8                  /* a triangle gains at most one vertex a plane */
 #define ATTRS 7                     /* what a vertex carries through the clip: r, g, b, u, v and the lightmap's u, v */
@@ -796,6 +806,21 @@ static mapv map_out[MAP_TRIS * 3 + 4096] __attribute__((aligned(64)));
 static texture map_tex[MAP_TEXTURES], map_detail_tex[MAP_DETAILS], map_lm_tex[MAP_LIGHTMAPS];
 static int span_first[MAP_SPANS], span_verts[MAP_SPANS];   /* each span's vertices in map_out */
 static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2], lod_k_bump[MAP_TEXTURES];   /* each pass's K for TEX1 (see map_lod_setup) */
+
+/* A detail or bump map is a grey texture whose last mip level is its average, so once a pixel is deep enough (its level,
+   log2 (z) + K / 16, reaches the last one) the pass only multiplies the picture by a constant. Past the depth flat_z
+   (a base map's passes: the first detail map, the second, the bump map) the GS has nothing to gain from the pass: a
+   chunk wholly beyond it leaves the pass out and multiplies its vertex colours by the constant instead (flat_scale, 8.8
+   fixed point, 256 is 1). A span's triangles are laid out nearest chunk first so that each pass draws a prefix of them,
+   span_pass_verts vertices. FLAT_LOD_MARGIN (in levels) keeps a chunk's nearest pixel clear of the transition. */
+#define FLAT_LOD_MARGIN 0.15f
+#define FLAT_PASSES 3
+static float chunk_znear[MAP_CHUNKS];                       /* the nearest depth a chunk's bounding sphere reaches */
+static float flat_z[MAP_TEXTURES][FLAT_PASSES];
+static unsigned flat_scale[MAP_TEXTURES][FLAT_PASSES];
+static int span_pass_verts[MAP_SPANS][FLAT_PASSES];         /* the vertices of a span each of its detail passes draws */
+static int batch_order[MAP_BATCHES];
+static unsigned char span_flat_ok[MAP_SPANS];              /* a span whose vertex colours allow the passes to be left out (map_lod_setup) */
 #ifdef MIP_AUDIT
 /* -DMIP_AUDIT: which mip levels does the orbit ever sample? The level is log2 (z) + K / 16 (z the depth of the pixel),
    so a texture whose lowest requested level is N never reads the N levels above it, and they can be left out of
@@ -814,7 +839,7 @@ static vec4 vu_const[4], vu_out[4];
 static float vu_band_x0, vu_band_x1, vu_band_y0, vu_band_y1;   /* the guard band, in the VU's shifted screen coordinates */
 #endif
 #ifdef PROFILE
-static u32 prof_map_clipped, prof_map_vertices, prof_map_chunks, prof_clip_near, prof_clip_side;
+static u32 prof_map_clipped, prof_map_vertices, prof_map_chunks, prof_clip_near, prof_clip_side, prof_detail_full, prof_detail_sent;
 #endif
 
 static void clip_setup(const GSGLOBAL *gs)
@@ -970,6 +995,27 @@ static inline float screen_area(const mvert *a, const mvert *b, const mvert *c)
 	return (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y);
 }
 
+#ifdef PROFILE_AREA
+/* the pixels a run of a span's triangles covers, from their packed XYZ2 (12.4 fixed point; the band is small, so unclipped) */
+static float prof_area(const mapv *v, int n)
+{
+	float sum = 0.f;
+	int i;
+
+	for (i = 0; i + 2 < n; i += 3)
+	{
+		float ax = (float)(int)(v[i].xyz2 & 0xFFFF), ay = (float)(int)((v[i].xyz2 >> 16) & 0xFFFF);
+		float bx = (float)(int)(v[i + 1].xyz2 & 0xFFFF), by = (float)(int)((v[i + 1].xyz2 >> 16) & 0xFFFF);
+		float cx = (float)(int)(v[i + 2].xyz2 & 0xFFFF), cy = (float)(int)((v[i + 2].xyz2 >> 16) & 0xFFFF);
+		float a = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+
+		sum += (a < 0.f ? -a : a) * (0.5f / 256.f);
+	}
+	return sum;
+}
+static float prof_area_full, prof_area_sent;
+#endif
+
 enum { PASS_BASE, PASS_LIGHTMAP, PASS_DETAIL0, PASS_DETAIL1, PASS_BUMP, PASS_REFLECTION, PASS_COUNT };
 
 static void set_clamp_repeat(GSGLOBAL *gs)
@@ -1001,6 +1047,16 @@ static inline void copy_record(mapv *dst, const mapv *src)
 	const u128 *sr = (const u128 *)src;
 
 	d[0] = sr[0]; d[1] = sr[1]; d[2] = sr[2]; d[3] = sr[3];
+}
+
+/* a record's vertex colour (r, g, b: 128 is 1) times fs / 256. Red and blue go through one multiply, a lane each (the lanes
+   do not carry into one another while a channel is at most 128 and fs under 512: map_lod_setup checks the channels of the
+   vertices that use it), so the scale costs about ten instructions a record. */
+static inline void scale_colour(mapv *r, unsigned fs)
+{
+	u32 c = (u32)r->rgbaq, rb = ((c & 0x00FF00FFu) * fs >> 8) & 0x00FF00FFu, g = (((c >> 8) & 0xFFu) * fs >> 8 & 0xFFu) << 8;
+
+	r->rgbaq = (r->rgbaq & ~0x00FFFFFFull) | rb | g;
 }
 
 /* a pass over a span's vertices: each record's one ST (or, for the reflection, its colour as RGBAQ), its RGBAQ and its
@@ -1253,6 +1309,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 			if (plane_dist(pl, v) < -r * clip_length[pl]) { vis = 0; break; }
 		if (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > reach * reach) vis = 0;      /* beyond what it is worth drawing */
 		chunk_visible[c] = (unsigned char)vis;
+		chunk_znear[c] = v[2] - r;
 #ifdef PROFILE
 		prof_map_chunks += vis;
 #endif
@@ -1264,12 +1321,37 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 		int tex = map_spans[sp * 6], ts = tex < 0 ? MAP_TEXTURES : tex;
 		const int two_sided = tex >= 0 && map_tex[tex].alpha;          /* foliage is seen from both sides */
 
-		span_first[sp] = n;
-		for (b = map_spans[sp * 6 + 4]; b < map_spans[sp * 6 + 4] + map_spans[sp * 6 + 5]; b++)
-		{
-			int first = map_batches[b * 3 + 1], count = map_batches[b * 3 + 2];
+		int nb = 0, k, p;
 
-			if (!chunk_visible[map_batches[b * 3]]) continue;
+		span_first[sp] = n;
+		for (p = 0; p < FLAT_PASSES; p++) span_pass_verts[sp][p] = -1;
+		for (b = map_spans[sp * 6 + 4]; b < map_spans[sp * 6 + 4] + map_spans[sp * 6 + 5]; b++)     /* the chunks in view, nearest first */
+		{
+			int c = map_batches[b * 3];
+
+			if (!chunk_visible[c]) continue;
+			for (k = nb++; k > 0 && chunk_znear[map_batches[batch_order[k - 1] * 3]] > chunk_znear[c]; k--) batch_order[k] = batch_order[k - 1];
+			batch_order[k] = b;
+		}
+		for (k = 0; k < nb; k++)
+		{
+			int first, count;
+			unsigned fs = 256;                                    /* the colour scale of the passes this chunk is too far for */
+
+			b = batch_order[k];
+			first = map_batches[b * 3 + 1]; count = map_batches[b * 3 + 2];
+			if (tex >= 0 && span_flat_ok[sp])
+			{
+				const float zn = chunk_znear[map_batches[b * 3]];
+
+				for (p = 0; p < FLAT_PASSES; p++)
+					if (zn >= flat_z[tex][p])
+					{
+						if (span_pass_verts[sp][p] < 0) span_pass_verts[sp][p] = n - span_first[sp];
+						fs = fs * flat_scale[tex][p] >> 8;
+					}
+				if (fs > 511) fs = 511;
+			}
 			for (i = first; i < first + count; i++)
 			{
 				unsigned short ia, ib, ic;
@@ -1297,6 +1379,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 					if (two_sided ? fabsf(area) < 0.01f : area * CULL_SIGN <= 0.f) continue;
 					if (n + 3 > cap) break;
 					copy_record(&map_out[n++], &va->m); copy_record(&map_out[n++], &vb->m); copy_record(&map_out[n++], &vc->m);
+					if (fs != 256) scale_colour(&map_out[n - 3], fs), scale_colour(&map_out[n - 2], fs), scale_colour(&map_out[n - 1], fs);
 				}
 				else
 				{
@@ -1324,6 +1407,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 						if (two_sided ? fabsf(area) < 0.01f : area * CULL_SIGN <= 0.f) continue;
 						if (n + 3 > cap) break;
 						copy_record(&map_out[n++], &sv[0].m); copy_record(&map_out[n++], &sv[k].m); copy_record(&map_out[n++], &sv[k + 1].m);
+						if (fs != 256) scale_colour(&map_out[n - 3], fs), scale_colour(&map_out[n - 2], fs), scale_colour(&map_out[n - 1], fs);
 					}
 #ifdef PROFILE
 					prof_map_clipped++;
@@ -1332,6 +1416,8 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 			}
 		}
 		span_verts[sp] = n - span_first[sp];
+		for (p = 0; p < FLAT_PASSES; p++)
+			if (span_pass_verts[sp][p] < 0) span_pass_verts[sp][p] = span_verts[sp];
 #ifdef PROFILE
 		prof_tris += span_verts[sp] / 3;
 #endif
@@ -1397,10 +1483,28 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 			map_blend_begin(gs);
 			for (d = 0; d < 2; d++)
 				if (map_detail_of[tex].detail[d] >= 0)
-					send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[d]], PASS_DETAIL0 + d, lod_k_detail[tex][d], v, span_verts[sp]);
+				{
+#ifdef PROFILE
+					prof_detail_full += span_verts[sp]; prof_detail_sent += span_pass_verts[sp][d];
+#ifdef PROFILE_AREA
+					prof_area_full += prof_area(v, span_verts[sp]); prof_area_sent += prof_area(v, span_pass_verts[sp][d]);
+#endif
+#endif
+					if (span_pass_verts[sp][d])
+						send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[d]], PASS_DETAIL0 + d, lod_k_detail[tex][d], v, span_pass_verts[sp][d]);
+				}
 #ifndef NO_BUMP_PASS
 			if (map_detail_of[tex].detail[2] >= 0)
-				send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[2]], PASS_BUMP, lod_k_bump[tex], v, span_verts[sp]);
+			{
+#ifdef PROFILE
+				prof_detail_full += span_verts[sp]; prof_detail_sent += span_pass_verts[sp][2];
+#ifdef PROFILE_AREA
+				prof_area_full += prof_area(v, span_verts[sp]); prof_area_sent += prof_area(v, span_pass_verts[sp][2]);
+#endif
+#endif
+				if (span_pass_verts[sp][2])
+					send_map_pass(gs, &map_detail_tex[map_detail_of[tex].detail[2]], PASS_BUMP, lod_k_bump[tex], v, span_pass_verts[sp][2]);
+			}
 #endif
 			map_blend_end(gs);
 		}
@@ -1495,6 +1599,34 @@ static void map_lod_setup(void)
 			lod_k_detail[t][d] = id < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[id].width, map_detail_of[t].scale[d]);
 		}
 		lod_k_bump[t] = map_detail_of[t].detail[2] < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[map_detail_of[t].detail[2]].width, map_detail_of[t].scale[2]);
+		for (d = 0; d < FLAT_PASSES; d++)            /* where a detail map's passes reach its last level, the average: the depth, and what it multiplies by */
+		{
+			int id = map_detail_of[t].detail[d];
+			const map_gray_texture *g = id < 0 ? NULL : &map_details[id];
+			int l, size = 0;
+
+			flat_z[t][d] = 1e30f;
+			flat_scale[t][d] = 256;
+			if (!g || g->levels < 2) continue;
+			for (l = 0; l < g->levels; l++) size += (g->width >> l) * (g->height >> l);
+			flat_z[t][d] = exp2f((float)(g->levels - 1) - (d < 2 ? lod_k_detail[t][d] : lod_k_bump[t]) / 16.f + FLAT_LOD_MARGIN);
+			flat_scale[t][d] = g->pixels[size - 1] * 2u;      /* the palette's alpha is the grey, and 128 is 1 */
+		}
+	}
+	/* scale_colour's lanes need every channel of a vertex that gets the scale at 128 or under (the exporter's hue); a span with a
+	   brighter one (scenery's lit colours reach 255, and some of it shares a base map with the BSP) keeps all its passes */
+	for (i = 0; i < MAP_SPANS; i++)
+	{
+		int tex = map_spans[i * 6], tri;
+
+		span_flat_ok[i] = tex >= 0;
+		for (tri = map_spans[i * 6 + 2]; tex >= 0 && tri < map_spans[i * 6 + 2] + map_spans[i * 6 + 3]; tri++)
+			for (d = 0; d < 3; d++)
+			{
+				const unsigned char *c = &map_color[map_tri[tri * 3 + d] * 4];
+
+				if (c[0] > 128 || c[1] > 128 || c[2] > 128) span_flat_ok[i] = 0;
+			}
 	}
 }
 
@@ -2572,6 +2704,13 @@ int main(void)
 			printf("PROFILE   map: %u of %d chunks in view, %u vertices processed, %u triangles clipped a frame\n",
 				prof_map_chunks / frames, MAP_CHUNKS, prof_map_vertices / frames, prof_map_clipped / frames);
 			printf("PROFILE   clipped: %u by the near plane, %u by the guard band\n", prof_clip_near / frames, prof_clip_side / frames);
+			printf("PROFILE   detail and bump passes: %u of %u vertices a frame sent (%u%% left out)\n", prof_detail_sent / frames, prof_detail_full / frames,
+				prof_detail_full ? (unsigned)(100 - 100 * (unsigned long long)prof_detail_sent / prof_detail_full) : 0u);
+#ifdef PROFILE_AREA
+			printf("PROFILE   detail and bump pixels: %.0f of %.0f Kpx a frame drawn\n", prof_area_sent / frames / 1000.f, prof_area_full / frames / 1000.f);
+			prof_area_full = prof_area_sent = 0.f;
+#endif
+			prof_detail_full = prof_detail_sent = 0;
 			prof_clip_near = prof_clip_side = 0;
 			prof_map_clipped = prof_map_vertices = prof_map_chunks = 0;
 #endif
