@@ -22,6 +22,7 @@ fork's `main`.
 | `tools/ps2/`, `tools/ps2_build.py` | The PS2 tools (map measuring and converting, PCSX2 runners) and the `ninja ps2` build ([tools/ps2/README.md](tools/ps2/README.md)) |
 | `docs/ps2_port_plan.md` | The plan, the memory budget and the phases |
 | `docs/ps2_ee_performance.md` | What the EE does slowly (measured), how to send primitives to the GS cheaply, how to profile in PCSX2 and its quirks: read before writing per-vertex or per-tick code |
+| `docs/ps2_first_person_controller.md` | The sample's first-person controller (the DualShock walks the player on Blood Gulch): what is ported from which file of `source/`, the buttons, the walking collision, what is not ported, how to check it: read before touching `fp_controller.c`, `pad.c` or the exporter's collision grid |
 | `docs/ps2_blood_gulch_map.md` | What Blood Gulch's data is (BSP, shaders, bitmap formats, scenery, sky), how the sample draws it on the GS, the video memory and EE budgets, the pitfalls met, and what is not done |
 | `docs/ps2_vram_and_vu1.md` | Where the sample's video memory goes (measured), the savings and what each cost visually, the mip audit, 512-wide buffers, the GS's fog, the Chief on VU1, what was tried and rejected, and the pitfalls (VIF codes, VU1 flags, PCSX2 capture): read before touching textures, the frame buffers, the GIF paths or VU1 |
 | `assets/` | Game data for local runs (gitignored) |
@@ -42,6 +43,13 @@ fork's `main`.
   not put on PATH); `make NO_CHIEF_VU1=1` is the EE's path.
 
 ### Checking the Master Chief sample
+
+The map scene is first person (`src/fp_controller.c`, `src/pad.c`; [docs/ps2_first_person_controller.md](docs/ps2_first_person_controller.md)):
+the DualShock walks the player and the Chief stands still. Builds for stills (`-DDEBUG_SECONDS`), the profile and the
+mip audit keep the camera orbiting him, so that builds see the same views (`-DFIRST_PERSON` asks for the walk in those,
+`make ORBIT_CAMERA=1` for the orbit in the others). `make FP_SCRIPT=1` plays a scripted walk instead of the pad: without it
+PCSX2 has no one at the pad and the view stays at the start. The controller's logic is checked on the host
+(`tools/fp_controller_test.c`, its header has the command).
 
 It draws, so it needs PCSX2's window (`tools/ps2/pcsx2_run.py` is for programs
 that only print):

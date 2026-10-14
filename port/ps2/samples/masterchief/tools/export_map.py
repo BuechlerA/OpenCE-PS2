@@ -26,6 +26,10 @@
   - the sky: the sky model's dome with its gradient as a 64x64 texture, drawn first around the camera (its vertices
     are transformed by the view without its translation: they come last, from MAP_SKY_FIRST_VERT on)
   - where the Chief stands: the ground height under MAP_CHIEF_X/Y
+  - for the first-person controller (src/fp_controller.c): the structure BSP's triangles alone (no scenery, no sky) in a
+    uniform grid over the ground plane, for the height of the ground under a point; and the numbers the original reads from
+    the tags: the globals' look function, look acceleration and the player's speeds, the player's biped (camera heights,
+    jump, slopes, collision size)
 
   HALO_MAP (default assets/maps/bloodgulch.map), CHIEF_X, CHIEF_Y, CHIEF_BELOW (the highest ground that
   counts) and LM_SCALE (default 1) in the environment.
@@ -354,6 +358,62 @@ def flat_color(shader):
         if key in s: return c
     return (0.7, 0.7, 0.7)
 
+GRID_CELL = float(os.environ.get('COLLISION_CELL', 4.0))     # the collision grid's cell, in world units
+
+def collision_grid(P, T):
+    """a uniform grid over x, y: for each cell the triangles whose bounding box touches it (the controller asks for the ground under a point)"""
+    P = P.astype(np.float64)
+    lo = P.min(0)[:2] - 0.5; hi = P.max(0)[:2] + 0.5
+    w = int(np.ceil((hi[0] - lo[0]) / GRID_CELL)); h = int(np.ceil((hi[1] - lo[1]) / GRID_CELL))
+    cells = [[] for _ in range(w * h)]
+    for i, t in enumerate(T):
+        v = P[t][:, :2]
+        x0, y0 = np.floor((v.min(0) - lo) / GRID_CELL).astype(int); x1, y1 = np.floor((v.max(0) - lo) / GRID_CELL).astype(int)
+        for y in range(max(y0, 0), min(y1, h - 1) + 1):
+            for x in range(max(x0, 0), min(x1, w - 1) + 1): cells[y * w + x].append(i)
+    start = np.zeros(w * h + 1, np.uint32); start[1:] = np.cumsum([len(c) for c in cells])
+    items = np.array([i for c in cells for i in c], np.uint16)
+    assert len(T) < 65536 and len(P) < 65536
+    return lo, w, h, start, items
+
+# offsets in a biped tag (struct _biped_definition follows the object and unit definitions) and the globals' blocks, as the
+# source reads them (source/units/biped_definitions.h, source/game/game_globals.h); the values below were checked against
+# the Chief's tag (camera heights 0.62 and 0.35, jump 0.07, slopes 45 degrees)
+BIPED_SLOPE_AT, BIPED_JUMP_AT, BIPED_CAMERA_AT, BIPED_COLLISION_AT = 0x358, 0x3B4, 0x400, 0x424
+GLOBALS_PLAYER_CONTROL_AT, GLOBALS_PLAYER_INFORMATION_AT = 272, 368
+
+def player_tunings(mf):
+    """the numbers the original's first-person controller reads from the tags, as (name, value) pairs"""
+    td = mf.td
+    g = mf.tags[(b'matg', 'globals\\globals')] - TAG_BASE
+    def block(at):
+        count, addr, _d = struct.unpack_from('<iII', td, g + at)
+        assert count == 1, 'the globals block at %d has %d elements' % (at, count)
+        return addr - TAG_BASE
+    pc = block(GLOBALS_PLAYER_CONTROL_AT)
+    accel_time, accel_scale, peg, pitch_rate, yaw_rate = struct.unpack_from('<5f', td, pc + 0x40)
+    fcount, faddr, _d = struct.unpack_from('<iII', td, pc + 0x74)
+    look = struct.unpack_from('<%df' % fcount, td, faddr - TAG_BASE)
+    pi = block(GLOBALS_PLAYER_INFORMATION_AT)
+    player_tag = mf.ref(pi)                                               # the player's biped
+    run_fwd, run_back, run_side, run_accel, sneak_fwd, sneak_back, sneak_side, sneak_accel, air_accel = struct.unpack_from('<9f', td, pi + 44 + 8)
+    b = mf.tags[(b'bipd', player_tag)] - TAG_BASE
+    max_slope, dh_falloff, dh_cutoff, dh_scale, uh_falloff, uh_cutoff, uh_scale = struct.unpack_from('<7f', td, b + BIPED_SLOPE_AT)
+    jump, = struct.unpack_from('<f', td, b + BIPED_JUMP_AT)
+    cam_stand, cam_crouch, crouch_time = struct.unpack_from('<3f', td, b + BIPED_CAMERA_AT)
+    height_stand, height_crouch, radius = struct.unpack_from('<3f', td, b + BIPED_COLLISION_AT)
+    assert 0.3 < cam_stand < 1 and 0 < cam_crouch < cam_stand and 0.05 < radius < 0.5 and 0.01 < jump < 0.2 and 0.5 < max_slope < 1.2, 'the biped tag is not laid out as expected'
+    print('player %s: eye %.2f (crouching %.2f), radius %.2f, jump %.3f/tick, slope %.0f deg; run %.2f/%.2f/%.2f, look rates %g/%g deg/s, look function %s'
+          % (player_tag, cam_stand, cam_crouch, radius, jump, np.degrees(max_slope), run_fwd, run_back, run_side, yaw_rate, pitch_rate, look))
+    return [('LOOK_ACCEL_TIME', accel_time), ('LOOK_ACCEL_SCALE', accel_scale), ('LOOK_PEG', peg), ('LOOK_PITCH_RATE', pitch_rate), ('LOOK_YAW_RATE', yaw_rate),
+            ('RUN_FORWARD', run_fwd), ('RUN_BACKWARD', run_back), ('RUN_SIDEWAYS', run_side), ('RUN_ACCEL', run_accel),
+            ('SNEAK_FORWARD', sneak_fwd), ('SNEAK_BACKWARD', sneak_back), ('SNEAK_SIDEWAYS', sneak_side), ('SNEAK_ACCEL', sneak_accel), ('AIR_ACCEL', air_accel),
+            ('MAX_SLOPE', max_slope), ('DOWNHILL_FALLOFF', dh_falloff), ('DOWNHILL_CUTOFF', dh_cutoff), ('DOWNHILL_SCALE', dh_scale),
+            ('UPHILL_FALLOFF', uh_falloff), ('UPHILL_CUTOFF', uh_cutoff), ('UPHILL_SCALE', uh_scale), ('JUMP_VELOCITY', jump),
+            ('CAMERA_STANDING', cam_stand), ('CAMERA_CROUCHING', cam_crouch), ('CROUCH_TIME', crouch_time),
+            ('HEIGHT_STANDING', height_stand), ('HEIGHT_CROUCHING', height_crouch), ('RADIUS', radius)], look
+
+
 def main():
     mf = MapFile(MAP)
     mats = load_bsp(mf)
@@ -497,6 +557,7 @@ def main():
         P.append(v[:, :3]); UV.append(v[:, 6:8]); LMUV.append(lmuv); C.append(col); T.append(tris + base); NRM.append(n)
         TEX += [tex_id[name] if name else -1] * len(tris); PAGE += [page] * len(tris)
         base += len(v)
+    col_P = np.concatenate(P).astype(np.float32); col_T = np.concatenate(T).astype(np.uint16)   # the structure BSP alone, for the controller
     PIECE = [-1] * len(TEX)                                              # which piece of scenery a triangle belongs to
     for k, q in enumerate(pieces):
         P.append(q['P']); UV.append(q['UV']); LMUV.append(np.zeros((len(q['P']), 2))); C.append(q['C']); T.append(q['T'] + base); NRM.append(q['N'])
@@ -595,6 +656,14 @@ def main():
     c.write(cstr_array('map_chunks', bounds, 'float', 16))
     c.write(cstr_array('map_lm_order', lm_order, 'int', 16))
     c.write(cstr_array('map_gray_clut', flat(gs_gray_clut()), 'unsigned int', 64))
+    col_lo, col_w, col_h, col_start, col_items = collision_grid(col_P, col_T)
+    tunings, look_function = player_tunings(mf)
+    print('collision: %d triangles, %d vertices, a %dx%d grid of %g-unit cells (%d entries)' % (len(col_T), len(col_P), col_w, col_h, GRID_CELL, len(col_items)))
+    c.write(cstr_array('map_col_pos', flat(col_P), 'float', 16))
+    c.write(cstr_array('map_col_tri', flat(col_T), 'unsigned short', 16))
+    c.write(cstr_array('map_col_start', col_start, 'unsigned int', 16))
+    c.write(cstr_array('map_col_items', col_items, 'unsigned short', 16))
+    c.write(cstr_array('map_look_function', look_function, 'float', 16))
     for i, (d, _levels) in enumerate(details):
         c.write(cstr_array('map_detail%d_pixels' % i, flat(d), 'unsigned char', 64))
     for i, pg in enumerate(pages):
@@ -669,9 +738,25 @@ extern const map_reflection_data map_reflection_of[];
 extern const signed char map_normals[];       /* x, y, z (x 127) and a pad, for each vertex */
 extern const unsigned char *const map_cubes[];   /* the reflected cube maps: six faces of 16x16 RGB */
 extern const map_texture_data map_textures[];
-#endif
 ''' % (len(P), len(T), len(textures), nspans, len(lm_order), sky_first_vertex, sky_chunk, nchunks, len(batches) // 3, len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb),
        fog[0][0], fog[0][1], fog[0][2], float(fog[1]), float(fog[2]), float(fog[3])))
+    h.write('''/* the ground the controller walks on: the structure BSP's triangles (outward-facing counter-clockwise), and a grid over x, y of the triangles near each cell */
+#define MAP_COL_TRIS %d
+#define MAP_COL_X0 %rf
+#define MAP_COL_Y0 %rf
+#define MAP_COL_CELL %rf
+#define MAP_COL_W %d
+#define MAP_COL_H %d
+extern const float map_col_pos[];
+extern const unsigned short map_col_tri[];
+extern const unsigned int map_col_start[];      /* MAP_COL_W * MAP_COL_H + 1: where each cell's triangles begin in map_col_items */
+extern const unsigned short map_col_items[];
+/* what the original's first-person controller reads from the tags (the globals and the player's biped): seconds, degrees a second, world units, radians, units a tick */
+#define MAP_LOOK_FUNCTION_COUNT %d
+extern const float map_look_function[];
+''' % (len(col_T), float(col_lo[0]), float(col_lo[1]), GRID_CELL, col_w, col_h, len(look_function)))
+    for name, value in tunings: h.write('#define MAP_%s %rf\n' % (name, float(value)))
+    h.write('#endif\n')
     h.close()
     print('wrote', os.path.abspath(OUT))
 

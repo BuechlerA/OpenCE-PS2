@@ -6,6 +6,15 @@ ifdef NO_MAP
 override EXTRA_CFLAGS += -DNO_MAP
 else
 EE_OBJS += src/map_assets.o
+# the map scene is first person (src/fp_controller.c reads the DualShock through src/pad.c): make FP_SCRIPT=1 plays a scripted walk
+# instead of the pad, ORBIT_CAMERA=1 keeps the camera orbiting the Chief (builds for the stills and the profile do)
+EE_OBJS += src/fp_controller.o src/pad.o
+ifdef FP_SCRIPT
+override EXTRA_CFLAGS += -DFP_SCRIPT
+endif
+ifdef ORBIT_CAMERA
+override EXTRA_CFLAGS += -DORBIT_CAMERA
+endif
 endif
 # The map scene draws the Chief's textured passes on VU1 (src/chief_vu1.vsm, assembled with dvp-as, which is in the ps2dev toolchain's
 # dvp/bin: put it on PATH); make NO_CHIEF_VU1=1 draws them on the EE, as before
@@ -21,7 +30,7 @@ EE_DVP = dvp-as
 endif
 EE_INCS += -I$(PS2DEV)/gsKit/include
 EE_LDFLAGS += -L$(PS2DEV)/gsKit/lib
-EE_LIBS = -lgskit -ldmakit $(if $(CHIEF_VU1),-ldma) -lm -lc -lkernel
+EE_LIBS = -lgskit -ldmakit $(if $(CHIEF_VU1),-ldma) $(if $(NO_MAP),,-lpad) -lm -lc -lkernel
 EE_CFLAGS += -O3 -ffast-math -funroll-loops -std=gnu99 $(EXTRA_CFLAGS)
 
 all: $(EE_BIN)
@@ -30,7 +39,7 @@ all: $(EE_BIN)
 	$(EE_DVP) $< -o $@
 
 clean:
-	rm -f $(EE_BIN) $(EE_OBJS) src/chief_vu1.o
+	rm -f $(EE_BIN) $(EE_OBJS) src/chief_vu1.o src/fp_controller.o src/pad.o
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal

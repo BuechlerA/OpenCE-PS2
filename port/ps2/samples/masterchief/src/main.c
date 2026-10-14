@@ -29,6 +29,20 @@
 #include "map_assets.h"
 #endif
 
+/* The map scene is first person: the DualShock walks the player on Blood Gulch (fp_controller.c, pad.c), the Chief stands
+   where he did. The camera orbiting him is for comparing builds: it is the scene of -DORBIT_CAMERA, of the stills
+   (-DDEBUG_SECONDS), the mip audit and the profile, unless -DFIRST_PERSON asks for the walk in those. */
+#if !defined(NO_MAP) && !defined(FIRST_PERSON) && !defined(ORBIT_CAMERA) && !defined(DEBUG_SECONDS) && !defined(MIP_AUDIT) && !defined(PROFILE)
+#define FIRST_PERSON
+#endif
+#if defined(FIRST_PERSON) && defined(NO_MAP)
+#error "the first-person controller walks on the map: it needs the map scene"
+#endif
+#ifdef FIRST_PERSON
+#include "fp_controller.h"
+#include "pad.h"
+#endif
+
 #if RIFLE_MASK_SIZE != RIFLE_TEX_SIZE
 #error "the rifle's second pass shares its UV registers with the first: its mask must be as big as its base map"
 #endif
@@ -269,6 +283,9 @@ static void pack_vertices(void)
 #endif
 
 static float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
+#ifdef FIRST_PERSON
+static fp_player player;
+#endif
 /* The frame buffers are SCREEN_WIDTH pixels wide and 448 high; the display stretches them over the same 640x448 picture
    (gsKit sets the horizontal magnification from the width), so at 512 each pixel is 1.25 times as wide as it is high
    and the horizontal focal length is 512 / 640 of the vertical one: the field of view and the aspect do not change.
@@ -2108,7 +2125,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	float cycles = seconds / CYCLE_SECONDS;
 	int frame = (int)(fmodf(cycles, 1.f) * ANIM_FRAMES) % ANIM_FRAMES;
 	float scroll = -ANIM_STRIDE * cycles;
-	float c = cosf(theta), s = sinf(theta);
+	float c __attribute__((unused)) = cosf(theta), s __attribute__((unused)) = sinf(theta);   /* the orbit's, not the player's */
 	xform orbit, view, world_to_view;
 #ifdef NO_MAP
 	xform bone, bone_world[NODE_COUNT], rifle_m, rifle_view, rifle_world;
@@ -2122,14 +2139,23 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	int i, j;
 
 #ifndef NO_MAP
-	/* the Chief stands on the map and the camera circles him */
+	/* the Chief stands on the map; the camera is the player's eyes, or circles him */
 	orbit = chief_placement;
+#ifdef FIRST_PERSON
+	{
+		float eye[3], target[3];
+
+		fp_camera(&player, eye, target);
+		camera_look(eye, target);
+	}
+#else
 	{
 		const float target[3] = { MAP_CHIEF_X, MAP_CHIEF_Y, MAP_CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
 		const float eye[3] = { target[0] + MAP_CAMERA_DISTANCE * c, target[1] + MAP_CAMERA_DISTANCE * s, target[2] + MAP_CAMERA_HEIGHT };
 
 		camera_look(eye, target);
 	}
+#endif
 #else
 	/* orbit about the model's centre; row-vector rotation [[c,s,0],[-s,c,0],[0,0,1]] */
 	memset(&orbit, 0, sizeof(orbit));
@@ -2351,7 +2377,11 @@ int main(void)
 	screen_cx = gs->Width * 0.5f;
 	screen_cy = gs->Height * 0.5f;
 #ifndef NO_MAP
+#ifdef FIRST_PERSON
+	focal = (1.f / tanf(fp_vertical_half_fov_degrees() * (float)M_PI / 180.f)) * gs->Height * 0.5f;      /* the original's 70 degrees across a 4:3 picture */
+#else
 	focal = (1.f / tanf(MAP_FOV_HALF_DEGREES * (float)M_PI / 180.f)) * gs->Height * 0.5f;
+#endif
 	z_near = MAP_NEAR;
 	z_far = MAP_FAR;
 #else
@@ -2374,6 +2404,11 @@ int main(void)
 
 	refresh = gs->Mode == GS_MODE_PAL ? 50.f : 60.f;
 	gsKit_add_vsync_handler(vsync_handler);
+#ifdef FIRST_PERSON
+	if (!pad_init()) printf("PAD: the pad modules did not load; no one can walk\n");
+	fp_init(&player, MAP_CHIEF_X + MAP_CAMERA_DISTANCE, MAP_CHIEF_Y, (float)M_PI);      /* where the orbit starts, looking at the Chief */
+	printf("PLAYER: starts at (%.2f, %.2f, %.3f)\n", player.pos[0], player.pos[1], player.pos[2]);
+#endif
 #ifdef MIP_AUDIT                     /* the whole orbit in half-degree steps, then the report */
 	{
 		int f, t, d;
@@ -2401,6 +2436,25 @@ int main(void)
 		static u32 window_start;
 
 		if (frames == 0) { vsync_at_start = vsync_count; window_start = cpu_ticks(); prof_last = window_start; }
+#endif
+#ifdef FIRST_PERSON
+		{
+			/* the pad is read once a frame, and the player moves by the time the last frame took */
+#ifdef PROFILE
+			static int walk_frame;
+			float now = walk_frame++ / refresh;
+#else
+			float now = vsync_count / refresh;
+#endif
+			static float last_now;
+			fp_pad pad;
+			float dt = now - last_now;
+
+			last_now = now;
+			if (dt < 0.f || dt > 0.1f) dt = 0.f;
+			pad_read(&pad, now);
+			fp_update(&player, &pad, dt);
+		}
 #endif
 #ifdef DEBUG_SECONDS                 /* a still frame, for comparing builds */
 		render_frame(gs, DEBUG_SECONDS);
