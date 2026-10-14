@@ -222,3 +222,50 @@ def ground_height(P, T, x, y, below):
         z = w0 * az + w1 * bz + w2 * cz
         if z <= below and (best is None or z > best): best = z
     return best
+
+# the structure BSP's collision_bsp (source/physics/collision_bsp_definitions.h): the block of one collision_bsp is at
+# structure_bsp + SB_SURFACES - 72 (the render surfaces' block, less the six blocks and a box between them: collision_bsp,
+# nodes, world bounds, leaves and surface references); in it bsp3d nodes and planes, leaves, bsp2d references and nodes, then
+# the surfaces, edges and vertices a character collides with
+SB_COLLISION_BSP = SB_SURFACES - 72
+SB_COLLISION_MATERIALS = SB_COLLISION_BSP - 12
+
+def load_collision_bsp(mf, index=0):
+    """-> dict(vertices (n, 3), polygons [list of vertex indices, counter-clockwise from the plane's front], normals (m, 3), offsets (m),
+    flags (m), material (m), materials [(shader, physics material)]) of a map's structure BSP's collision BSP"""
+    full, td, h = mf.full, mf.td, mf.h
+    inst = (h[0] - B) + (h[1] & 0xFFFF) * 0x20
+    scenario = struct.unpack_from('<I', td, inst + 0x14)[0] - B
+    _count, ref = struct.unpack_from('<iI', td, scenario + SCENARIO_BSP_REFERENCES)
+    file_offset, file_size, base = struct.unpack_from('<iiI', td, ref - B + index * 0x20)
+    buf = full[file_offset:file_offset + file_size]
+    sb = struct.unpack_from('<I', buf, 0)[0] - base
+    def block(o):
+        c, a, _ = struct.unpack_from('<iII', buf, o)
+        return c, a - base
+    mc, ma = block(sb + SB_COLLISION_MATERIALS)
+    materials = [(_name(td, struct.unpack_from('<I', buf, ma + i * 20 + 4)[0]), struct.unpack_from('<h', buf, ma + i * 20 + 18)[0]) for i in range(mc)]
+    count, cb = block(sb + SB_COLLISION_BSP)
+    assert count == 1
+    planes_c, planes_o = block(cb + 12)
+    planes = np.frombuffer(buf, dtype='<f4', count=planes_c * 4, offset=planes_o).reshape(-1, 4)
+    sc, so = block(cb + 5 * 12)
+    ec, eo = block(cb + 6 * 12)
+    vc, vo = block(cb + 7 * 12)
+    surfaces = np.frombuffer(buf, dtype=[('plane', '<i4'), ('first', '<i4'), ('flags', 'u1'), ('breakable', 'u1'), ('material', '<i2')], count=sc, offset=so)
+    edges = np.frombuffer(buf, dtype='<i4', count=ec * 6, offset=eo).reshape(-1, 6)
+    verts = np.frombuffer(buf, dtype='<f4', count=vc * 4, offset=vo).reshape(-1, 4)[:, :3].astype(np.float64)
+    polygons, normals, offsets = [], np.zeros((sc, 3)), np.zeros(sc)
+    for s in range(sc):
+        e = first = int(surfaces['first'][s]); ring = []
+        while True:
+            rev = int(edges[e, 5] == s)                      # surface_indices[1]
+            ring.append(int(edges[e, rev]))                  # vertex_indices[rev]
+            e = int(edges[e, 2 + rev])                       # edge_indices[rev]
+            if e == first or len(ring) > 16: break
+        assert e == first, 'a surface\'s edges do not close'
+        polygons.append(ring)
+        d = int(surfaces['plane'][s]); p = planes[d & 0x7FFFFFFF].astype(np.float64)
+        if d < 0: p = -p
+        normals[s] = p[:3]; offsets[s] = p[3]
+    return dict(vertices=verts, polygons=polygons, normals=normals, offsets=offsets, flags=surfaces['flags'].copy(), material=surfaces['material'].copy(), materials=materials)

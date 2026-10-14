@@ -61,30 +61,46 @@ turn, the acceleration, the slope's speed, the jump's arc and the walls are the 
 - The orbit builds (stills, profile, mip audit, `ORBIT_CAMERA`) keep the Chief where he stood for the orbit
   (`MAP_CHIEF_*`), so their views and the mip floor audit stay valid.
 
-## Walking on the map
+## Walking on the map: the collision BSP
 
-The original sweeps a pill through the collision BSP. The sample has no collision BSP, only the render BSP, so
-the player walks on that: `export_map.py` writes the structure BSP's triangles alone (no scenery, no sky) and
-a grid over x, y (4-unit cells) of the triangles near each cell (5,503 triangles, 32 x 37 cells, about 110 KB). A
-ground query is a vertical ray: the highest up-facing triangle at or below a height. The player stands on the
-ground and its pill (radius 0.2) fits where the ground under the centre and eight points of its circle is at most
-a step (0.3: the radius on a 45 degree slope, plus a stride) above the feet, and not above the terrain at all
-when it is missing (the edge of the map, the far side of a cliff that rises more than a step). A move that does
-not fit is tried along each axis (so walls slide). A slope steeper than the biped's maximum (45 degrees) cannot
-be climbed, and standing on one slides the player down it. A drop of more than 0.12 is fallen, not walked.
+The player collides with the map's own collision BSP, the one the original's biped is swept through
+(`structure_bsp.collision_bsp`, `source/physics/collision_bsp_definitions.h`), not the render geometry.
+`tools/bsp.py` (`load_collision_bsp`) reads its surfaces (4,916 for Blood Gulch: a plane, a flag byte, a material, and a ring of
+edges, which it walks as `collision_surface_polygon` does), checks every surface is planar and wound the way its plane faces, and
+`export_map.py` triangulates them (a fan: all are convex, 5,468 triangles on 2,704 vertices) and grids them over x, y in
+4-unit cells (46 x 48 cells, about 100 KB). It is not the render BSP: it has the invisible walls and the sky's
+ceiling at the map's edge (the collision box runs from -8 to 174 in x and -220 to -30 in y, the picture from 5 to 133 and
+-190 to -43), and the surfaces the player can stand on and be stopped by are the ones the original's.
+
+The player is a pill (radius 0.2, 0.7 tall standing, 0.5 crouched) swept through those triangles as two or three spheres a
+radius apart (a few millimetres from a capsule): each sphere against each triangle in the swept test (the face, then the
+edges as cylinders and the vertices as spheres), the surfaces one-sided as the collision BSP's are. A move slides along what
+stops it (four times at most), stopping a millimetre short; the velocity loses what goes into the surface. A walkable surface
+met (steeper than 45 degrees is not) is the ground: the player stands on it (the original's 1/128 push along the normal
+keeps the contact), and its normal steers the walk along the slope. A walking player does not slide up a surface too steep to
+stand on; it slides along the level line on it. A drop of under 0.12 is walked down (a probe below the feet), a larger one is a
+fall. A sphere inside a surface after a move (the seam of two) is pushed out, and so is a player put down against a wall.
+Standing still moves nothing: the push into the ground would, on an edge or a vertex whose normal is not the stored
+ground's, leave a sideways part. The BSP's tree is not used: the triangles near the move come from the grid.
+
+`fp_ground` (a vertical ray: the highest up-facing triangle under a point) is still there for putting the player on the ground
+and for the demo's planner.
 
 Not ported: the collision against the scenery (rocks, plants, bases are drawn but not solid), the Chief and the
-bases' doors; the pitch autolevel; the unit camera's own pitch limits; the first-person weapon (hands and rifle);
-the zoom; the stun penalties; melee and the other actions; ceilings (a jump goes through an overhang); the
-slipping physics of the original on steep ground. A fall into the void puts the player back at the start.
+bases' doors; standing up under a ceiling (the pill's height follows the crouch, the top of it is pushed out of a ceiling
+rather than the stand being refused); the pitch autolevel; the unit camera's own pitch limits; the first-person weapon (hands
+and rifle); the zoom; the stun penalties; melee and the other actions; the original's slipping physics on steep ground. A fall
+into the void puts the player back at the start.
 
 ## Checking it
 
-- `cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/fp_controller.c src/map_assets.c -lm`,
-  run in `port/ps2/samples/masterchief` after `export_map.py`: the dead zone and the square stick, the look rates
-  and their acceleration, the pitch stop, the run speed (2.23 of 2.25 on a slope), the jump (0.65 peak, lands), the
-  crouch, standing still for 3 s at 508 places over the valley (133 of them on slopes: no drift at all), and 36
-  headings x 60 s of holding forward: finite, never off the ground, never out of the map.
+- `cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/map_assets.c -lm`,
+  run in `port/ps2/samples/masterchief` after `export_map.py` (the test includes the controller): the dead zone and the
+  square stick, the look rates and their acceleration, the pitch stop, the run speed (2.2 of 2.25 on a slope), the
+  jump (0.65 peak, lands), the crouch, standing still for 3 s at 508 places over the valley (133 of them on slopes:
+  no drift at all), 40 random players for 40 s each, random sticks, jumps and crouches (the deepest any sphere
+  went into a surface: 0.0003 of a 0.2 radius, and never through the floor), and 36 headings x 60 s of holding forward:
+  finite, never off the ground, never out of the map.
 - `tools/fp_demo_test.c` (the command is in its header): the demo plans the walk, and the controller, given only the pad
   the demo makes, arrives next to the Chief, four times in 100 s, jumping four times a walk and facing him, never
   stuck; a touch of the pad takes over and Start restarts the demo.

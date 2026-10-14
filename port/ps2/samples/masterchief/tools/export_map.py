@@ -26,8 +26,8 @@
   - the sky: the sky model's dome with its gradient as a 64x64 texture, drawn first around the camera (its vertices
     are transformed by the view without its translation: they come last, from MAP_SKY_FIRST_VERT on)
   - where the Chief stands: the ground height under MAP_CHIEF_X/Y
-  - for the first-person controller (src/fp_controller.c): the structure BSP's triangles alone (no scenery, no sky) in a
-    uniform grid over the ground plane, for the height of the ground under a point; and the numbers the original reads from
+  - for the first-person controller (src/fp_controller.c): the structure BSP's collision surfaces (triangulated; no scenery,
+    no sky) in a uniform grid over the ground plane, for the height of the ground under a point; and the numbers the original reads from
     the tags: the globals' look function, look acceleration and the player's speeds, the player's biped (camera heights,
     jump, slopes, collision size)
 
@@ -40,7 +40,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from bsp import MapFile, load_bsp, oriented, ground_height, unswizzle
+from bsp import MapFile, load_bsp, load_collision_bsp, oriented, ground_height, unswizzle
 from dxt import decode_dxt1
 
 MAP = os.environ.get('HALO_MAP', os.path.join(HERE, '..', '..', '..', '..', '..', 'assets', 'maps', 'bloodgulch.map'))
@@ -363,6 +363,16 @@ def flat_color(shader):
         if key in s: return c
     return (0.7, 0.7, 0.7)
 
+
+def collision_mesh(mf):
+    """the structure BSP's collision surfaces as triangles (a fan from each polygon's first vertex: they are convex), wound counter-clockwise
+    from the front of their plane; the surfaces the player can touch, including the invisible walls at the map's edge"""
+    c = load_collision_bsp(mf)
+    tris = [[p[0], p[k], p[k + 1]] for p in c['polygons'] for k in range(1, len(p) - 1)]
+    P = c['vertices'].astype(np.float32); T = np.array(tris, np.uint16)
+    print('collision BSP: %d surfaces (%d triangles, %d vertices) from %s to %s' % (len(c['polygons']), len(T), len(P), np.round(P.min(0), 1), np.round(P.max(0), 1)))
+    return P, T
+
 GRID_CELL = float(os.environ.get('COLLISION_CELL', 4.0))     # the collision grid's cell, in world units
 
 def collision_grid(P, T):
@@ -562,7 +572,7 @@ def main():
         P.append(v[:, :3]); UV.append(v[:, 6:8]); LMUV.append(lmuv); C.append(col); T.append(tris + base); NRM.append(n)
         TEX += [tex_id[name] if name else -1] * len(tris); PAGE += [page] * len(tris)
         base += len(v)
-    col_P = np.concatenate(P).astype(np.float32); col_T = np.concatenate(T).astype(np.uint16)   # the structure BSP alone, for the controller
+    col_P, col_T = collision_mesh(mf)                                    # the collision BSP, for the controller
     PIECE = [-1] * len(TEX)                                              # which piece of scenery a triangle belongs to
     for k, q in enumerate(pieces):
         P.append(q['P']); UV.append(q['UV']); LMUV.append(np.zeros((len(q['P']), 2))); C.append(q['C']); T.append(q['T'] + base); NRM.append(q['N'])

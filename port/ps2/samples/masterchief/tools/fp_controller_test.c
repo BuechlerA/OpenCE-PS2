@@ -1,14 +1,15 @@
 /* Host test of src/fp_controller.c against the exported map (src/map_assets.c): the original's numbers come out, the player never
    leaves the ground the map has, and cliffs stop it.
 
-     cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/fp_controller.c src/map_assets.c -lm && /tmp/fp_controller_test
+     cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/map_assets.c -lm && /tmp/fp_controller_test
+
+   (the controller is included, not linked, so that the test can look at the pill's spheres)
 */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../src/fp_controller.h"
-#include "../src/map_assets.h"
+#include "../src/fp_controller.c"
 
 static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -19,6 +20,35 @@ static void run(fp_player *p, const fp_pad *pad, float seconds)
 
 	for (t = 0; t < seconds; t += dt) fp_update(p, pad, dt);
 }
+
+/* how far the pill is into the front of a collision surface: the deepest of its spheres */
+static float penetration(const fp_player *p)
+{
+	float centres[3][3], deepest = 0.f;
+	int spheres = pill_spheres(p->pos, p->crouch, centres), s, i, n = gather(p->pos[0] - 1.f, p->pos[1] - 1.f, p->pos[0] + 1.f, p->pos[1] + 1.f);
+
+	for (s = 0; s < spheres; s++)
+		for (i = 0; i < n; i++)
+		{
+			const unsigned short *ix = &map_col_tri[candidates[i] * 3];
+			const float *a = &map_col_pos[ix[0] * 3], *b = &map_col_pos[ix[1] * 3], *c = &map_col_pos[ix[2] * 3];
+			float e1[3], e2[3], nrm[3], to[3], closest[3], d[3], length;
+
+			sub3(b, a, e1); sub3(c, a, e2); cross3(e1, e2, nrm);
+			length = sqrtf(dot3(nrm, nrm));
+			if (length < 1e-12f) continue;
+			sub3(centres[s], a, to);
+			if (dot3(to, nrm) / length < 0.f) continue;           /* behind it: the surface does not touch from there */
+			closest_on_triangle(centres[s], a, b, c, closest);
+			sub3(centres[s], closest, d);
+			length = sqrtf(dot3(d, d));
+			if (MAP_RADIUS - length > deepest) deepest = MAP_RADIUS - length;
+		}
+	return deepest;
+}
+
+static unsigned seed = 12345;
+static float rand01(void) { seed = seed * 1664525u + 1013904223u; return (float)((seed >> 8) & 0xffff) / 65535.f; }
 
 int main(void)
 {
@@ -31,8 +61,8 @@ int main(void)
 	fp_init(&p, MAP_CHIEF_X + 2.2f, MAP_CHIEF_Y, (float)M_PI);
 	run(&p, &idle, 1.f);
 	fp_camera(&p, eye, target);
-	CHECK(fp_ground(p.pos[0], p.pos[1], p.pos[2] + 1.f, &ground, NULL, NULL) && fabsf(ground - p.pos[2]) < 1e-4f, "not on the ground");
-	CHECK(fabsf(eye[2] - p.pos[2] - MAP_CAMERA_STANDING) < 1e-4f, "eye height %f", eye[2] - p.pos[2]);
+	CHECK(fp_ground(p.pos[0], p.pos[1], p.pos[2] + 1.f, &ground, NULL, NULL) && fabsf(ground - p.pos[2]) < 0.01f, "not on the ground");
+	CHECK(fabsf(eye[2] - p.pos[2] - MAP_CAMERA_STANDING) < 1e-3f, "eye height %f", eye[2] - p.pos[2]);
 	CHECK(fabsf(target[0] - eye[0] + 1.f) < 1e-3f, "not looking along -x: %f", target[0] - eye[0]);
 	printf("spawn (%.2f, %.2f, %.3f)\n", p.pos[0], p.pos[1], p.pos[2]);
 
@@ -44,17 +74,56 @@ int main(void)
 		for (x = 10.f; x < 130.f; x += 3.7f)
 			for (y = -185.f; y < -45.f; y += 3.9f)
 			{
-				float drift;
+				float drift, settled[3];
 
 				if (!fp_ground(x, y, 3.f, &g, &nz, NULL) || nz < 0.8f) continue;
+
 				fp_init(&p, x, y, 0.f);
+				run(&p, &idle, 1.f);                      /* a place the pill does not fit (against a wall) is let go of, or fallen from, first */
+				settled[0] = p.pos[0]; settled[1] = p.pos[1]; settled[2] = p.pos[2];
 				run(&p, &idle, 3.f);
-				drift = hypotf(p.pos[0] - x, p.pos[1] - y);
+				drift = sqrtf((p.pos[0] - settled[0]) * (p.pos[0] - settled[0]) + (p.pos[1] - settled[1]) * (p.pos[1] - settled[1]) + (p.pos[2] - settled[2]) * (p.pos[2] - settled[2]));
 				places++; if (nz < 0.97f) slopes++;
 				if (drift > worst) { worst = drift; wx = x; wy = y; }
 			}
-		printf("standing still 3 s at %d places (%d on slopes): the most drift %.5f units (at %.1f, %.1f)\n", places, slopes, worst, wx, wy);
+		printf("standing still 3 s (after 1 s to settle) at %d places (%d on slopes): the most drift %.5f units (at %.1f, %.1f)\n", places, slopes, worst, wx, wy);
 		CHECK(worst < 1e-4f, "slides %.5f units standing still at (%.1f, %.1f)", worst, wx, wy);
+	}
+
+	/* the pill never goes into the map: 40 players, each 40 s of random sticks, jumps and crouches from random places */
+	{
+		float deepest = 0.f, lowest = 1e9f, start_depth_worst = 0.f;
+		int deepest_run = -1, deepest_tick = -1;
+		int run_index, tick_index, rolls = 0;
+
+		for (run_index = 0; run_index < 40; run_index++)
+		{
+			float x, y, g, nz;
+			fp_pad pad = { 0, 0, 0, 0, 0 };
+
+			do { x = 10.f + rand01() * 120.f; y = -185.f + rand01() * 140.f; } while (!fp_ground(x, y, 3.f, &g, &nz, NULL));
+			fp_init(&p, x, y, rand01() * 6.28f);                  /* (a place against a wall is pushed out of it) */
+			if (penetration(&p) > start_depth_worst) start_depth_worst = penetration(&p);
+			for (tick_index = 0; tick_index < 40 * 60; tick_index++)
+			{
+				float depth;
+
+				if (tick_index % 45 == 0)
+				{
+					pad.left_x = (short)((rand01() - 0.5f) * 65000); pad.left_y = (short)((rand01() - 0.2f) * 50000);
+					pad.right_x = (short)((rand01() - 0.5f) * 40000); pad.right_y = (short)((rand01() - 0.5f) * 8000);
+					pad.buttons = (rand01() < 0.3f ? FP_JUMP : 0) | (rand01() < 0.15f ? FP_CROUCH : 0);
+					rolls++;
+				}
+				fp_update(&p, &pad, 1.f / 60.f);
+				depth = penetration(&p);
+				if (depth > deepest) { deepest = depth; deepest_run = run_index; deepest_tick = tick_index; }
+				if (p.pos[2] < lowest) lowest = p.pos[2];
+			}
+		}
+		printf("40 random players x 40 s (%d inputs): deepest into a surface %.4f units (run %d, tick %d; the worst place to start was %.4f deep), lowest z %.2f\n", rolls, deepest, deepest_run, deepest_tick, start_depth_worst, lowest);
+		CHECK(deepest < 0.02f, "the pill went %.4f units into a surface", deepest);
+		CHECK(lowest > -5.f, "fell through the map to z %.2f", lowest);
 	}
 
 	/* the dead zone: a stick at 9000 does nothing, at full is 1.0 */
@@ -152,7 +221,8 @@ int main(void)
 		}
 		printf("36 headings x 60 s: farthest %.1f units from the start, z %.2f..%.2f, ground offset %.4f..%.4f, %d ended against something\n", farthest, min_z, max_z, worst_below, highest_above, stuck);
 		CHECK(min_z > -50.f, "fell out of the map (z %f)", min_z);
-		CHECK(worst_below > -1e-3f && highest_above < 0.13f, "left the ground");
+		/* a round-bottomed pill on a slope or an edge is a little above the ground under its feet: r / cos(slope) - r at most (0.083 at 45 degrees), more across a crease */
+		CHECK(worst_below > -0.02f && highest_above < 0.25f, "left the ground: %.4f..%.4f", worst_below, highest_above);
 	}
 	printf(failures ? "%d FAILURES\n" : "all passed\n", failures);
 	return failures != 0;

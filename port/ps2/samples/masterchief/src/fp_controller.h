@@ -39,7 +39,7 @@ typedef struct
 	float pos[3], prev_pos[3], vel[3];
 	float crouch, prev_crouch;
 	int airborne;
-	int sliding;
+	float ground_n[3];          /* the surface it stands on: its normal (valid when not airborne) */
 	float tick_time;            /* the seconds since the last tick, for the camera's interpolation */
 	/* the player_control: where it looks, every frame */
 	float yaw, pitch;           /* radians; yaw 0 looks along +x, positive turns left */
