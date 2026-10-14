@@ -751,6 +751,16 @@ Done so far:
   pattern, by game time) and logs the time of its simulation ticks every
   150 ticks, and the totals at the end.
 
+- The converter's first pass (`tools/ps2/convert_map.py`, run once on the
+  PC): it inflates an Xbox map to what the Xbox's own copy writes to its
+  hard disk (byte for byte, checked on `ui` and `wizard`) and sets the tag
+  schema's runtime values to what they start with, as the tag validator
+  does on the other builds, then marks the header. The PS2 build opens
+  such a map in place from `d:\maps` (`ps2_cached_map_file_open`), makes
+  no cache files (730 MB) and copies no map, and refuses a map without the
+  mark. It does not yet relocate the tags: that is still done as the map
+  loads (`tag_relocate.c`).
+
 Measured in PCSX2 (`pcsx2_bench.py`, 300 to 600 ticks, one local player
 and no AI; the EE's cycle counter, which in PCSX2 counts emulated cycles
 only, so it leaves out the caches' and the memory's waits and reads low):
@@ -778,26 +788,55 @@ Bloodgulch and sidewinder, the two largest outdoor levels, already take the
 whole 15 ms on emulated cycles with nothing in them to fight. Phase 5
 starts there (VU0 for the matrix maths, the scratchpad for the hot loops).
 
+**A campaign level.** `c20` (tags and largest BSP 17.2 MB, the least of the
+campaign's) loads, runs its scripts and AI, and plays 300 ticks in PCSX2
+with the scripted player (`pcsx2_bench.py --map c20`): **45.3 ms a tick on
+average, 64 ms the longest, every tick over 15 ms**. The benchmark breaks
+the tick down (`game_tick` and `objects_update` mark their sections):
+
+| Section | Time a tick | Share |
+| --- | --- | --- |
+| biped objects (the Covenant, marines, the player) | 27.3 ms | 60% |
+| machine objects (doors, lifts, switches) | 7.5 ms | 16% |
+| AI (`ai_update`) | 6.4 ms | 14% |
+| effects | 0.9 ms | 2% |
+| scripts (`hs_update`) | 0.8 ms | 2% |
+| sound scenery, scenery, projectiles | 1.8 ms | 4% |
+| the rest | 0.7 ms | 1% |
+
+The campaign is three times Gate 1's budget before any rendering, on
+emulated cycles that read low. Two sections are the work: a biped's update
+(its animation, physics and collision each tick) and the machines'. They
+are where Phase 5 begins (VU0 for the matrix maths, the scratchpad for the
+hot loops), and the animation tolerance of Phase 2 (fewer keyframes to
+interpolate) helps the first.
+
+The memory for it: the tag cache is 17.2 MB (`halo_port_capacity.h`) and 0.4
+MB of the 32 MB is never taken. To make room, the converter makes the maps
+what the other builds make them as they load (the tag validator, 1.2 MB of
+claims for each 9 MB of cache, is out of the PS2 build); the texture cache
+is 256 KB (no copy of a map to buffer), the threads' stacks 64 KB and the
+saved game is read into the game state, not beside it (3.4 MB); the AI's
+line of sight records are 64, not 16384. Another campaign level needs the
+converter's reductions (Phase 2), and the margin is gone: removing the
+tag schema and the relocation from the PS2 build (the converter relocating
+the tags once, to a tag cache address that never changes) is the next 0.8 MB.
+
 Still to do:
 
-- A campaign level. The unconverted maps' tags and largest BSP take 17.2
-  MB (`c20`, the least) to 21.8 MB, and the tag cache is 9 MB, which holds
-  `sidewinder`'s (8.92 MB): `b30` stops at "the cache file is damaged" on
-  its 15.7 MB of tag data. The converter's reductions project 13.7 to
-  14.4 MB (Phase 2), which the 6.5 MB of free heap holds (a tag cache of
-  up to 15.4 MB), leaving about 1 MB. Setting the tag cache to that size
-  (`halo_port_capacity.h`) is the converter's first use.
-- The textures: 2 MB of texture cache holds a few of a level's textures,
+- The other campaign levels. `c20` plays (below), with a tag cache of
+  17.2 MB. The rest take 21.3 to 21.8 MB unconverted (tags and the largest
+  BSP) and stop at "the cache file is damaged" (`b30` has 15.7 MB of tag
+  data). The converter's reductions project 13.7 to 14.4 MB (Phase 2).
+- The textures: 256 KB of texture cache holds a few of a level's textures,
   so the rest are the default one and `debug.txt` says "YOU GOT STABBED"
   every ten seconds. The renderer's own texture memory replaces this
   (Phase 3).
-- Maps without the cache files: the Xbox decompresses each map from the
-  DVD to its hard disk (`cache_files_windows.c`, six files of 730 MB in
-  all). A retail PS2 has no disk, so the PS2 reads the converter's
-  maps, already decompressed, straight from the disc. In PCSX2 for now
-  the cache files are on `host:`, and the copy works as the Xbox's does.
-- The same benchmark on a real PS2, and the plan for the worst cases
-  (Gate 1, below). Replaying a saved film instead of the scripted player.
+- The maps on the disc. The PS2 reads the converter's maps in place
+  (`convert_map.py`, `ps2_cached_map_file_open`; the next paragraph), from
+  `host:` in PCSX2. Their layout on a DVD, and streaming them, are Phase 4's.
+- The same benchmark on a real PS2 (Gate 1, below). Replaying a saved film
+  instead of the scripted player.
 
 **Gate 1:** on a real PS2, a typical campaign tick takes 15 ms or less,
 with a clear plan for the worst cases (large AI fights, many effects).

@@ -328,10 +328,13 @@ void game_tick(
 
 	/* port: a client of another's game, the host's rules (its own cheats and
 	game speed, set before it joined too, put back) */
+	PS2_BENCH_MARK("checks");
 	cheats_network_client_enforce();
 	remove_quitting_players_from_game();
 	game_allegiance_update();
+	PS2_BENCH_MARK("allegiance");
 	units_update();
+	PS2_BENCH_MARK("units");
 	/* (the host's actors drive the host's units, which a client of the
 	distributed netcode has from the host: its own would fight the host's
 	positions, and could place objects of their own) */
@@ -339,34 +342,46 @@ void game_tick(
 		ai_update();
 	else
 		network_actors_drive();
+	PS2_BENCH_MARK("ai");
 	players_update_before_game();
+	PS2_BENCH_MARK("players_before");
 
 	seconds_per_tick = game_globals->players_are_double_speed
 		? 1.0f / (2 * TICKS_PER_SECOND)
 		: 1.0f / TICKS_PER_SECOND;
 	effects_update(seconds_per_tick);
+	PS2_BENCH_MARK("effects");
 	/* An antenna's chain is a simulation of the Xbox's own step, an update a
 	tick: stepped a frame at a time, its springs, its carry and its points'
 	physics act against the frames' own movement of it, and a vehicle at
 	speed swings it far wider than a tick's step does. The frames between the
 	ticks are drawn from what each tick leaves (antenna.c). */
 	antennas_update(seconds_per_tick);
+	PS2_BENCH_MARK("antennas");
 	lock_global_random_seed();
 	rumble_update();
 	first_person_weapons_update();
+	PS2_BENCH_MARK("first_person_weapons");
 	unlock_global_random_seed();
 	game_engine_update();
+	PS2_BENCH_MARK("game_engine");
 	editor_update();
 	/* port: in network co-op only the host runs the scripts. A client running
 	them would place the map's actors and objects a second time and make
 	decisions that belong to the host. */
 	if (!(network_game_distributed_client() && network_coop_active()))
 		hs_update();
+	PS2_BENCH_MARK("scripts");
 	recorded_animations_update();
+	PS2_BENCH_MARK("recorded_animations");
 	objects_update();
+	PS2_BENCH_MARK("objects");
 	players_update_after_game();
+	PS2_BENCH_MARK("players_after");
 	hud_update();
+	PS2_BENCH_MARK("hud");
 	player_effect_update();
+	PS2_BENCH_MARK("player_effect");
 	/* port: and at its end, before the frame draws the lights */
 	game_state_check_data_arrays();
 	lights_port_recover();

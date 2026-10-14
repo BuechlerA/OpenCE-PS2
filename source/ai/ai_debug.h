@@ -22,8 +22,15 @@ enum
 	MAXIMUM_AI_DEBUG_IDLE_LOOK_PROPS = 32,
 	NUMBER_OF_AI_DEBUG_COMMUNICATION_TYPES = 57,
 	NUMBER_OF_AI_DEBUG_VOCALIZATION_TYPES = 209,
+#ifdef HALO_PS2
+	/* port: the debug rendering's line of sight and actor records took 460 KB
+	of the PS2's 32 MB; their overflow is noted once and costs nothing else */
+	MAXIMUM_AI_DEBUG_LINEOFSIGHT_POINTS = 64,
+	MAXIMUM_AI_DEBUG_LINEOFSIGHT_PAIRS = 64,
+#else
 	MAXIMUM_AI_DEBUG_LINEOFSIGHT_POINTS = 16384,
 	MAXIMUM_AI_DEBUG_LINEOFSIGHT_PAIRS = 8192,
+#endif
 	NUMBER_OF_AI_DEBUG_ACTOR_RECORDS = 512,
 #ifdef HALO_PS2
 	/* port: one (see ACTOR_DEBUG_INFO) */
@@ -368,6 +375,8 @@ typedef char ai_debug_state_render_offset_assert[
 	offsetof(struct ai_debug_state, render) == 0xA5 ? 1 : -1];
 typedef char ai_debug_state_last_render_id_offset_assert[
 	offsetof(struct ai_debug_state, last_render_id) == 0xF4 ? 1 : -1];
+#ifndef HALO_PS2
+/* (port: the PS2's smaller line of sight arrays move what follows them) */
 typedef char ai_debug_state_ballistic_lineoffire_valid_offset_assert[
 	offsetof(struct ai_debug_state, ballistic_lineoffire_valid) == 0x4C2F4 ? 1 : -1];
 typedef char ai_debug_state_ballistic_lineoffire_point_count_offset_assert[
@@ -394,6 +403,7 @@ typedef char ai_debug_actor_record_field_3C_offset_assert[
 	offsetof(struct ai_debug_actor_record, firing_position.evaluation) == 0x3C ? 1 : -1];
 typedef char ai_debug_state_field_7D380_offset_assert[
 	offsetof(struct ai_debug_state, evaluation_context_valid) == 0x7D380 ? 1 : -1];
+#endif
 
 struct actor_debug_info
 {

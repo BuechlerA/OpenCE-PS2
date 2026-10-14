@@ -1777,7 +1777,10 @@ static short ps2_cached_map_file_open(
 	cached_map_file_read_header(map_file_index);
 	if (map_file->file == INVALID_HANDLE_VALUE ||
 		_stricmp(map_name, map_file->header.name) != 0 ||
-		map_file->header.file_length != (long)GetFileSize(map_file->file, NULL))
+		map_file->header.file_length != (long)GetFileSize(map_file->file, NULL) ||
+		/* (the converter's mark: it has reset the tags' runtime values, which
+		the tag validator does on the other builds) */
+		memcmp(map_file->header.reserved68, "ps2\001", 4) != 0)
 	{
 		if (map_file->file != INVALID_HANDLE_VALUE)
 		{

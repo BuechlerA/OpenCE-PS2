@@ -37,7 +37,7 @@ GROUP_LISTS = ("tag_schema_object_groups", "tag_schema_model_groups", "tag_schem
 GLOBAL = re.compile(r'^@([\w.]+) = [^=]*?(?:constant|global) (.*?)(?:, align \d+)?$')
 
 # tag_schema.h, enum tag_schema_field_type
-BLOCK, REFERENCE, TAG_INDEX, STRUCT, TERMINATOR = 0, 3, 4, 9, 11
+BLOCK, REFERENCE, TAG_INDEX, RESET, STRUCT, TERMINATOR = 0, 3, 4, 8, 9, 11
 
 
 class Parser:
@@ -186,6 +186,10 @@ def export(values):
             ftype, fsize, count, flags, offset, maximum, _level, _target, dref, _check, nref = f
             entry = dict(type=ftype, size=fsize, count=count, flags=flags, offset=offset, maximum=maximum,
                          name=values[resolve(nref)] if nref else None)
+            if ftype == RESET:
+                # what a runtime value is reset to (TAG_SCHEMA_RESET's value, the
+                # field after the maximum and the target level)
+                entry['value'] = _target
             if ftype in (BLOCK, STRUCT) and dref:
                 entry['definition'] = definition(dref)
             elif ftype in (REFERENCE, TAG_INDEX) and dref:

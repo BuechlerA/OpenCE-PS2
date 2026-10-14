@@ -41,6 +41,11 @@ float render_interpolation_game_time_sec(long ticks);
 void ps2_bench_update(unsigned char main_menu_scenario_loaded, unsigned char game_in_progress);
 void ps2_bench_tick_begin(void);
 void ps2_bench_tick_end(void);
+/* the time since the tick or the last mark is the section's (game_tick) */
+void ps2_bench_mark(char const *section);
+#define PS2_BENCH_MARK(section) ps2_bench_mark(section)
+#else
+#define PS2_BENCH_MARK(section)
 #endif
 
 /* the Custom Edition tag cache window, or NULL unless the

@@ -4514,6 +4514,17 @@ void objects_update(
 					unit_get(object_index)->unit.player_index!=NONE)
 				{
 					object_update(object_index);
+#ifdef HALO_PS2
+					/* port: the PS2 benchmark's time of each type of object */
+					{
+						static char const *const type_names[] = {"object: biped", "object: vehicle",
+							"object: weapon", "object: equipment", "object: garbage", "object: projectile",
+							"object: scenery", "object: machine", "object: control", "object: light fixture",
+							"object: placeholder", "object: sound scenery"};
+
+						PS2_BENCH_MARK(object_header->type < 12 ? type_names[object_header->type] : "object: other");
+					}
+#endif
 				}
 			}
 		}

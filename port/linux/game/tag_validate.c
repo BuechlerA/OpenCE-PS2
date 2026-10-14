@@ -1242,6 +1242,11 @@ boolean tag_validate_tags(
 {
 	boolean valid = FALSE;
 
+#ifdef HALO_PS2
+	/* the PS2 reads the converter's maps (tools/ps2/convert_map.py), whose
+	runtime values it has reset, and has no memory for the claims */
+	return TRUE;
+#endif
 	if (claims_acquire())
 	{
 		valid = validate_tags(tag_header, tag_data_size, file_length, map_name);
@@ -1355,6 +1360,9 @@ boolean tag_validate_structure_bsp(
 {
 	boolean valid = FALSE;
 
+#ifdef HALO_PS2
+	return TRUE;
+#endif
 	if (claims_acquire())
 	{
 		valid = validate_structure_bsp(tag_index, base, size);

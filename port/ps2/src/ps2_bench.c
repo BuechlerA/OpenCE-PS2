@@ -35,6 +35,7 @@ long game_time_get(void);
 /* the EE's CPU clock, the rate of cpu_ticks */
 #define CYCLES_PER_MILLISECOND 294912UL
 #define TICKS_PER_REPORT 150
+#define SECTION_COUNT 24
 /* Gate 1's budget for a typical campaign tick */
 #define BUDGET_MILLISECONDS 15.0
 
@@ -62,6 +63,14 @@ static struct
 	unsigned long total_longest;
 	unsigned long over_budget;
 	unsigned long first_game_time;
+	/* the tick's sections (game_tick marks them): where the time went */
+	unsigned long last_mark;
+	struct
+	{
+		char const *name;
+		double cycles;
+	} sections[SECTION_COUNT];
+	long section_count;
 } bench;
 
 static int bench_enabled(void)
@@ -94,7 +103,33 @@ static void bench_report(void)
 void ps2_bench_tick_begin(void)
 {
 	if (bench.state == _bench_running)
+	{
 		bench.tick_start = cpu_ticks();
+		bench.last_mark = bench.tick_start;
+	}
+}
+
+void ps2_bench_mark(char const *section)
+{
+	unsigned long now;
+	long index;
+
+	if (bench.state != _bench_running)
+		return;
+	now = cpu_ticks();
+	for (index = 0; index < bench.section_count; index++)
+	{
+		if (!strcmp(bench.sections[index].name, section))
+			break;
+	}
+	if (index == bench.section_count && bench.section_count < SECTION_COUNT)
+	{
+		bench.sections[index].name = section;
+		bench.section_count++;
+	}
+	if (index < bench.section_count)
+		bench.sections[index].cycles += (double)(now - bench.last_mark);
+	bench.last_mark = now;
 }
 
 void ps2_bench_tick_end(void)
@@ -103,6 +138,7 @@ void ps2_bench_tick_end(void)
 
 	if (bench.state != _bench_running)
 		return;
+	ps2_bench_mark("rest");
 	cycles = cpu_ticks() - bench.tick_start;
 	bench.window_ticks++;
 	bench.window_cycles += cycles;
@@ -166,6 +202,32 @@ void ps2_bench_update(unsigned char main_menu_scenario_loaded, unsigned char gam
 			sbrk) to the main thread's stack, 128 KB below the 32 MB */
 			platform_log("bench: heap: %lu bytes never taken (of 32 MB), its end at 0x%lx",
 				0x2000000UL - 0x20000UL - (unsigned long)sbrk(0), (unsigned long)sbrk(0));
+			/* the sections, the longest first */
+			{
+				long first, second;
+
+				for (first = 0; first < bench.section_count; first++)
+				{
+					for (second = first + 1; second < bench.section_count; second++)
+					{
+						if (bench.sections[second].cycles > bench.sections[first].cycles)
+						{
+							char const *name = bench.sections[first].name;
+							double cycles = bench.sections[first].cycles;
+
+							bench.sections[first] = bench.sections[second];
+							bench.sections[second].name = name;
+							bench.sections[second].cycles = cycles;
+						}
+					}
+				}
+				for (first = 0; first < bench.section_count; first++)
+				{
+					platform_log("bench: %-22s %6.2f ms a tick (%2.0f%%)", bench.sections[first].name,
+						milliseconds(bench.sections[first].cycles / bench.total_ticks),
+						100.0 * bench.sections[first].cycles / bench.total_cycles);
+				}
+			}
 			platform_log("bench: done");
 			bench.state = _bench_done;
 		}
