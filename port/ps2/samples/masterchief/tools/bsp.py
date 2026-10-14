@@ -57,7 +57,82 @@ class MapFile:
             if info['flags'] & 8: raw = unswizzle(raw, w, h)
             raw = raw.reshape(h, w)
             return np.stack([((raw >> 11) & 31) / 31, ((raw >> 5) & 63) / 63, (raw & 31) / 31], -1)
+        if fmt in (9, 10, 11):          # x8r8g8b8, a8r8g8b8 (the sky's is 11): 32 bits, alpha ignored here
+            raw = np.frombuffer(self.full, dtype='<u4', count=w * h, offset=po)
+            if info['flags'] & 8: raw = unswizzle(raw.astype(np.uint64), w, h).astype(np.uint32)
+            raw = raw.reshape(h, w)
+            return np.stack([((raw >> 16) & 255) / 255.0, ((raw >> 8) & 255) / 255.0, (raw & 255) / 255.0], -1)
         raise ValueError('bitmap format %d' % fmt)
+
+    def alpha(self, info):
+        """one bitmap's first level's alpha as floats (h, w): DXT3 (explicit 4 bits), DXT5, A8, A8R8G8B8; 1 for the others"""
+        w, h, fmt, po = info['w'], info['h'], info['fmt'], info['pixoff']
+        if fmt == 15:
+            n = ((w + 3) // 4) * ((h + 3) // 4)
+            blocks = np.frombuffer(self.full, dtype=np.uint8, count=n * 16, offset=po).reshape(n, 16)[:, :8]
+            nib = np.stack([blocks & 15, blocks >> 4], -1).reshape(n, 16).astype(np.float64) / 15.0   # low nibble first
+            img = nib.reshape(h // 4, w // 4, 4, 4).transpose(0, 2, 1, 3).reshape(h, w)
+            return img
+        if fmt == 16:
+            return decode_dxt1(self.full[po:po + ((w + 3) // 4) * ((h + 3) // 4) * 16], w, h, dxt5=True)[..., 3].astype(np.float64) / 255
+        if fmt == 0:
+            raw = np.frombuffer(self.full, dtype=np.uint8, count=w * h, offset=po).astype(np.uint32)
+            if info['flags'] & 8: raw = unswizzle(raw, w, h)
+            return raw.reshape(h, w) / 255.0
+        if fmt in (10, 11):
+            raw = np.frombuffer(self.full, dtype='<u4', count=w * h, offset=po)
+            if info['flags'] & 8: raw = unswizzle(raw.astype(np.uint64), w, h).astype(np.uint32)
+            return (raw.reshape(h, w) >> 24).astype(np.float64) / 255
+        return np.ones((h, w))
+
+    def model_parts(self, name, geometry):
+        """the parts of one geometry of a model: dict(shader=(group, name), pos (n, 3), normal (n, 3), uv (n, 2) in [-1, 1],
+        tris (m, 3), node (n,)), the strips as triangle lists. Also the model's base map scale."""
+        td = self.td
+        mo = self.tags[(b'mode', name)] - B
+        scale = struct.unpack_from('<2f', td, mo + 0x30)
+        sc_, sa = struct.unpack_from('<II', td, mo + 0xac + 48); sa -= B
+        shaders = []
+        for i in range(sc_):
+            g, nm, _n, _i = struct.unpack_from('<4sIII', td, sa + i * 0x20); shaders.append((g[::-1], _name(td, nm)))
+        gc, ga = struct.unpack_from('<II', td, mo + 0xac + 36); ga -= B
+        assert geometry < gc, (name, geometry, gc)
+        pc, pa = struct.unpack_from('<II', td, ga + geometry * 0x30 + 0x24); pa -= B
+        out = []
+        for p in range(pc):
+            po = pa + p * 0x68
+            flags, shader = struct.unpack_from('<IH', td, po)
+            ttype, tcount, tbase = struct.unpack_from('<HxxII', td, po + 0x44)
+            vtype, vcount, voff, vbase, vhw = struct.unpack_from('<HxxIIII', td, po + 0x54)
+            vdata = struct.unpack_from('<I', td, vhw - B + 4)[0] - B
+            n = tcount + 2 if ttype == 1 else tcount * 3
+            idx = np.array(struct.unpack_from('<%dH' % n, td, tbase - B), dtype=np.int64)
+            raw = np.frombuffer(td, dtype=np.uint8, count=vcount * 32, offset=vdata).reshape(vcount, 32)
+            pos = np.frombuffer(raw[:, :12].tobytes(), dtype='<f4').reshape(vcount, 3).astype(np.float64)
+            nrm = np.array([decode_vec(int(u)) for u in np.frombuffer(raw[:, 12:16].tobytes(), dtype='<u4')])
+            uv = np.frombuffer(raw[:, 24:28].tobytes(), dtype='<i2').reshape(vcount, 2) / 32767.0
+            node = raw[:, 28].astype(np.int64) // 3
+            tris = []
+            if ttype == 1:
+                for i in range(len(idx) - 2):
+                    a, b, c = idx[i], idx[i + 1], idx[i + 2]
+                    if a == b or b == c or a == c: continue
+                    tris.append((a, c, b) if i & 1 else (a, b, c))
+            else:
+                tris = [tuple(idx[i * 3:i * 3 + 3]) for i in range(tcount)]
+            out.append(dict(shader=shaders[shader] if shader < len(shaders) else None, pos=pos, normal=nrm / np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9),
+                            uv=uv, tris=np.array(tris, dtype=np.int64).reshape(-1, 3), node=node, flags=flags, scale=scale))
+        return out
+
+    def model_lod_geometry(self, name, region=0, permutation=0, lod=0):
+        """the geometry index of one LOD (0: the lowest detail with a geometry, going up) of a region's permutation"""
+        td = self.td
+        mo = self.tags[(b'mode', name)] - B
+        rc, ra = struct.unpack_from('<II', td, mo + 0xac + 24); ra -= B
+        pcnt, pa = struct.unpack_from('<II', td, ra + region * 0x4c + 0x40); pa -= B
+        geoms = struct.unpack_from('<5h', td, pa + permutation * 0x58 + 0x44)
+        valid = [g for g in geoms if g >= 0]
+        return valid[min(lod, len(valid) - 1)] if valid else 0
 
 def swizzle_masks(w, h):
     """rasterizer_swizzle.c's compute_swizzle_masks: x and y bits interleaved, a finished axis skipped"""

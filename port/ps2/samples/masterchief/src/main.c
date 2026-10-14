@@ -33,8 +33,9 @@
 #include <timer.h>
 enum { P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
 static const char *prof_name[P_COUNT] = { "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
-static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled;
-static void prof_mark(int phase) { u32 t = cpu_ticks(); prof_sum[phase] += t - prof_last; prof_last = t; }
+static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled, prof_frame_start, prof_busy_max;
+static u32 prof_max[P_COUNT];
+static void prof_mark(int phase) { u32 t = cpu_ticks(); u32 d = t - prof_last; prof_sum[phase] += d; if (d > prof_max[phase]) prof_max[phase] = d; prof_last = t; }
 #define PROF_MARK(p) prof_mark(p)
 #else
 #define PROF_MARK(p) ((void)0)
@@ -156,6 +157,48 @@ static inline void vu0_view_point(const vec4 *p, vec4 *pv)
 		: : "r"(p), "r"(pv) : "memory");
 }
 
+/* The rest of a map vertex on VU0, for a view position (in front of the near plane) in pv: one divide, then the screen
+   position (plus the GS's origin, so that the fixed-point conversion gives the packed coordinates), the depth, Q,
+   and the four texture-coordinate pairs, each the static (u, v, ...) times Q (the details' times their scales).
+   Constants in vf8-vf11: (focal, -focal), (cx + 2048, cy + 2048), k1, k2. Writes the two quads of ST registers
+   into the vertex's record; out gets the screen position (floats), the fixed-point x and y, the depth and Q. */
+static inline void vu0_project(const vec4 *pv, const vec4 *uvlm, const vec4 *uv2, const vec4 *scale, vec4 *st, vec4 *d, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"vdiv $Q, $vf0w, $vf1z\n"
+		"lqc2 $vf12, 0(%1)\n" "lqc2 $vf13, 0(%2)\n" "lqc2 $vf14, 0(%3)\n"
+		"vwaitq\n"
+		"vmulq.xy $vf2, $vf1, $Q\n" "vmul.xy $vf2, $vf2, $vf8\n" "vadd.xy $vf2, $vf2, $vf9\n"
+		"vftoi4.xy $vf3, $vf2\n"
+		"vmulq $vf5, $vf10, $Q\n" "vsub $vf5, $vf5, $vf11\n" "vftoi0.x $vf6, $vf5\n"
+		"vaddq.x $vf4, $vf0, $Q\n"
+		"vmulq $vf12, $vf12, $Q\n" "vmulq $vf13, $vf13, $Q\n" "vmul $vf13, $vf13, $vf14\n"
+		"sqc2 $vf12, 0(%4)\n" "sqc2 $vf13, 0(%5)\n"
+		"sqc2 $vf2, 0(%6)\n" "sqc2 $vf3, 16(%6)\n" "sqc2 $vf6, 32(%6)\n" "sqc2 $vf4, 48(%6)\n"
+		: : "r"(pv), "r"(uvlm), "r"(uv2), "r"(scale), "r"(st), "r"(d), "r"(out) : "memory");
+}
+
+/* a world position (w 1) all the way to the screen: the view matrix (vf20-vf23) and the constants (vf8-vf11);
+   out gets the screen position (floats, the GS's origin added), the fixed-point x and y, and the depth */
+static inline void vu0_world_to_screen(const vec4 *p, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"vmulax.xyz $ACC, $vf20, $vf1x\n" "vmadday.xyz $ACC, $vf21, $vf1y\n" "vmaddaz.xyz $ACC, $vf22, $vf1z\n" "vmaddw.xyz $vf19, $vf23, $vf1w\n"
+		"vdiv $Q, $vf0w, $vf19z\n" "vwaitq\n"
+		"vmulq.xy $vf2, $vf19, $Q\n" "vmul.xy $vf2, $vf2, $vf8\n" "vadd.xy $vf2, $vf2, $vf9\n"
+		"vftoi4.xy $vf3, $vf2\n"
+		"vmulq $vf5, $vf10, $Q\n" "vsub $vf5, $vf5, $vf11\n" "vftoi0.x $vf6, $vf5\n"
+		"sqc2 $vf2, 0(%1)\n" "sqc2 $vf3, 16(%1)\n" "sqc2 $vf6, 32(%1)\n"
+		: : "r"(p), "r"(out) : "memory");
+}
+
+static inline void vu0_load_constants(const vec4 *c)
+{
+	__asm__ __volatile__("lqc2 $vf8, 0(%0)\n" "lqc2 $vf9, 16(%0)\n" "lqc2 $vf10, 32(%0)\n" "lqc2 $vf11, 48(%0)\n" : : "r"(c));
+}
+
 /* the same by two bones, blended by w = (w0, w1, 0, 0); the blended normal is normalised */
 static inline void vu0_skin(const mat4 *b0, const mat4 *b1, const vec4 *p, const vec4 *n, const vec4 *w, vec4 *pw, vec4 *nw, vec4 *pv)
 {
@@ -234,7 +277,7 @@ static const float spec_tint[3] = { 1.f, 0.97f, 0.9f };   /* the highlight's col
 
 /* tw, th: log2 of the size, for TEX0. levels: the mip levels of the map's textures (0 or 1: none), the
    levels after the first at video memory tbp (in 256-byte units) with buffer width tbw, for MIPTBP1 and 2 */
-typedef struct { GSTEXTURE t; int tw, th, levels; unsigned mip_tbp[7], mip_tbw[7]; } texture;
+typedef struct { GSTEXTURE t; int tw, th, levels, alpha; unsigned mip_tbp[7], mip_tbw[7]; } texture;   /* alpha: palette entry 255 is cut out */
 
 static texture chief_tex, rifle_tex, mask_tex, rifle_mask_tex, display_tex;
 
@@ -538,19 +581,25 @@ static int cull(const svert *v, const unsigned short *tri, int first, int count)
    carry UV (texel coordinates), 0 for ST and Q (perspective-correct, and any range: tiling). clamp: 0
    repeats the texture, 1 clamps it, -1 leaves the setting as it is */
 static int prim_lod_k;           /* TEX1's K for the next mipmapped texture: the level of detail's bias, in 1/16 */
+static int prim_test = -1;       /* the TEST register for the next primitive: -1 leaves it, 0 the usual, 1 an alpha test (a cut-out) */
 
 static void set_prim(GSGLOBAL *gs, const texture *x, int fst, int clamp)
 {
 	int mipped = x && x->levels > 1;
-	int regs = x ? (clamp < 0 ? 3 : 4) + (mipped ? 2 : 0) : 1;
+	int regs = (x ? (clamp < 0 ? 3 : 4) + (mipped ? 2 : 0) : 1) + (prim_test >= 0);
 	u64 *p = gsKit_heap_alloc(gs, regs, regs * 16, GIF_AD);
 
 	*p++ = GIF_TAG_AD(regs);
 	*p++ = GIF_AD;
 	*p++ = GS_SETREG_PRIM(GS_PRIM_PRIM_TRIANGLE, 1, x ? 1 : 0, gs->PrimFogEnable, gs->PrimAlphaEnable, gs->PrimAAEnable, fst, gs->PrimContext, 0);
 	*p++ = GS_PRIM;
+	if (prim_test >= 0)
+	{
+		*p++ = prim_test ? GS_SETREG_TEST(1, 5, 0x40, 0, 0, 0, 1, 2) : GS_SETREG_TEST(0, 1, 0, 0, 0, 0, 1, 2);   /* alpha >= 0x40 passes, or everything does; depth GEQUAL */
+		*p++ = GS_TEST_1 + gs->PrimContext;
+	}
 	if (!x) return;
-	*p++ = GS_SETREG_TEX0(x->t.Vram / 256, x->t.TBW, x->t.PSM, x->tw, x->th, gs->PrimAlphaEnable, 0,
+	*p++ = GS_SETREG_TEX0(x->t.Vram / 256, x->t.TBW, x->t.PSM, x->tw, x->th, gs->PrimAlphaEnable || prim_test == 1, 0,
 		x->t.VramClut / 256, x->t.ClutPSM, x->t.ClutStorageMode, 0, GS_CLUT_STOREMODE_LOAD);
 	*p++ = GS_TEX0_1 + gs->PrimContext;
 	/* the level of detail comes from Q (the depth): log2 (1 / Q) + K, a trilinear filter between the levels */
@@ -686,12 +735,12 @@ static void draw_ground(GSGLOBAL *gs, const xform *world_to_view, float theta, f
 #define ATTRS 7                     /* what a vertex carries through the clip: r, g, b, u, v and the lightmap's u, v */
 
 typedef struct { float p[3]; float a[ATTRS]; } cvert;
-/* What the passes send for a vertex, six registers (48 bytes) in this order: RGBAQ (the lightmap's hue; Q = 1 / z,
-   and alpha 0x80, which the blended passes read), ST for the base map, ST for the lightmap, ST for each of
-   the two detail maps (the base map's times the detail's scale), and XYZ2, which kicks the vertex. A pass is
+/* What the passes send for a vertex, six registers (48 bytes, three quadwords) in this order: ST for the base map, ST
+   for the lightmap, ST for each of the two detail maps (the base map's times the detail's scale), RGBAQ (the lightmap's
+   hue; Q = 1 / z, and alpha 0x80, which the blended passes read), and XYZ2, which kicks the vertex. A pass is
    this record sent whole with the registers it does not use listed as NOP, so a span's triangles are built
    once, whatever the number of passes. */
-typedef struct { u64 rgbaq, st, lmst, d0st, d1st, xyz2; } mapv;
+typedef struct { u64 st, lmst, d0st, d1st, rgbaq, xyz2; } mapv;
 typedef struct { mapv m; float x, y, pad[2]; } mvert __attribute__((aligned(16)));   /* and the screen position, for culling */
 
 static float clip_plane[CLIP_PLANES][4];   /* d = a x + b y + c z + e >= 0 is inside */
@@ -703,6 +752,7 @@ static mvert map_v[MAP_VERTS];
 static unsigned char map_code[MAP_VERTS];
 static unsigned map_stamp[MAP_VERTS], map_frame;       /* a vertex is transformed, projected and given its registers when a visible triangle first needs it, once a frame */
 static unsigned char chunk_visible[MAP_CHUNKS];
+static xform sky_xform;                 /* the view without its translation, for the sky */
 static float detail_scale[MAP_TEXTURES + 1][2];        /* each base map's two detail scales (0: none; the last entry is for no texture) */
 static mapv map_out[MAP_TRIS * 3 + 4096] __attribute__((aligned(64)));
 static texture map_tex[MAP_TEXTURES], map_detail_tex[MAP_DETAILS], map_lm_tex[MAP_LIGHTMAPS];
@@ -710,9 +760,13 @@ static int span_first[MAP_SPANS], span_verts[MAP_SPANS];   /* each span's vertic
 static int lod_k_base[MAP_TEXTURES], lod_k_detail[MAP_TEXTURES][2];   /* each pass's K for TEX1 (see map_lod_setup) */
 #ifndef NO_VU0
 static vec4 map_p4[MAP_VERTS];                         /* positions as quads, w 1, for the VU */
+static vec4 map_uvlm[MAP_VERTS], map_uv2[MAP_VERTS];   /* (u, v, lightmap u, v) and (u, v, u, v) */
+static vec4 detail_scale4[MAP_TEXTURES + 1];           /* (k0, k0, k1, k1) */
+static vec4 vu_const[4], vu_out[4];
+static float vu_band_x0, vu_band_x1, vu_band_y0, vu_band_y1;   /* the guard band, in the VU's shifted screen coordinates */
 #endif
 #ifdef PROFILE
-static u32 prof_map_clipped, prof_map_vertices, prof_map_chunks, prof_t_vertex, prof_t_clip, prof_clip_near, prof_clip_side;
+static u32 prof_map_clipped, prof_map_vertices, prof_map_chunks, prof_clip_near, prof_clip_side;
 #endif
 
 static void clip_setup(const GSGLOBAL *gs)
@@ -840,8 +894,20 @@ static void set_clamp_repeat(GSGLOBAL *gs)
 	*p++ = GS_CLAMP_1 + gs->PrimContext;
 }
 
+/* the state the Chief's draws expect: no alpha test (and set_prim leaves the TEST register alone again) */
+static void set_test_normal(GSGLOBAL *gs)
+{
+	u64 *p = gsKit_heap_alloc(gs, 1, 16, GIF_AD);
+
+	*p++ = GIF_TAG_AD(1);
+	*p++ = GIF_AD;
+	*p++ = GS_SETREG_TEST(0, 1, 0, 0, 0, 0, 1, 2);
+	*p++ = GS_TEST_1 + gs->PrimContext;
+	prim_test = -1;
+}
+
 /* a pass over a span's vertices: the records as they are, one REGLIST packet with six registers a vertex, of
-   which this pass reads RGBAQ, XYZ2 and the one ST it needs (the other three are NOP) */
+   which this pass reads RGBAQ, XYZ2 and the one ST it needs (the other three go to UV, which drawing with ST ignores) */
 /* a vertex record is three quadwords */
 static inline void copy_record(mapv *dst, const mapv *src)
 {
@@ -864,14 +930,15 @@ static inline void copy_quads(void *dst, const void *src, int quads)
 static void send_map_pass(GSGLOBAL *gs, const texture *x, int pass, int lod_k, const mapv *v, int n)
 {
 	static const u64 regs[4] = {
-		(u64)GS_RGBAQ | ((u64)GS_ST << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_UV << 16) | ((u64)GS_XYZ2 << 20),
-		(u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_ST << 8) | ((u64)GS_UV << 12) | ((u64)GS_UV << 16) | ((u64)GS_XYZ2 << 20),
-		(u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_ST << 12) | ((u64)GS_UV << 16) | ((u64)GS_XYZ2 << 20),
-		(u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_ST << 16) | ((u64)GS_XYZ2 << 20) };
+		(u64)GS_ST | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20),
+		(u64)GS_UV | ((u64)GS_ST << 4) | ((u64)GS_UV << 8) | ((u64)GS_UV << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20),
+		(u64)GS_UV | ((u64)GS_UV << 4) | ((u64)GS_ST << 8) | ((u64)GS_UV << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20),
+		(u64)GS_UV | ((u64)GS_UV << 4) | ((u64)GS_UV << 8) | ((u64)GS_ST << 12) | ((u64)GS_RGBAQ << 16) | ((u64)GS_XYZ2 << 20) };
 	int qwords = n * 3;
 	u64 *p;
 
 	prim_lod_k = lod_k;
+	prim_test = x && pass == PASS_BASE && x->alpha ? 1 : 0;
 	set_prim(gs, x, 0, pass == PASS_LIGHTMAP ? 1 : 0);
 	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
 	*p++ = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 6);
@@ -940,22 +1007,43 @@ static inline void project_cvert(const cvert *v, mvert *o, int tex)
 static inline void map_vertex(int i, int tex, const xform *view)
 {
 	const float *pv = map_view[i];
-#ifdef PROFILE
-	u32 t0 = cpu_ticks();
-#endif
+	mvert *o = &map_v[i];
 
 #ifndef NO_VU0
-	vu0_view_point(&map_p4[i], (vec4 *)map_view[i]);
+	if (i < MAP_SKY_FIRST_VERT)
+	{
+		vu0_view_point(&map_p4[i], (vec4 *)map_view[i]);
+		map_stamp[i] = map_frame;
+		if (pv[2] < z_near) { map_code[i] = 1; return; }
+		vu0_project((const vec4 *)map_view[i], &map_uvlm[i], &map_uv2[i], &detail_scale4[tex], (vec4 *)&o->m.st, (vec4 *)&o->m.d0st, vu_out);
+		{
+			float sx = vu_out[0].v[0], sy = vu_out[0].v[1];
+			int code = (sx < vu_band_x0 ? 2 : 0) | (sx > vu_band_x1 ? 4 : 0) | (sy < vu_band_y0 ? 8 : 0) | (sy > vu_band_y1 ? 16 : 0);
+			int iz = ((int *)vu_out)[8];
+			u32 qbits = ((u32 *)vu_out)[12];
+
+			map_code[i] = (unsigned char)code;
+			if (code) return;
+			o->x = sx; o->y = sy;
+			iz = iz < 1 ? 1 : (iz > 65535 ? 65535 : iz);
+			o->m.xyz2 = ((u64)(((int *)vu_out)[4] & 0xFFFF)) | ((u64)(((int *)vu_out)[5] & 0xFFFF) << 16) | ((u64)iz << 32);
+			o->m.rgbaq = (u64)map_rgb32[i] | ((u64)qbits << 32);
+		}
+#ifdef PROFILE
+		prof_map_vertices++;
+#endif
+		return;
+	}
+	apply_point(&sky_xform, &map_pos[i * 3], map_view[i]);                  /* the sky surrounds the camera: no translation */
 	(void)view;
 #else
-	apply_point(view, &map_pos[i * 3], map_view[i]);
+	apply_point(i >= MAP_SKY_FIRST_VERT ? &sky_xform : view, &map_pos[i * 3], map_view[i]);
 #endif
 	map_stamp[i] = map_frame;
 	if (pv[2] < z_near) { map_code[i] = 1; return; }
-	map_code[i] = (unsigned char)fill_vertex(&map_v[i], pv, map_rgb32[i], map_uv[i * 2], map_uv[i * 2 + 1], map_lmuv[i * 2], map_lmuv[i * 2 + 1], detail_scale[tex], 0);
+	map_code[i] = (unsigned char)fill_vertex(o, pv, map_rgb32[i], map_uv[i * 2], map_uv[i * 2 + 1], map_lmuv[i * 2], map_lmuv[i * 2 + 1], detail_scale[tex], 0);
 #ifdef PROFILE
 	prof_map_vertices++;
-	prof_t_vertex += cpu_ticks() - t0;
 #endif
 }
 
@@ -965,19 +1053,24 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 
 #ifndef NO_VU0
 	vu0_load_view((const mat4 *)view4);
+	vu0_load_constants(vu_const);
 #else
 	(void)view4;
 #endif
+	sky_xform = *view;
+	sky_xform.t[0] = sky_xform.t[1] = sky_xform.t[2] = 0.f;
 	if (++map_frame == 0) { memset(map_stamp, 0, sizeof(map_stamp)); map_frame = 1; }
 	/* the chunks in view: a bounding sphere against the five planes */
 	for (c = 0; c < MAP_CHUNKS; c++)
 	{
-		float v[3], r = map_chunks[c * 4 + 3];
+		const float *bound = &map_chunks[c * 8];
+		float v[3], r = bound[3], reach = bound[4] + r;
 		int pl, vis = 1;
 
-		apply_point(view, &map_chunks[c * 4], v);
+		apply_point(view, bound, v);
 		for (pl = 0; pl < CLIP_PLANES; pl++)
 			if (plane_dist(pl, v) < -r * clip_length[pl]) { vis = 0; break; }
+		if (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > reach * reach) vis = 0;      /* beyond what it is worth drawing */
 		chunk_visible[c] = (unsigned char)vis;
 #ifdef PROFILE
 		prof_map_chunks += vis;
@@ -988,6 +1081,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 	for (sp = 0; sp < MAP_SPANS; sp++)
 	{
 		int tex = map_spans[sp * 6], ts = tex < 0 ? MAP_TEXTURES : tex;
+		const int two_sided = tex >= 0 && map_tex[tex].alpha;          /* foliage is seen from both sides */
 
 		span_first[sp] = n;
 		for (b = map_spans[sp * 6 + 4]; b < map_spans[sp * 6 + 4] + map_spans[sp * 6 + 5]; b++)
@@ -997,8 +1091,16 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 			if (!chunk_visible[map_batches[b * 3]]) continue;
 			for (i = first; i < first + count; i++)
 			{
-				unsigned short ia = map_tri[i * 3], ib = map_tri[i * 3 + 1], ic = map_tri[i * 3 + 2];
+				unsigned short ia, ib, ic;
 				int ca, cb, cc;
+
+				if (!two_sided)        /* facing away from the camera: not even its vertices are needed */
+				{
+					const float *pl = &map_planes[i * 4];
+
+					if (pl[0] * cam_pos[0] + pl[1] * cam_pos[1] + pl[2] * cam_pos[2] + pl[3] <= 0.f) continue;
+				}
+				ia = map_tri[i * 3]; ib = map_tri[i * 3 + 1]; ic = map_tri[i * 3 + 2];
 
 				if (map_stamp[ia] != map_frame) map_vertex(ia, ts, view);
 				if (map_stamp[ib] != map_frame) map_vertex(ib, ts, view);
@@ -1009,7 +1111,9 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 				{
 					const mvert *va = &map_v[ia], *vb = &map_v[ib], *vc = &map_v[ic];
 
-					if (screen_area(va, vb, vc) * CULL_SIGN <= 0.f) continue;
+					float area = screen_area(va, vb, vc);
+
+					if (two_sided ? fabsf(area) < 0.01f : area * CULL_SIGN <= 0.f) continue;
 					if (n + 3 > cap) break;
 					copy_record(&map_out[n++], &va->m); copy_record(&map_out[n++], &vb->m); copy_record(&map_out[n++], &vc->m);
 				}
@@ -1018,9 +1122,6 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 					cvert in[3], poly[CLIP_MAX];
 					mvert sv[CLIP_MAX];
 					int m, k, v, ids[3];
-#ifdef PROFILE
-					u32 t0 = cpu_ticks();
-#endif
 #ifdef PROFILE
 					if ((ca | cb | cc) & 1) prof_clip_near++; else prof_clip_side++;
 #endif
@@ -1037,13 +1138,14 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 					for (v = 0; v < m; v++) project_cvert(&poly[v], &sv[v], ts);
 					for (k = 1; k + 1 < m; k++)
 					{
-						if (screen_area(&sv[0], &sv[k], &sv[k + 1]) * CULL_SIGN <= 0.f) continue;
+						float area = screen_area(&sv[0], &sv[k], &sv[k + 1]);
+
+						if (two_sided ? fabsf(area) < 0.01f : area * CULL_SIGN <= 0.f) continue;
 						if (n + 3 > cap) break;
 						copy_record(&map_out[n++], &sv[0].m); copy_record(&map_out[n++], &sv[k].m); copy_record(&map_out[n++], &sv[k + 1].m);
 					}
 #ifdef PROFILE
 					prof_map_clipped++;
-					prof_t_clip += cpu_ticks() - t0;
 #endif
 				}
 			}
@@ -1087,6 +1189,7 @@ static void draw_map(GSGLOBAL *gs, const xform *view, const void *view4)
 	map_blend_end(gs);
 #endif
 	set_clamp_repeat(gs);                                        /* the Chief's draws expect the repeat */
+	set_test_normal(gs);
 }
 
 /* The GS picks a mip level from the depth alone: level = log2 (1 / Q) + K. A pass's texels a pixel, at depth z,
@@ -1110,6 +1213,16 @@ static void map_lod_setup(void)
 	for (i = 0; i < MAP_VERTS; i++)
 	{
 		map_p4[i].v[0] = map_pos[i * 3]; map_p4[i].v[1] = map_pos[i * 3 + 1]; map_p4[i].v[2] = map_pos[i * 3 + 2]; map_p4[i].v[3] = 1.f;
+		map_uvlm[i].v[0] = map_uv[i * 2]; map_uvlm[i].v[1] = map_uv[i * 2 + 1]; map_uvlm[i].v[2] = map_lmuv[i * 2]; map_uvlm[i].v[3] = map_lmuv[i * 2 + 1];
+		map_uv2[i].v[0] = map_uv[i * 2]; map_uv2[i].v[1] = map_uv[i * 2 + 1]; map_uv2[i].v[2] = map_uv[i * 2]; map_uv2[i].v[3] = map_uv[i * 2 + 1];
+	}
+	{
+		float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
+
+		vu_const[0].v[0] = focal; vu_const[0].v[1] = -focal; vu_const[0].v[2] = vu_const[0].v[3] = 0.f;
+		vu_const[1].v[0] = screen_cx + ox; vu_const[1].v[1] = screen_cy + oy; vu_const[1].v[2] = vu_const[1].v[3] = 0.f;
+		for (i = 0; i < 4; i++) { vu_const[2].v[i] = z_k1; vu_const[3].v[i] = z_k2; }
+		vu_band_x0 = clip_x_min + ox; vu_band_x1 = clip_x_max + ox; vu_band_y0 = clip_y_min + oy; vu_band_y1 = clip_y_max + oy;
 	}
 #endif
 	for (i = 0; i < MAP_VERTS; i++)
@@ -1117,6 +1230,13 @@ static void map_lod_setup(void)
 	for (t = 0; t < MAP_TEXTURES; t++)
 		for (d = 0; d < 2; d++)
 			detail_scale[t][d] = map_detail_of[t].detail[d] < 0 ? 0.f : map_detail_of[t].scale[d];
+#ifndef NO_VU0
+	for (t = 0; t <= MAP_TEXTURES; t++)
+	{
+		detail_scale4[t].v[0] = detail_scale4[t].v[1] = detail_scale[t][0];
+		detail_scale4[t].v[2] = detail_scale4[t].v[3] = detail_scale[t][1];
+	}
+#endif
 
 	for (t = 0; t < MAP_TEXTURES; t++)
 	{
@@ -1230,7 +1350,7 @@ static void skin_chief(const xform *bone_world, const xform *view, int visor_fir
    and the camera does not change) is worked out once at the start. A frame then projects the cached
    positions, takes the cached diffuse colour, and gives each vertex its view-dependent specular colour once in
    SPEC_SPREAD frames (the camera moves a degree and a half a frame; the visor's colour, 69 vertices, every frame). */
-#define SPEC_SPREAD 3
+#define SPEC_SPREAD 4
 
 typedef struct { float v[4]; } __attribute__((aligned(16))) qvec;
 static qvec chief_wp[ANIM_FRAMES][CHIEF_VERTS], chief_wn[ANIM_FRAMES][CHIEF_VERTS], chief_ls[ANIM_FRAMES][CHIEF_VERTS];
@@ -1315,6 +1435,17 @@ static inline void view_project(const qvec *wp, float z_add, const xform *view, 
 	qvec pv;
 
 #ifndef NO_VU0
+	if (z_add == 0.f)                      /* all on the VU (the display's nudge toward the camera takes the slow way) */
+	{
+		int iz;
+
+		vu0_world_to_screen((const vec4 *)wp, vu_out);
+		o->x = vu_out[0].v[0]; o->y = vu_out[0].v[1];
+		iz = ((int *)vu_out)[8];
+		iz = iz < 1 ? 1 : (iz > 65534 ? 65534 : iz);
+		o->xyz2 = ((u64)(((int *)vu_out)[4] & 0xFFFF)) | ((u64)(((int *)vu_out)[5] & 0xFFFF) << 16) | ((u64)iz << 32);
+		return;
+	}
 	vu0_view_point((const vec4 *)wp, (vec4 *)&pv);
 	(void)view;
 #else
@@ -1469,6 +1600,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 #ifndef NO_MAP
 #ifndef NO_VU0
 	vu0_load_view(&view4);
+	vu0_load_constants(vu_const);
 #endif
 	cached_pose(frame, &view);
 	PROF_MARK(P_RIFLE);
@@ -1547,7 +1679,7 @@ int main(void)
 	dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
 	dmaKit_chan_init(DMA_CHANNEL_GIF);
 
-	gs = gsKit_init_global_custom(2 * 1024 * 1024, 16 * 1024);   /* the map's textured packets alone take about 0.4 MB */
+	gs = gsKit_init_global_custom(6 * 1024 * 1024, 16 * 1024);   /* a frame of the map's packets (four passes of a third of its triangles) takes about 2.5 MB */
 	gs->Mode = GS_MODE_NTSC;        /* 60 Hz whatever the console's region: the scene is timed for it */
 	gs->Height = 448;               /* gsKit sized the buffers for the console's own mode (PAL: 512 lines) before this */
 #if defined(FB16) || !defined(NO_MAP)
@@ -1574,7 +1706,10 @@ int main(void)
 	texture_setup(gs, &display_tex, 256, display_tex_pixels, display_tex_clut);
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
+	{
 		texture_setup_mips(gs, &map_tex[i], map_textures[i].width, map_textures[i].height, map_textures[i].levels, map_textures[i].pixels, map_textures[i].clut, 0);
+		map_tex[i].alpha = map_textures[i].alpha;
+	}
 	for (i = 0; i < MAP_DETAILS; i++)         /* the grey textures share one palette: alpha = index */
 		texture_setup_mips(gs, &map_detail_tex[i], map_details[i].width, map_details[i].height, map_details[i].levels, map_details[i].pixels, map_gray_clut, i ? map_detail_tex[0].t.VramClut : 0);
 	for (i = 0; i < MAP_LIGHTMAPS; i++)
@@ -1645,6 +1780,13 @@ int main(void)
 #endif
 		gsKit_queue_exec(gs);
 		PROF_MARK(P_EXEC);
+#ifdef PROFILE
+		{
+			u32 busy = cpu_ticks() - prof_frame_start;
+
+			if (busy > prof_busy_max) prof_busy_max = busy;
+		}
+#endif
 		gsKit_sync_flip(gs);
 		PROF_MARK(P_FLIP);
 #ifdef PROFILE
@@ -1661,9 +1803,8 @@ int main(void)
 #ifndef NO_MAP
 			printf("PROFILE   map: %u of %d chunks in view, %u vertices processed, %u triangles clipped a frame\n",
 				prof_map_chunks / frames, MAP_CHUNKS, prof_map_vertices / frames, prof_map_clipped / frames);
-			printf("PROFILE   map vertex work %.2f ms, clipping %.2f ms (%u near-plane, %u guard-band)\n", prof_t_vertex * ms_per_tick / frames, prof_t_clip * ms_per_tick / frames, prof_clip_near / frames, prof_clip_side / frames);
+			printf("PROFILE   clipped: %u by the near plane, %u by the guard band\n", prof_clip_near / frames, prof_clip_side / frames);
 			prof_clip_near = prof_clip_side = 0;
-			prof_t_vertex = prof_t_clip = 0;
 			prof_map_clipped = prof_map_vertices = prof_map_chunks = 0;
 #endif
 			{
@@ -1671,15 +1812,18 @@ int main(void)
 
 				for (p = 0; p < P_COUNT; p++)
 				{
-					printf("PROFILE   %-11s %6.2f ms\n", prof_name[p], prof_sum[p] * ms_per_tick / frames);
+					printf("PROFILE   %-11s %6.2f ms (at most %.2f)\n", prof_name[p], prof_sum[p] * ms_per_tick / frames, prof_max[p] * ms_per_tick);
+					prof_max[p] = 0;
 					if (p != P_FLIP) busy += prof_sum[p] * ms_per_tick / frames;
 					prof_sum[p] = 0;
 				}
-				printf("PROFILE   EE busy %.2f ms of %.2f\n", busy, 1000.f / refresh);
+				printf("PROFILE   EE busy %.2f ms of %.2f; the worst frame %.2f ms\n", busy, 1000.f / refresh, prof_busy_max * ms_per_tick);
+				prof_busy_max = 0;
 			}
 			prof_tris = prof_tris_culled = 0;
 			frames = 0;
 		}
+		prof_frame_start = prof_last = cpu_ticks();         /* after the report: printing it is not the frame's work */
 #endif
 	}
 	return 0;

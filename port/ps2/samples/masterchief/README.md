@@ -59,32 +59,46 @@ What the EE does slowly, and what the per-vertex path does instead:
 ## The map (Blood Gulch port: base maps, detail maps, lightmap pages, mip maps)
 
 `export_map.py` reads the map's structure BSP (`bsp.py`; 5,503 triangles and 5,790 vertices in 79
-materials: the terrain, the cliffs and the two round metal bases; scenery is not in the BSP) and bakes:
+materials: the terrain, the cliffs and the two round metal bases) and bakes:
 
 - positions, texture coordinates (they tile, over several units) and the triangles, wound
-  counter-clockwise from outside and sorted into spans by base map, then lightmap page (36);
-- the ten base maps the environment shaders use, as 8-bit palettised textures with mip levels (DXT
-  decoded, cut to 256 pixels on a side unless 1,000 or more triangles use the map: the ground stays
-  512x512), 1.1 MB;
+  counter-clockwise from outside and sorted into spans by base map, then lightmap page;
+- the base maps the environment shaders use, as 8-bit palettised textures with mip levels (DXT
+  decoded, cut to 256 pixels on a side unless 1,000 or more triangles use the map; the ground is
+  256x256, the cliff 256x512);
 - each shader's primary and micro detail maps as 8-bit grey textures, 128 pixels a side with mips, the last
   level their average (a detail map tiles visibly far away, so it fades out); 7 of them, 148 KB;
 - the lightmap pages (RGB565, swizzled; their unused texels are a red and yellow checker, filled in from the
   used ones) as 8-bit grey textures of the brightest channel, 127 KB, and at each vertex the lightmap's
   hue (colour / brightest channel). The few vertices of the other shaders (lights, the teleporter shield)
   get a flat colour;
+- **the scenery**: the rocks, shrubs, ferns, plants, trees, teleporter and flag bases of the scenario's scenery
+  block (50 instances of 15 models, the vehicles and the game's markers left out), at their lowest level of detail,
+  placed in the world and lit from the lightmap at the nearest vertex of the map (times a sun term on the
+  normal), so they are more map triangles: 5,200 of them. Their base maps are cut to 64 pixels (128 for the
+  biggest rock), the average of the detail map folded into the colour; foliage is cut out by a palette entry of
+  alpha 0 and an alpha test, drawn from both sides; each piece is a chunk of its own, drawn only up to a distance
+  that follows its size;
+- **the sky**: the sky model's dome (60 triangles) with its gradient as a 64x64 texture, drawn first, its vertices
+  transformed by the view without its translation, so that it surrounds the camera at any distance;
 - the texture repeats a world unit of surface, per base map, for the mip level;
-- the ground under the Chief: he stands on open ground in front of a base (`CHIEF_X`, `CHIEF_Y`).
+- a plane for each triangle, so that the EE can drop the ones facing away before transforming their vertices;
+- the ground under the Chief: he stands on open ground among the shrubs and boulders of the valley's west side
+  (`CHIEF_X`, `CHIEF_Y`, `CHIEF_BELOW` in the environment move him; the first choice was in front of a base:
+  46.9, -89.0, 1).
 
-On the EE (`draw_map`) a frame first tests each of the exporter's 93 chunks (a bounding sphere against the five
-planes below), then takes the triangles of the chunks in view, span by span. A triangle's vertices are
-transformed on VU0, projected and given their registers (one divide) the first time a visible triangle needs
-them, once a frame. A triangle with a vertex behind the near plane or more than 1400 pixels off the screen
-(the GS's coordinates are 2048 pixels either side of its origin, and gsKit puts that at the screen's corner:
-more wraps) is clipped in view space before projection: the camera stands inside the map. Each span's
-vertices are kept as 48-byte records (RGBAQ, the ST of the base map, the lightmap and each detail map, XYZ2),
-and each pass is those records sent whole, as one REGLIST packet with six registers a vertex of which the
-pass uses RGBAQ, XYZ2 and one ST; the others go to UV, which perspective-correct drawing ignores. The textures
-are perspective-correct (Q = 1 / z) and may tile beyond the 1024 texels UV allows. The passes:
+On the EE (`draw_map`) a frame first tests each of the exporter's chunks (a bounding sphere against the five
+planes below, and the distance a piece of scenery is drawn to), then takes the triangles of the chunks in view, span by
+span. A triangle facing away from the camera (a plane test in the world) is dropped without its vertices being
+touched. The others' vertices are transformed and projected on VU0 (one divide, then the screen position, the depth
+and the four texture-coordinate pairs in one block) the first time a visible triangle needs them, once a frame. A
+triangle with a vertex behind the near plane or more than 1400 pixels off the screen (the GS's coordinates are 2048
+pixels either side of its origin, and gsKit puts that at the screen's corner: more wraps) is clipped in view space
+before projection: the camera stands inside the map. Each span's vertices are kept as 48-byte records (the ST of the
+base map, the lightmap and each detail map, RGBAQ, XYZ2, in three quadwords), and each pass is those records sent
+whole, as one REGLIST packet with six registers a vertex of which the pass uses RGBAQ, XYZ2 and one ST; the others
+go to UV, which perspective-correct drawing ignores. The textures are perspective-correct (Q = 1 / z) and may tile
+beyond the 1024 texels UV allows. The passes:
 
 1. the base map times the lightmap's hue (the GS multiplies the texel by colour / 128);
 2. the primary and micro detail maps: the destination times the texture's alpha / 128 (`ALPHA(1, 2, 0, 2, 0)`),
@@ -99,12 +113,11 @@ triangle). `-DNO_DETAIL_PASS` and `-DNO_LIGHTMAP_PASS` leave a pass out, to comp
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
   32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
-  Video memory: 4.14 MB of 4.19 MB in use with the Chief's and the map's textures.
+  Video memory: 3.98 MB of 4.19 MB in use with the Chief's and the map's textures.
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
-- In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.6 to 13.4 ms of the
-  16.7 ms frame, by where the camera points (the map 5 to 8 ms, the Chief 4 ms). PCSX2 does not time the GS.
-  Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
+- In PCSX2 (`-DPROFILE`): 60 fps through the whole 4-second orbit; the EE is busy 8.7 to 12.5 ms of the
+  16.7 ms frame (its worst frame 14 ms), by where the camera points. PCSX2 does not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
   - The Chief's 20 animation frames are skinned and lit once at the start (his pose only changes 30 times a
     second and only the camera moves: `cached_pose`); a frame projects the cached positions, and gives each
     vertex its view-dependent specular colour once in 3 frames (the visor's, 69 vertices, every frame).
@@ -116,4 +129,4 @@ triangle). `-DNO_DETAIL_PASS` and `-DNO_LIGHTMAP_PASS` leave a pass out, to comp
   pixel shaders; shadowed ground comes out dark. `LM_SCALE` in the exporter's environment scales the
   pages' brightness (default 1).
 
-Not yet: the sky, the shader's bump and reflection, the lights' glow, scenery.
+Not yet: the shader's bump and reflection, the lights' glow, the vehicles.

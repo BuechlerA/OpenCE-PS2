@@ -108,6 +108,26 @@ from 24 ms of EE time to 8.6 to 13.4 ms. The order they paid off in:
   registers it does not use are directed at UV (ignored when drawing with ST).
   Copy with 128-bit loads and stores (`u128`): the EE's `memcpy` moves
   less.
+- **Drop back-facing triangles before touching their vertices.** A plane per
+  triangle (the exporter's, a normal and an offset) against the camera position
+  is four multiplies; the vertices only back-facing triangles use are then
+  never transformed. It cut the vertices a frame processes in the heaviest view
+  from 6,300 to 3,800 and the worst frame by 3 ms, for the same picture.
+- **A whole vertex on VU0.** The view transform alone (as the skinning does it)
+  helped little; the divide, the screen position, the 12.4 fixed-point
+  conversion (`vftoi4`, with the GS's origin added before it), the depth and
+  every texture coordinate times Q in one asm block took a vertex from about 200
+  instructions to 70, and the Chief's projection from 2.0 to 1.5 ms. Keep the
+  constants in vf8-vf11 and the view in vf20-vf23 (a matrix put in vf24-vf27
+  read back as garbage: not understood, so not used). Lay the record out so the
+  results store as aligned quadwords (`sqc2`), and let the packet's register
+  list read the fields in memory order (any order, RGBAQ and the STs before
+  XYZ2).
+- **The profiler must not time itself.** Printing every 60 frames costs a
+  vsync and landed in the next frame's busy time: reset the frame timer after
+  the report. Per-vertex `cpu_ticks()` calls cost more than the work they
+  timed. Report the worst frame, not just the mean: a window averaging 14 ms
+  dropped frames.
 - **Compiler flags matter more than expected.** `-O3 -ffast-math
   -funroll-loops` took 1.7 ms off the heaviest view (the EE's FPU has no IEEE
   behaviour to give up). Compare stills afterwards.
