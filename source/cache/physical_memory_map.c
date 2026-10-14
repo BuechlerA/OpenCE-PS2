@@ -78,11 +78,13 @@ void physical_memory_allocate(
 	/* port: a PS2 program cannot have the Xbox's addresses (they are the
 	kernel's): the game state and the caches are wherever the platform
 	layer puts them (port/ps2/src/ps2_memory.c), the same each run of a
-	build, and the map's tags are moved to the tag cache's
-	(port/linux/game/tag_relocate.c, cache_files.c) */
+	build, apart from the tag cache, which is at one address in every build
+	(HALO_PORT_TAG_CACHE_ADDRESS), and the map's tags are moved to the tag
+	cache's (port/linux/game/tag_relocate.c, cache_files.c) or were already
+	(tools/ps2/convert_map.py) */
 	physical_memory_map_globals.game_state_base_address = XPhysicalAlloc(GAME_STATE_SIZE, -1, 0, PAGE_READWRITE);
 	match_assert(__FILE__, __LINE__, physical_memory_map_globals.game_state_base_address);
-	physical_memory_map_globals.tag_cache_base_address = XPhysicalAlloc(TAG_CACHE_SIZE, -1, 0, PAGE_READWRITE);
+	physical_memory_map_globals.tag_cache_base_address = XPhysicalAlloc(TAG_CACHE_SIZE, HALO_PORT_TAG_CACHE_ADDRESS, 0, PAGE_READWRITE);
 	match_assert(__FILE__, __LINE__, physical_memory_map_globals.tag_cache_base_address);
 	physical_memory_map_globals.texture_cache_base_address = XPhysicalAlloc(TEXTURE_CACHE_SIZE, -1, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
 	match_assert(__FILE__, __LINE__, physical_memory_map_globals.texture_cache_base_address);

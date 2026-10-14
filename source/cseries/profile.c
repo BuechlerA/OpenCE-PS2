@@ -284,7 +284,12 @@ enum
 {
 	MAXIMUM_PROFILE_SECTIONS = 256,
 	MAXIMUM_GAME_TICKS_PER_FRAME = 150,
+#ifdef HALO_PS2
+	/* port: the history of frames is 1.1 MB, of the PS2's 32 */
+	MAXIMUM_PROFILE_FRAMES = 8,
+#else
 	MAXIMUM_PROFILE_FRAMES = 256,
+#endif
 	MAXIMUM_PROFILE_WINDOWS = 4,
 };
 

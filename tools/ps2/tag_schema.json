@@ -530,7 +530,8 @@
      "name": "bsp",
      "offset": 0,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,
@@ -2225,7 +2226,8 @@
      "name": "hardware_character_index",
      "offset": 12,
      "size": 2,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -2234,7 +2236,8 @@
      "name": "pad",
      "offset": 14,
      "size": 2,
-     "type": 8
+     "type": 8,
+     "value": 0
     }
    ],
    "name": "font_character",
@@ -3660,7 +3663,8 @@
      "name": "runtime_scripting_sound_index",
      "offset": 28,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -4183,7 +4187,8 @@
      "name": "unknown0",
      "offset": 44,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -4192,7 +4197,8 @@
      "name": "unknown1",
      "offset": 48,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,
@@ -4243,7 +4249,8 @@
      "name": "played_permutation_mask",
      "offset": 52,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,
@@ -4252,7 +4259,8 @@
      "name": "previous_permutation_index",
      "offset": 56,
      "size": 2,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -4261,7 +4269,8 @@
      "name": "forced_permutation_index",
      "offset": 58,
      "size": 2,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -4334,7 +4343,8 @@
      "name": "promotion_counter",
      "offset": 136,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,
@@ -4343,7 +4353,8 @@
      "name": "promotion_time",
      "offset": 140,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,
@@ -4352,7 +4363,8 @@
      "name": "scripting_time",
      "offset": 144,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -4361,7 +4373,8 @@
      "name": "scripting_sound_index",
      "offset": 148,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -9089,7 +9102,8 @@
      "name": "cache_block_index",
      "offset": 36,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": -1
     },
     {
      "count": 1,
@@ -9098,7 +9112,8 @@
      "name": "hardware_format",
      "offset": 40,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,
@@ -9107,7 +9122,8 @@
      "name": "base_address",
      "offset": 44,
      "size": 4,
-     "type": 8
+     "type": 8,
+     "value": 0
     },
     {
      "count": 1,

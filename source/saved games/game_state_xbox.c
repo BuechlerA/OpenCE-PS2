@@ -323,7 +323,13 @@ boolean game_state_read_from_file(
 		xbox_game_state_globals.file_valid_for_read || recover_saved_games_hack);
 
 	/* port: read beside the game state, and taken once checked */
+#ifdef HALO_PS2
+	/* (the PS2 has no 3.4 MB to read beside it: a file that fails the check
+	stops the game here whatever was read, so it is read into place) */
+	image = xbox_game_state_globals.buffer;
+#else
 	image = malloc(xbox_game_state_globals.buffer_size);
+#endif
 	if (image &&
 		SetFilePointer(xbox_game_state_globals.handle, 0, NULL, FILE_BEGIN) !=
 			INVALID_SET_FILE_POINTER &&
@@ -342,7 +348,9 @@ boolean game_state_read_from_file(
 			FALSE,
 			csprintf(temporary, "couldn't read saved game file (#%d)", GetLastError()));
 	}
+#ifndef HALO_PS2
 	free(image);
+#endif
 
 	return result;
 }

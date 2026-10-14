@@ -460,6 +460,13 @@ static const struct config_setting config_settings[] =
 		"\"bot:<seed>\" plays controller 1 with a scripted pattern (automated\n"
 		"network tests); \"look:<seed>\" stands still, only turning and looking\n"
 		"up and down; empty for none." },
+	{ "debug.bench_map", _config_string, "\"\"", "HALO_BENCH_MAP", _environment_value, _platform_all,
+		"The PS2 build's benchmark (port/ps2/src/ps2_bench.c): the level to load\n"
+		"from the main menu without a person, and play with a scripted player\n"
+		"(levels\\a10\\a10); empty for none." },
+	{ "debug.bench_ticks", _config_integer, "1800", "HALO_BENCH_TICKS", _environment_value, _platform_all,
+		"The ticks the benchmark plays (30 a second), logging how long each\n"
+		"takes, before it stops." },
 	{ "debug.update_answer", _config_string, "\"\"", "HALO_UPDATE_ANSWER", _environment_value, _platform_desktop,
 		"The answer to the new version question, for automated tests: \"yes\",\n"
 		"\"no\" or \"never\" (do not ask again, confirmed); empty asks." },

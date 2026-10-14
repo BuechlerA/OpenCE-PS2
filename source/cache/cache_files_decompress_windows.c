@@ -247,7 +247,12 @@ enum
 	NUMBER_OF_OVERLAPPED_STRUCTURES,
 
 	READ_BUFFER_SIZE = FILE_BLOCK_SIZE,
+#ifdef HALO_PS2
+	/* port: the copy's buffers are taken from the PS2's 2 MB texture cache */
+	WRITE_BUFFER_SIZE = 0x80000,
+#else
 	WRITE_BUFFER_SIZE = 0x400000,
+#endif
 	ZLIB_BUFFER_SIZE = 0x12000,
 
 	TOTAL_BUFFER_SIZE =

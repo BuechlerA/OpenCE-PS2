@@ -212,7 +212,14 @@ static struct
 static void surface_initialize(D3DSurface *surface, D3DFORMAT format, unsigned long width, unsigned long height)
 {
 	unsigned long pitch = linear_pitch(format, width);
-	void *memory = allocate_resource_memory(pitch * height);
+	/* nothing is drawn to the device's surfaces, or read from them: they have
+	a page of memory between them (2.4 MB of the PS2's 32 for 640 by 480) */
+	static void *scratch;
+	void *memory;
+
+	if (!scratch)
+		scratch = allocate_resource_memory(0x1000);
+	memory = scratch;
 
 	memset(surface, 0, sizeof(*surface));
 	/* owned by the device: without D3DCOMMON_D3DCREATED, Release never frees it */

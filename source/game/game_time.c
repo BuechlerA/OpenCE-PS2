@@ -467,7 +467,13 @@ void game_time_update(
 
 					for (update_index = 0; update_index < server_updates; update_index++)
 					{
+#ifdef HALO_PS2
+						ps2_bench_tick_begin();
+#endif
 						game_tick();
+#ifdef HALO_PS2
+						ps2_bench_tick_end();
+#endif
 						render_interpolation_tick();
 						game_time_globals->server_time++;
 						game_time_globals->local_time++;

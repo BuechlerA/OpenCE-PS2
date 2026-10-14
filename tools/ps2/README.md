@@ -21,6 +21,8 @@ repository.
 | `tag_schema.json` | The tag schema: each tag group and block definition, with the offsets and sizes of the Xbox ABI. Generated, committed. |
 | `compile_check.py` | Compiles each of the game's C files for the PS2's EE with ps2dev's GCC, and reports which fail and why, grouped by error. Also reports the size of the code and data. |
 | `pcsx2_run.py` | Boots a PS2 program in PCSX2 without its window, and prints what it writes to the console. Stops when a given text appears or after a timeout. |
+| `convert_map.py` | The map converter's first pass: an Xbox map as the PS2 reads it (inflated, its tags' runtime values reset, its tags and BSPs moved to the PS2's tag cache). |
+| `pcsx2_bench.py` | Runs the PS2 build's benchmark in PCSX2: the game loads a level from the main menu, plays it with a scripted player and logs how long its simulation ticks take. |
 | `relocation_check.py` | Checks, on each map, that the PS2's tag relocation (`port/linux/game/tag_relocate.c`) knows every pointer in the tags and BSPs: it applies the same rules, then lists every other word that points into them. |
 | `semantics_header.py` | Makes the PS2 build's `halo_msvc_semantics.h` (used by `ninja ps2` and `compile_check.py`). |
 | `unimplemented_stubs.py` | Writes a stub for each function the PS2 build calls and nothing defines yet (used by `ninja ps2`). |
@@ -80,10 +82,11 @@ ninja ps2
 python tools/ps2/pcsx2_run.py build/ps2/halo.elf --until unimplemented: --timeout 60
 ```
 
-The PS2's platform layer is not complete. Every function that the game
-calls and that nothing defines yet is a stub: it prints
-`unimplemented: NAME` and stops. `build/ps2/unimplemented.txt` lists the
-stubs. A run in PCSX2 shows the next function to write. A missing data
+Every function the game calls that the PS2's platform layer has not got
+is a stub: it prints `unimplemented: NAME` and stops. `build/ps2/unimplemented.txt`
+lists the stubs, none now: `port/ps2/src/ps2_null_platform.c` answers for
+the services the PS2 does not have (sound, the network, voice chat, internet
+play, the PC version's menus, the high-res HUD and text). A missing data
 symbol (a table, a global) stops the build instead, because a stub cannot
 stand in for data. So does an object that defines a name ps2sdk's libraries
 define (the linker would quietly take ours for the libraries' own calls
@@ -94,14 +97,41 @@ build compiles as they are. `port/ps2/src` holds the PS2's own files.
 
 The game reads its files from `host:`, the ELF's folder `build/ps2`:
 `config.toml` (the settings, written with the defaults when it is
-missing), the game's log `debug.txt`, and the saves and the Xbox's map
-cache files under `z/` (about 730 MB, mostly unwritten). The maps go in
-`build/ps2/maps`: link it to a folder of the disc's maps, such as the
-`assets/maps` the Linux build extracts.
+missing), the game's log `debug.txt`, and the saves under `z/`. The maps
+go in `build/ps2/maps`, converted (`convert_map.py`): the PS2 reads a map
+there as it is and refuses a map that is not converted.
 
 ```bash
-ln -s ../../assets/maps build/ps2/maps
+python tools/ps2/convert_map.py assets/maps/ui.map assets/maps/bloodgulch.map --out build/ps2/maps
 ```
+
+`ui.map` is the main menu's: every run needs it. The tool inflates the Xbox's
+compressed map, sets the runtime values of its tags to what they start with,
+and moves its tags and structure BSPs to where the PS2 reads them (one
+address in every build, `HALO_PORT_TAG_CACHE_ADDRESS`); it takes about a
+second for a multiplayer map. A converted map is 33 to 142 MB.
+
+## Measure the game's ticks
+
+With the maps converted (above), the benchmark loads a multiplayer level from
+the main menu, plays it with a scripted player and logs how long the
+simulation's ticks take (`debug.bench_map` and `debug.bench_ticks`,
+`port/ps2/src/ps2_bench.c`):
+
+```bash
+python tools/ps2/pcsx2_bench.py --map bloodgulch --ticks 600
+```
+
+The log has a line every 150 ticks (the average and the longest) and the
+totals, with the ticks over the 15 ms of Gate 1. In PCSX2 the time is
+emulated cycles, which leave out the caches' and the memory's waits: compare
+builds with it, and measure on a PS2 for the gate. Of the campaign's levels only `c20` fits the PS2's tag cache
+(`docs/ps2_port_plan.md`, Phase 1).
+
+An assertion prints the call sites of the stack (the game's stack walk
+scans for them) as addresses in `debug.txt`; name them with ps2dev's
+`mips64r5900el-ps2-elf-addr2line -f -e build/ps2/halo.elf ADDRESS...`.
+Some of the addresses are stale calls that the stack still holds.
 
 ## Check the compile for the PS2
 

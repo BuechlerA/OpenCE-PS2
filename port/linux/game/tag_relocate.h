@@ -11,8 +11,15 @@ is not the address the map linked them to (port/linux/game/tag_relocate.c).
 
 /* ---------- constants */
 
-/* where an Xbox map's tags are linked: the Xbox's tag cache */
+/* where an Xbox map's tags are linked: the Xbox's tag cache; the PS2 reads
+the converter's maps (tools/ps2/convert_map.py), which have been moved to its
+own, and so does nothing */
+#ifdef HALO_PS2
+#include "halo_port_capacity.h"
+#define TAG_RELOCATE_XBOX_TAG_CACHE_ADDRESS ((unsigned long)HALO_PORT_TAG_CACHE_ADDRESS)
+#else
 #define TAG_RELOCATE_XBOX_TAG_CACHE_ADDRESS 0x803A6000UL
+#endif
 
 /* ---------- prototypes */
 

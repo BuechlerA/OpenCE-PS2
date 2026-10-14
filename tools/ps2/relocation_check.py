@@ -243,7 +243,9 @@ def tag_reference_names(region, tags, space):
             region.relocated.add(o)
 
 
-def check(name, data, schema):
+def discover(data, schema):
+    """the pointers of a map: (tags, the shared tags' region, their space, the
+    walker, [(region, space)] of the shared tags and then each structure BSP)"""
     tags = TagData(data)
     t = tags.region.buf
     space = Space()
@@ -295,6 +297,12 @@ def check(name, data, schema):
         Walker(schema, bsp_space).tag(bsp, 'sbsp', u32(buf, 0))
         tag_reference_names(bsp, tags, bsp_space)
         regions.append((bsp, bsp_space))
+    return tags, shared, tags_space, walker, regions
+
+
+def check(name, data, schema):
+    tags, shared, tags_space, walker, regions = discover(data, schema)
+    t = tags.region.buf
 
     missed = collections.Counter()
     unreachable = collections.Counter()

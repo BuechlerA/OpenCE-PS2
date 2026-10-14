@@ -35,10 +35,17 @@ Direct3D, port/ps2/src/ps2_d3d_null.c). */
 #define HALO_PORT_GAME_STATE_GPU_SIZE 0x40000
 #define HALO_PORT_GAME_STATE_SIZE (HALO_PORT_GAME_STATE_CPU_SIZE+HALO_PORT_GAME_STATE_GPU_SIZE)
 
-#define HALO_PORT_TAG_CACHE_SIZE 0x900000 /* (0x1600000) */
-#define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x80 /* (0x580): 2 MB */
+#define HALO_PORT_TAG_CACHE_SIZE 0x1130000 /* (0x1600000) */
+/* and where it is: the same in every build, so that the converter can move a
+map's tags there once (tools/ps2/convert_map.py). The program's heap ends
+where it starts (tools/ps2_build.py), and the main thread's stack (128 KB) is
+above it, at the top of the 32 MB. */
+#define HALO_PORT_TAG_CACHE_ADDRESS 0x00EB0000
+typedef char verify_ps2_tag_cache_address[
+	HALO_PORT_TAG_CACHE_ADDRESS + HALO_PORT_TAG_CACHE_SIZE + 0x20000 == 0x2000000 ? 1 : -1];
+#define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x10 /* (0x580): 256 KB */
 #define HALO_PORT_TEXTURE_CACHE_SIZE (HALO_PORT_TEXTURE_CACHE_PAGE_COUNT*0x4000)
-#define HALO_PORT_SOUND_CACHE_SIZE 0x80000 /* (0x400000) */
+#define HALO_PORT_SOUND_CACHE_SIZE 0x10000 /* (0x400000) */
 
 #define HALO_PORT_MAXIMUM_ACTORS 256
 #define HALO_PORT_MAXIMUM_PROPS 768

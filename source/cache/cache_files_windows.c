@@ -612,6 +612,22 @@ boolean cache_files_precache_map_begin(
 
 		return FALSE;
 	}
+#ifdef HALO_PS2
+	/* port: the PS2 copies no map (it has no hard disk, and no memory for the
+	copy's buffers): a map is there converted or not at all
+	(tools/ps2/convert_map.py) */
+	if (!cache_files_precache_map_loaded(map_name))
+	{
+		error(_error_silent, "the map '%s' is not converted (d:\\maps\\%s.map; tools/ps2/convert_map.py)",
+			cache_map_name, cache_map_name);
+		if (copy_map)
+		{
+			display_error_damaged_media();
+		}
+
+		return FALSE;
+	}
+#endif
 	if (!cache_files_precache_map_loaded(map_name))
 	{
 		struct cache_file_header header;
@@ -1032,6 +1048,18 @@ static void cache_files_open_cache_files(
 	boolean valid;
 	short map_file_index;
 
+#ifdef HALO_PS2
+	/* port: the PS2 has no hard disk for cache files: it reads the converted
+	maps in place (tools/ps2/convert_map.py), as ps2_cached_map_file_open
+	opens them in these slots */
+	for (map_file_index = 0; map_file_index < NUMBER_OF_CACHED_MAP_FILES; map_file_index++)
+	{
+		cached_map_file_get(map_file_index)->file = INVALID_HANDLE_VALUE;
+		memset(&cached_map_file_get(map_file_index)->header, 0, sizeof(struct cache_file_header));
+	}
+
+	return;
+#endif
 	cached_map_files_delete(NUMBER_OF_CACHED_MAP_FILES);
 	for (map_file_index = 0;
 		map_file_index < NUMBER_OF_CACHED_MAP_FILES;
@@ -1697,6 +1725,79 @@ static void cached_map_file_invalidate(
 	return;
 }
 
+#ifdef HALO_PS2
+/* port: opens a converted map (d:\\maps\\<name>.map, a header and the inflated
+data: tools/ps2/convert_map.py) in a slot of its own, closing the one of the
+map opened longest ago that is not the open one; NONE if there is no such map
+or it is the DVD's compressed one */
+static short ps2_cached_map_file_open(
+	const char *map_name)
+{
+	static short next_slot = 0;
+	struct cached_map_file *map_file;
+	char path[256];
+	short map_file_index = NONE;
+	short attempt;
+
+	for (attempt = 0; attempt < NUMBER_OF_CACHED_MAP_FILES && map_file_index == NONE; attempt++)
+	{
+		short candidate = (next_slot + attempt) % NUMBER_OF_CACHED_MAP_FILES;
+
+		if (candidate != cache_file_globals.open_map_file_index &&
+			candidate != cache_file_globals.copying_to_map_file_index)
+		{
+			map_file_index = candidate;
+		}
+	}
+	if (map_file_index == NONE)
+	{
+		return NONE;
+	}
+	next_slot = (map_file_index + 1) % NUMBER_OF_CACHED_MAP_FILES;
+	map_file = cached_map_file_get(map_file_index);
+	if (map_file->file != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(map_file->file);
+		map_file->file = INVALID_HANDLE_VALUE;
+	}
+	memset(&map_file->header, 0, sizeof(struct cache_file_header));
+	sprintf(path, "d:\\maps\\%s.map", map_name);
+	map_file->file = CreateFileA(
+		path,
+		GENERIC_READ,
+		0,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED,
+		NULL);
+	if (map_file->file == INVALID_HANDLE_VALUE)
+	{
+		return NONE;
+	}
+	cached_map_file_read_header(map_file_index);
+	if (map_file->file == INVALID_HANDLE_VALUE ||
+		_stricmp(map_name, map_file->header.name) != 0 ||
+		map_file->header.file_length != (long)GetFileSize(map_file->file, NULL) ||
+		/* (the converter's mark: it has reset the tags' runtime values, which
+		the tag validator does on the other builds) */
+		memcmp(map_file->header.reserved68, "ps2\002", 4) != 0 ||
+		/* (and the PS2's tag cache is where it moved the tags) */
+		*(unsigned long *)(map_file->header.reserved68 + 4) != HALO_PORT_TAG_CACHE_ADDRESS)
+	{
+		if (map_file->file != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(map_file->file);
+			map_file->file = INVALID_HANDLE_VALUE;
+		}
+		memset(&map_file->header, 0, sizeof(struct cache_file_header));
+
+		return NONE;
+	}
+
+	return map_file_index;
+}
+#endif
+
 static short cached_map_files_find_map(
 	const char *map_name)
 {
@@ -1713,6 +1814,9 @@ static short cached_map_files_find_map(
 			return map_file_index;
 		}
 	}
-
+#ifdef HALO_PS2
+	return ps2_cached_map_file_open(map_name);
+#else
 	return NONE;
+#endif
 }

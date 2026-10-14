@@ -435,6 +435,11 @@ void bink_playback_initialize(
 	void)
 {
 	csmemset(&bink_globals, 0, sizeof(bink_globals));
+#ifdef HALO_PS2
+	/* port: the PS2 plays no Bink movies (bink_null.c): each playback call
+	returns as it does before the game starts them */
+	return;
+#endif
 	RADSetMemory(bink_alloc, bink_free);
 	bink_globals.initialized = TRUE;
 
