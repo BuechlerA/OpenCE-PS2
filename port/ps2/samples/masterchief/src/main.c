@@ -1474,6 +1474,35 @@ static int lod_k(float density, float size, float scale)
 	return k < -2048 ? -2048 : (k > 2047 ? 2047 : k);
 }
 
+/* what depends on the lens (focal length): the constants VU0 projects with, the guard band VU0 culls with, and the mip levels the GS is told to pick */
+static void lens_dependent_setup(void)
+{
+	int t, d;
+#ifndef NO_VU0
+	int i;
+
+	{
+		float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
+
+		vu_const[0].v[0] = focal_x; vu_const[0].v[1] = -focal; vu_const[0].v[2] = vu_const[0].v[3] = 0.f;
+		vu_const[1].v[0] = screen_cx + ox; vu_const[1].v[1] = screen_cy + oy; vu_const[1].v[2] = vu_const[1].v[3] = 0.f;
+		for (i = 0; i < 4; i++) { vu_const[2].v[i] = z_k1; vu_const[3].v[i] = z_k2; }
+		vu_band_x0 = clip_x_min + ox; vu_band_x1 = clip_x_max + ox; vu_band_y0 = clip_y_min + oy; vu_band_y1 = clip_y_max + oy;
+	}
+#endif
+	for (t = 0; t < MAP_TEXTURES; t++)
+	{
+		lod_k_base[t] = lod_k(map_tex_density[t], sqrtf((float)map_textures[t].width * map_textures[t].height), 1.f);
+		for (d = 0; d < 2; d++)
+		{
+			int id = map_detail_of[t].detail[d];
+
+			lod_k_detail[t][d] = id < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[id].width, map_detail_of[t].scale[d]);
+		}
+		lod_k_bump[t] = map_detail_of[t].detail[2] < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[map_detail_of[t].detail[2]].width, map_detail_of[t].scale[2]);
+	}
+}
+
 static void map_lod_setup(void)
 {
 	int t, d, i;
@@ -1484,14 +1513,6 @@ static void map_lod_setup(void)
 		map_p4[i].v[0] = map_pos[i * 3]; map_p4[i].v[1] = map_pos[i * 3 + 1]; map_p4[i].v[2] = map_pos[i * 3 + 2]; map_p4[i].v[3] = 1.f;
 		map_uvlm[i].v[0] = map_uv[i * 2]; map_uvlm[i].v[1] = map_uv[i * 2 + 1]; map_uvlm[i].v[2] = map_lmuv[i * 2]; map_uvlm[i].v[3] = map_lmuv[i * 2 + 1];
 		map_uv2[i].v[0] = map_uv[i * 2]; map_uv2[i].v[1] = map_uv[i * 2 + 1]; map_uv2[i].v[2] = map_uv[i * 2]; map_uv2[i].v[3] = map_uv[i * 2 + 1];
-	}
-	{
-		float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
-
-		vu_const[0].v[0] = focal_x; vu_const[0].v[1] = -focal; vu_const[0].v[2] = vu_const[0].v[3] = 0.f;
-		vu_const[1].v[0] = screen_cx + ox; vu_const[1].v[1] = screen_cy + oy; vu_const[1].v[2] = vu_const[1].v[3] = 0.f;
-		for (i = 0; i < 4; i++) { vu_const[2].v[i] = z_k1; vu_const[3].v[i] = z_k2; }
-		vu_band_x0 = clip_x_min + ox; vu_band_x1 = clip_x_max + ox; vu_band_y0 = clip_y_min + oy; vu_band_y1 = clip_y_max + oy;
 	}
 #endif
 	for (i = 0; i < MAP_VERTS; i++)
@@ -1509,18 +1530,23 @@ static void map_lod_setup(void)
 	}
 #endif
 
-	for (t = 0; t < MAP_TEXTURES; t++)
-	{
-		lod_k_base[t] = lod_k(map_tex_density[t], sqrtf((float)map_textures[t].width * map_textures[t].height), 1.f);
-		for (d = 0; d < 2; d++)
-		{
-			int id = map_detail_of[t].detail[d];
+	lens_dependent_setup();
 
-			lod_k_detail[t][d] = id < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[id].width, map_detail_of[t].scale[d]);
-		}
-		lod_k_bump[t] = map_detail_of[t].detail[2] < 0 ? 0 : lod_k(map_tex_density[t], (float)map_details[map_detail_of[t].detail[2]].width, map_detail_of[t].scale[2]);
-	}
 }
+
+#ifdef FIRST_PERSON
+static float lens_fov;
+
+/* the zoom changes the lens: the focal length, the clip planes (from it), what VU0 and the mip levels take from it */
+static void lens_set(GSGLOBAL *gs, float horizontal_fov)
+{
+	lens_fov = horizontal_fov;
+	focal = (1.f / tanf(fp_vertical_half_fov_degrees(horizontal_fov) * (float)M_PI / 180.f)) * gs->Height * 0.5f;
+	focal_x = focal * (float)gs->Width / 640.f;
+	clip_setup(gs);
+	lens_dependent_setup();
+}
+#endif
 
 /* the camera orbits the Chief; he stands where the exporter found the ground */
 static xform chief_placement;
@@ -2429,7 +2455,7 @@ int main(void)
 	screen_cy = gs->Height * 0.5f;
 #ifndef NO_MAP
 #ifdef FIRST_PERSON
-	focal = (1.f / tanf(fp_vertical_half_fov_degrees() * (float)M_PI / 180.f)) * gs->Height * 0.5f;      /* the original's 70 degrees across a 4:3 picture */
+	focal = (1.f / tanf(fp_vertical_half_fov_degrees(MAP_UNIT_FOV) * (float)M_PI / 180.f)) * gs->Height * 0.5f;      /* the original's 70 degrees across a 4:3 picture */
 #else
 	focal = (1.f / tanf(MAP_FOV_HALF_DEGREES * (float)M_PI / 180.f)) * gs->Height * 0.5f;
 #endif
@@ -2445,6 +2471,9 @@ int main(void)
 	z_k2 = 65535.f * z_near / (z_far - z_near);
 #ifndef NO_MAP
 	clip_setup(gs);
+#ifdef FIRST_PERSON
+	lens_fov = MAP_UNIT_FOV;
+#endif
 	placement_setup();
 	pose_cache_build();
 #ifdef CHIEF_VU1
@@ -2527,6 +2556,7 @@ int main(void)
 			pad_read(&user, now);
 			fp_demo_pad(&demo, &player, &user, &pad, dt);      /* the demo's pad until a hand touches the real one (a demo that could not plan passes it through) */
 			fp_update(&player, &pad, dt);
+			if (fabsf(fp_field_of_view(&player) - lens_fov) > 1e-4f) lens_set(gs, fp_field_of_view(&player));      /* the weapon's zoom */
 		}
 #endif
 #ifdef DEBUG_SECONDS                 /* a still frame, for comparing builds */

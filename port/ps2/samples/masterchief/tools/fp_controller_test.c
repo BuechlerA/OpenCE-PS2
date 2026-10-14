@@ -1,7 +1,7 @@
 /* Host test of src/fp_controller.c against the exported map (src/map_assets.c): the original's numbers come out, the player never
    leaves the ground the map has, and cliffs stop it.
 
-     cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/map_assets.c -lm && /tmp/fp_controller_test
+     cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/map_assets.c src/fp_weapon.c src/weapon_assets.c -lm && /tmp/fp_controller_test
 
    (the controller is included, not linked, so that the test can look at the pill's spheres)
 */
@@ -54,6 +54,7 @@ static float penetration(const fp_player *p)
 	return deepest;
 }
 
+static float wrap_angle(float a) { while (a > (float)M_PI) a -= 2 * (float)M_PI; while (a < -(float)M_PI) a += 2 * (float)M_PI; return a; }
 static unsigned seed = 12345;
 static float rand01(void) { seed = seed * 1664525u + 1013904223u; return (float)((seed >> 8) & 0xffff) / 65535.f; }
 
@@ -250,6 +251,58 @@ int main(void)
 			CHECK(p.crouch > 0.3f && penetration(&p) < 0.005f, "stood up into a ceiling (crouch %.2f, %.4f into it)", p.crouch, penetration(&p));
 			(void)crouch;
 		}
+	}
+
+	/* the weapons through the pad: the trigger fires the assault rifle, a reload takes the first-person animation, Y switches to the pistol,
+	   the click of the right stick zooms it (2x: the lens narrows over 0.18 s, the look slows to half) */
+	{
+		fp_pad trigger = { 0, 0, 0, 0, 0, 255 }, none_pad = { 0, 0, 0, 0, 0, 0 }, reload = { 0, 0, 0, 0, FP_RELOAD, 0 }, swap = { 0, 0, 0, 0, FP_SWITCH_WEAPON, 0 }, zoom = { 0, 0, 0, 0, FP_ZOOM, 0 };
+		fp_pad turn = { 0, 0, 20000, 0, 0, 0 };
+		int loaded_before, k, reloads = 0, fires = 0;
+		float fov_samples[4], yaw0, unzoomed_turn, zoomed_turn;
+
+		fp_init(&p, MAP_DEMO_START_X, MAP_DEMO_START_Y, 0.f);
+		run(&p, &none_pad, 1.f);
+		loaded_before = p.weapons.slots[0].magazines[0].rounds_loaded;
+		for (k = 0; k < 60; k++) { fp_update(&p, &trigger, 1.f / 60.f); fires += 0; }
+		printf("a second of the right trigger: %d rounds fired (15)\n", loaded_before - p.weapons.slots[0].magazines[0].rounds_loaded);
+		CHECK(loaded_before - p.weapons.slots[0].magazines[0].rounds_loaded >= 14 && loaded_before - p.weapons.slots[0].magazines[0].rounds_loaded <= 16, "fired %d", loaded_before - p.weapons.slots[0].magazines[0].rounds_loaded);
+		fp_update(&p, &none_pad, 1.f / 60.f);
+		fp_update(&p, &reload, 1.f / 60.f);                  /* one frame of the button: the weapon must see it once */
+		for (k = 0; k < 240; k++) { fp_update(&p, &none_pad, 1.f / 60.f); for (int e = 0; e < p.events.count; e++) if (p.events.list[e].type == FPW_EVENT_RELOAD_FINISH) reloads++; }
+		CHECK(p.weapons.slots[0].magazines[0].rounds_loaded == 60 && reloads == 1, "reloaded to %d, %d times", p.weapons.slots[0].magazines[0].rounds_loaded, reloads);
+
+		fp_update(&p, &swap, 1.f / 60.f);
+		for (k = 0; k < 180; k++) fp_update(&p, &none_pad, 1.f / 60.f);
+		CHECK(p.weapons.current == 1, "did not switch");
+		yaw0 = p.yaw; run(&p, &turn, 0.2f); unzoomed_turn = fabsf(wrap_angle(p.yaw - yaw0));
+		fp_update(&p, &zoom, 1.f / 60.f);
+		for (k = 0; k < 4; k++) { run(&p, &none_pad, 0.06f); fov_samples[k] = p.field_of_view * 180.f / (float)M_PI; }
+		printf("the pistol zoomed: the lens %.1f %.1f %.1f %.1f degrees at 60 ms steps (70 to 35 in 0.18 s)\n", fov_samples[0], fov_samples[1], fov_samples[2], fov_samples[3]);
+		CHECK(fov_samples[0] < 70.f && fov_samples[0] > 35.f && fabsf(fov_samples[2] - 35.f) < 0.5f && fabsf(fov_samples[3] - 35.f) < 0.5f, "lens %.1f %.1f %.1f %.1f", fov_samples[0], fov_samples[1], fov_samples[2], fov_samples[3]);
+		yaw0 = p.yaw; run(&p, &turn, 0.2f); zoomed_turn = fabsf(wrap_angle(p.yaw - yaw0));
+		printf("a turn of 0.2 s: %.2f degrees unzoomed, %.2f zoomed\n", unzoomed_turn * 180.f / (float)M_PI, zoomed_turn * 180.f / (float)M_PI);
+		CHECK(fabsf(zoomed_turn / unzoomed_turn - 0.5f) < 0.06f, "the zoomed turn is %.2f of the unzoomed", zoomed_turn / unzoomed_turn);
+		fp_update(&p, &zoom, 1.f / 60.f); fp_update(&p, &none_pad, 1.f / 60.f); fp_update(&p, &zoom, 1.f / 60.f);
+		CHECK(p.weapons.zoom_level == -1 || p.weapons.zoom_level == 0, "zoom level %d", p.weapons.zoom_level);
+	}
+
+	/* autolevel: off, the pitch stays; on (Back), walking forward levels it out */
+	{
+		fp_pad walk = { 0, 32767, 0, 0, 0, 0 }, toggle = { 0, 0, 0, 0, FP_AUTOLEVEL, 0 }, none_pad = { 0, 0, 0, 0, 0, 0 };
+		float before;
+
+		fp_init(&p, MAP_DEMO_START_X, MAP_DEMO_START_Y, (float)M_PI);
+		p.pitch = 0.5f; before = p.pitch;
+		run(&p, &walk, 3.f);
+		CHECK(fabsf(p.pitch - before) < 1e-4f, "the pitch moved with autolevel off: %.3f", p.pitch);
+		fp_init(&p, MAP_DEMO_START_X, MAP_DEMO_START_Y, (float)M_PI);
+		p.pitch = 0.5f;
+		fp_update(&p, &toggle, 1.f / 60.f); fp_update(&p, &none_pad, 1.f / 60.f);
+		CHECK(p.autolevel_enabled, "autolevel did not turn on");
+		run(&p, &walk, 3.f);
+		printf("autolevel: walking forward 3 s with the pitch at 28.6 degrees: %.1f degrees\n", p.pitch * 180.f / (float)M_PI);
+		CHECK(p.pitch < 0.35f && p.pitch >= 0.f, "pitch %.3f after autolevel", p.pitch);
 	}
 
 	/* the dead zone: a stick at 9000 does nothing, at full is 1.0 */

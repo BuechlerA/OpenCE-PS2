@@ -10,7 +10,7 @@ the walls) is the controller's. Two parts:
   - the pilot: it chases a point 1.5 units ahead on the path (pure pursuit), turning the right stick by the heading's error
     (through the inverse of the look function, so the turn is as fast as the error asks, never so fast the stick pegs and
     the turn accelerates), running the left stick forward (less in a sharp turn), jumping at marks along the path, and at
-    the end standing and looking at the Chief for a while before starting over.
+    the end standing and looking at the Chief, switching to the pistol and zooming on him and firing, before starting over.
 */
 
 #include <math.h>
@@ -28,7 +28,7 @@ the walls) is the controller's. Two parts:
 #define CLEARANCE 0.5f                        /* ground must be there, and level, this far around a cell */
 #define LOOKAHEAD 1.5f
 #define ARRIVE_DISTANCE 0.7f
-#define DWELL_SECONDS 3.5f
+#define DWELL_SECONDS 5.2f
 #define STUCK_SECONDS 4.f
 #define DEAD_RANGE 9000
 #define STICK_MAX 32767
@@ -312,6 +312,11 @@ void fp_demo_pad(fp_demo *d, fp_player *player, const fp_pad *user, fp_pad *out,
 		pitch_error = atan2f(aim_z + 0.35f - eye_z, hypotf(aim_x, aim_y)) - player->pitch;
 		out->right_x = (short)-turn_stick(error, MAP_LOOK_YAW_RATE * PI_F / 180.f);
 		out->right_y = turn_stick(pitch_error, MAP_LOOK_PITCH_RATE * PI_F / 180.f);
+		/* and the weapons, for as long as it stands there: the pistol out, zoomed on the Chief, a few rounds, the zoom off (the pad's buttons, as a person presses them) */
+		if (d->arrived > 0.3f && d->arrived < 0.4f) out->buttons |= FP_SWITCH_WEAPON;
+		if (d->arrived > 2.4f && d->arrived < 2.5f) out->buttons |= FP_ZOOM;
+		if (d->arrived > 3.0f && d->arrived < 3.8f) out->trigger = 255;
+		if (d->arrived > 4.4f && d->arrived < 4.5f) out->buttons |= FP_ZOOM;
 		if (d->arrived > DWELL_SECONDS) restart(d, player);
 		return;
 	}

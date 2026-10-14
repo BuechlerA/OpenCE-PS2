@@ -457,6 +457,7 @@ def collision_data(mf, chief_xy, radius, height):
           np.round(P.min(0), 1), np.round(P.max(0), 1)))
     print('collision of scenery: %d objects, %d triangles' % (len(objects), sum(len(t) for _n, _p, t in objects)))
     objects.append(('the Chief', *capsule_mesh(chief_xy[0], chief_xy[1], zb, radius, height)))
+    chief_tris = len(objects[-1][2])
     Ps, Ts, base = [P], [T], len(P)
     obj_first = len(T)
     for _name_, V, TT in objects:
@@ -464,7 +465,7 @@ def collision_data(mf, chief_xy, radius, height):
     allP = np.concatenate(Ps).astype(np.float32); allT = np.concatenate(Ts)
     assert len(allT) < 65536 and len(allP) < 65536
     obj_P = allP[len(P):]; obj_T = allT[obj_first:]
-    return dict(P=allP, T=allT.astype(np.uint16), struct_tris=obj_first, surf_first=np.array(surf_first, np.uint32), nodes=c['nodes'], planes=c['planes'], leaves=c['leaves'],
+    return dict(P=allP, T=allT.astype(np.uint16), struct_tris=obj_first, chief_tris=chief_tris, surf_first=np.array(surf_first, np.uint32), nodes=c['nodes'], planes=c['planes'], leaves=c['leaves'],
                 grid=object_grid(allP.astype(np.float64), obj_T, obj_first), chief_z=zb)
 
 # offsets in a biped tag (struct _biped_definition follows the object and unit definitions) and the globals' blocks, as the
@@ -472,6 +473,7 @@ def collision_data(mf, chief_xy, radius, height):
 # the Chief's tag (camera heights 0.62 and 0.35, jump 0.07, slopes 45 degrees)
 BIPED_SLOPE_AT, BIPED_JUMP_AT, BIPED_CAMERA_AT, BIPED_COLLISION_AT = 0x358, 0x3B4, 0x400, 0x424
 GLOBALS_PLAYER_CONTROL_AT, GLOBALS_PLAYER_INFORMATION_AT = 272, 368
+UNIT_FOV_AT = 0x1A0                     # the unit's camera_field_of_view (read at the biped tag; 70 degrees)
 
 def player_tunings(mf):
     """the numbers the original's first-person controller reads from the tags, as (name, value) pairs"""
@@ -491,6 +493,9 @@ def player_tunings(mf):
     b = mf.tags[(b'bipd', player_tag)] - TAG_BASE
     max_slope, dh_falloff, dh_cutoff, dh_scale, uh_falloff, uh_cutoff, uh_scale = struct.unpack_from('<7f', td, b + BIPED_SLOPE_AT)
     jump, = struct.unpack_from('<f', td, b + BIPED_JUMP_AT)
+    unit_fov, = struct.unpack_from('<f', td, b + UNIT_FOV_AT)
+    min_swap_ticks, min_autolevel_ticks = struct.unpack_from('<2h', td, pc + 0x6C)
+    autolevel_scale, = struct.unpack_from('<f', td, pc + 0x54)
     cam_stand, cam_crouch, crouch_time = struct.unpack_from('<3f', td, b + BIPED_CAMERA_AT)
     height_stand, height_crouch, radius = struct.unpack_from('<3f', td, b + BIPED_COLLISION_AT)
     assert 0.3 < cam_stand < 1 and 0 < cam_crouch < cam_stand and 0.05 < radius < 0.5 and 0.01 < jump < 0.2 and 0.5 < max_slope < 1.2, 'the biped tag is not laid out as expected'
@@ -502,7 +507,8 @@ def player_tunings(mf):
             ('MAX_SLOPE', max_slope), ('DOWNHILL_FALLOFF', dh_falloff), ('DOWNHILL_CUTOFF', dh_cutoff), ('DOWNHILL_SCALE', dh_scale),
             ('UPHILL_FALLOFF', uh_falloff), ('UPHILL_CUTOFF', uh_cutoff), ('UPHILL_SCALE', uh_scale), ('JUMP_VELOCITY', jump),
             ('CAMERA_STANDING', cam_stand), ('CAMERA_CROUCHING', cam_crouch), ('CROUCH_TIME', crouch_time),
-            ('HEIGHT_STANDING', height_stand), ('HEIGHT_CROUCHING', height_crouch), ('RADIUS', radius)], look
+            ('HEIGHT_STANDING', height_stand), ('HEIGHT_CROUCHING', height_crouch), ('RADIUS', radius),
+            ('UNIT_FOV', unit_fov), ('MIN_AUTOLEVEL_TICKS', min_autolevel_ticks), ('LOOK_AUTOLEVEL_SCALE', autolevel_scale)], look
 
 
 def main():
@@ -848,6 +854,7 @@ extern const map_texture_data map_textures[];
    surfaces on its boundary; the objects are found through a grid over x, y */
 #define MAP_COL_TRIS %d
 #define MAP_COL_STRUCTURE_TRIS %d
+#define MAP_COL_CHIEF_TRIS %d                       /* the Chief's capsule is the last of the triangles */
 #define MAP_COL_SURFACES %d
 #define MAP_COL_NODES %d
 #define MAP_COL_LEAVES %d
@@ -868,7 +875,7 @@ extern const unsigned short map_obj_items[];
 /* what the original's first-person controller reads from the tags (the globals and the player's biped): seconds, degrees a second, world units, radians, units a tick */
 #define MAP_LOOK_FUNCTION_COUNT %d
 extern const float map_look_function[];
-''' % (len(col['T']), col['struct_tris'], len(col['surf_first']) - 1, len(col['nodes']), len(col['leaves']), float(obj_lo[0]), float(obj_lo[1]), GRID_CELL, obj_w, obj_h, len(look_function)))
+''' % (len(col['T']), col['struct_tris'], col['chief_tris'], len(col['surf_first']) - 1, len(col['nodes']), len(col['leaves']), float(obj_lo[0]), float(obj_lo[1]), GRID_CELL, obj_w, obj_h, len(look_function)))
     for name, value in tunings: h.write('#define MAP_%s %rf\n' % (name, float(value)))
     h.write('/* the first-person demo: where the walk starts (feet), the points it bends round, and where the Chief stands at its end (feet) and faces */\n#define MAP_DEMO_VIA_COUNT %d\n#define MAP_DEMO_VIA_POINTS %s\n' % (len(DEMO_VIA), ', '.join('{ %rf, %rf }' % v for v in DEMO_VIA)))
     for name, value in (('DEMO_START_X', DEMO_START[0]), ('DEMO_START_Y', DEMO_START[1]), ('DEMO_CHIEF_X', DEMO_CHIEF[0]), ('DEMO_CHIEF_Y', DEMO_CHIEF[1]), ('DEMO_CHIEF_Z', demo_z), ('DEMO_CHIEF_HEADING', demo_heading)):

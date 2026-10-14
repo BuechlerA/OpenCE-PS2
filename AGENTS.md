@@ -44,13 +44,13 @@ fork's `main`.
 
 ### Checking the Master Chief sample
 
-The map scene is first person (`src/fp_controller.c`, `src/fp_demo.c`, `src/pad.c`; [docs/ps2_first_person_controller.md](docs/ps2_first_person_controller.md)):
+The map scene is first person (`src/fp_controller.c`, `src/fp_weapon.c`, `src/fp_demo.c`, `src/pad.c`; [docs/ps2_first_person_controller.md](docs/ps2_first_person_controller.md)):
 the player walks by itself from the front of one fortress, over the rise and down to the Chief waiting in the middle of the valley
 (looking at him, then again from the start), until a hand touches the DualShock (Start gives the demo back); the Chief stands still. Builds for stills (`-DDEBUG_SECONDS`), the profile and the
 mip audit keep the camera orbiting him, so that builds see the same views (`-DFIRST_PERSON` asks for the walk in those,
 `make ORBIT_CAMERA=1` for the orbit in the others; those builds keep the Chief where he stood for the orbit, the walk's has him
 in the valley's middle). `make FP_NO_DEMO=1` leaves the player standing for the pad alone. The controller and the demo are
-checked on the host (`tools/fp_controller_test.c`, `tools/fp_demo_test.c`; their headers have the commands).
+checked on the host (`tools/fp_controller_test.c`, `tools/fp_weapon_test.c`, `tools/fp_demo_test.c`; their headers have the commands).
 
 It draws, so it needs PCSX2's window (`tools/ps2/pcsx2_run.py` is for programs
 that only print):

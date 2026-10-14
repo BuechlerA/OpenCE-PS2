@@ -72,6 +72,7 @@ void fp_shape_input(const fp_pad *pad, fp_input *input)
 	input->pitch = ry;
 	input->jump = (pad->buttons & FP_JUMP) != 0;
 	input->crouch = (pad->buttons & FP_CROUCH) != 0;
+	input->trigger = pad->trigger * (1.f / 255.f);
 }
 
 /* ---------- what is collided with ---------- */
@@ -200,6 +201,40 @@ int fp_ground_in(float x, float y, float z_max, float depth, float *z_out, float
 int fp_ground(float x, float y, float z_max, float *z_out, float *normal_z, float normal_xy[2])
 {
 	return fp_ground_in(x, y, z_max, 8.f, z_out, normal_z, normal_xy);
+}
+
+/* the first surface a segment crosses, from its front (Moller-Trumbore, the determinant positive for a segment against the normal) */
+int fp_trace(const float a[3], const float b[3], float *t_out, float normal[3], unsigned *triangle)
+{
+	float lo[3], hi[3], dir[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, best = 2.f;
+	int n, i, k, found = 0;
+
+	for (k = 0; k < 3; k++) { lo[k] = fminf(a[k], b[k]) - 1e-3f; hi[k] = fmaxf(a[k], b[k]) + 1e-3f; }
+	n = gather(lo, hi);
+	for (i = 0; i < n; i++)
+	{
+		const unsigned short *t = &map_col_tri[candidates[i] * 3];
+		const float *p0 = &map_col_pos[t[0] * 3], *p1 = &map_col_pos[t[1] * 3], *p2 = &map_col_pos[t[2] * 3];
+		float e1[3], e2[3], pvec[3], tvec[3], qvec[3], det, u, v, f;
+
+		sub3(p1, p0, e1); sub3(p2, p0, e2);
+		cross3(dir, e2, pvec);
+		det = dot3(e1, pvec);
+		if (det < 1e-12f) continue;                         /* parallel, or facing away */
+		sub3(a, p0, tvec);
+		u = dot3(tvec, pvec);
+		if (u < 0.f || u > det) continue;
+		cross3(tvec, e1, qvec);
+		v = dot3(dir, qvec);
+		if (v < 0.f || u + v > det) continue;
+		f = dot3(e2, qvec) / det;
+		if (f < 0.f || f > 1.f || f >= best) continue;
+		best = f; found = 1;
+		if (triangle) *triangle = candidates[i];
+		if (normal) { cross3(e1, e2, normal); f = sqrtf(dot3(normal, normal)); if (f > 0.f) { normal[0] /= f; normal[1] /= f; normal[2] /= f; } }
+	}
+	if (found && t_out) *t_out = best;
+	return found;
 }
 
 /* ---------- the pill against the collision BSP ---------- */
@@ -470,6 +505,13 @@ void fp_init(fp_player *player, float x, float y, float yaw)
 	player->ground_n[0] = nxy[0]; player->ground_n[1] = nxy[1]; player->ground_n[2] = nz;
 	player->yaw = yaw;
 	player->spawn[0] = x; player->spawn[1] = y;
+	{
+		static const int loadout[2] = { FPW_ASSAULT_RIFLE, FPW_PISTOL };
+
+		fpw_inventory_init(&player->weapons, loadout, 2, 12345u);
+		player->field_of_view = player->fov_from = player->fov_to = MAP_UNIT_FOV;
+		player->fov_time = 1.f;
+	}
 	depenetrate(player);                               /* a place against a wall: out of it first */
 }
 
@@ -498,7 +540,7 @@ static void approach(float *v, const float *target, int n, float limit)
 	for (i = 0; i < n; i++) v[i] += delta[i];
 }
 
-static void tick(fp_player *p, float forward, float strafe, int jump, int crouch_held)
+static void biped_tick(fp_player *p, float forward, float strafe, int jump, int crouch_held)
 {
 	const float min_normal_k = cosf(MAP_MAX_SLOPE);
 	float fx = cosf(p->yaw), fy = sinf(p->yaw);
@@ -597,6 +639,29 @@ static void tick(fp_player *p, float forward, float strafe, int jump, int crouch
 	if (p->pos[2] < FALL_RESPAWN_Z) respawn(p);
 }
 
+/* the weapons' tick: the player's eye and aim, and what it asked of them (units.c's control flags, the edges of the buttons) */
+static void weapon_tick(fp_player *p, unsigned edges)
+{
+	float cp = cosf(p->pitch), speed;
+	fpw_input input;
+	int k;
+
+	for (k = 0; k < 3; k++) p->weapons.aim.origin[k] = p->pos[k];
+	p->weapons.aim.origin[2] += lerpf(MAP_CAMERA_STANDING, MAP_CAMERA_CROUCHING, p->crouch);
+	p->weapons.aim.forward[0] = cp * cosf(p->yaw); p->weapons.aim.forward[1] = cp * sinf(p->yaw); p->weapons.aim.forward[2] = sinf(p->pitch);
+	speed = dot3(p->weapons.aim.forward, p->vel);                    /* units.c: the unit's speed along the shot is added to the projectile's */
+	for (k = 0; k < 3; k++) p->weapons.aim.velocity[k] = p->weapons.aim.forward[k] * (speed > 0.f ? speed : 0.f);
+	input.trigger = p->trigger; input.reload = (edges & FP_RELOAD) != 0; input.switch_weapon = (edges & FP_SWITCH_WEAPON) != 0;
+	input.melee = (edges & FP_MELEE) != 0; input.zoom = (edges & FP_ZOOM) != 0; input.grenade = (edges & FP_GRENADE) != 0;
+	fpw_inventory_tick(&p->weapons, &input, &p->events);
+}
+
+static void tick(fp_player *p, float forward, float strafe, int jump, int crouch_held, unsigned edges)
+{
+	biped_tick(p, forward, strafe, jump, crouch_held);
+	weapon_tick(p, edges);
+}
+
 /* ---------- looking ---------- */
 
 /* player_control.c: evaluate_piecewise_linear_function */
@@ -615,7 +680,7 @@ static float evaluate_look_function(float input)
 static void look(fp_player *p, const fp_input *input, float seconds)
 {
 	float absolute_pitch = fabsf(input->pitch), absolute_yaw = fabsf(input->yaw), look_scale = 1.f;
-	float clamped_yaw, clamped_pitch, delta_yaw, delta_pitch;
+	float clamped_yaw, clamped_pitch, delta_yaw, delta_pitch, zoom_scale, frame_ticks = seconds * TICKS_PER_SECOND;
 
 	/* both sticks' axes pushed: the stronger is stretched to 1, so a diagonal turns as fast as a straight push */
 	if (absolute_pitch > 0.1f && absolute_yaw > 0.1f)
@@ -627,9 +692,11 @@ static void look(fp_player *p, const fp_input *input, float seconds)
 	clamped_yaw = clampf(input->yaw * look_scale, -1.f, 1.f);
 	clamped_pitch = clampf(input->pitch * look_scale, -1.f, 1.f);
 
-	/* the rates are degrees a second at full deflection (the original's are a tick: the rate over 30, 30 times a second) */
-	delta_yaw = evaluate_look_function(clamped_yaw) * (MAP_LOOK_YAW_RATE * PI_F / 180.f) * seconds;
-	delta_pitch = evaluate_look_function(clamped_pitch) * (MAP_LOOK_PITCH_RATE * PI_F / 180.f) * seconds;
+	/* the rates are degrees a second at full deflection (the original's are a tick: the rate over 30, 30 times a second); zoomed they are
+	   over the magnification (player_control.c: unit_get_zoom_magnification) */
+	zoom_scale = 1.f / fpw_zoom_magnification(&p->weapons);
+	delta_yaw = evaluate_look_function(clamped_yaw) * (MAP_LOOK_YAW_RATE * PI_F / 180.f) * seconds * zoom_scale;
+	delta_pitch = evaluate_look_function(clamped_pitch) * (MAP_LOOK_PITCH_RATE * PI_F / 180.f) * seconds * zoom_scale;
 
 	/* a stick held at the stop turns faster and faster, up to look_acceleration_scale times as fast after look_acceleration_time */
 	if (fabsf(clamped_yaw) >= MAP_LOOK_PEG)
@@ -644,6 +711,28 @@ static void look(fp_player *p, const fp_input *input, float seconds)
 	p->yaw += delta_yaw;
 	while (p->yaw < 0.f) p->yaw += 2.f * PI_F;
 	while (p->yaw > 2.f * PI_F) p->yaw -= 2.f * PI_F;
+
+	/* player_control.c: the pitch autolevel (the controller's autocenter option, off unless asked for): walking forward without looking up
+	   or down for MAP_MIN_AUTOLEVEL_TICKS levels the pitch out, the faster the faster the player goes and the further it is from level */
+	if (p->autolevel_enabled && fabsf(input->forward_movement) > 0.5f && fabsf(delta_pitch) < 0.0001f)
+	{
+		p->autolevel_fraction += frame_ticks;
+		{
+			int whole = (int)p->autolevel_fraction;
+
+			p->autolevel_fraction -= (float)whole;
+			p->autolevel_ticks = p->autolevel_ticks + whole > 127 ? 127 : p->autolevel_ticks + whole;
+		}
+		p->use_autolevel = p->autolevel_ticks > (int)MAP_MIN_AUTOLEVEL_TICKS;
+	}
+	else { p->autolevel_fraction = 0.f; p->autolevel_ticks = 0; p->use_autolevel = 0; }
+	if (p->use_autolevel)
+	{
+		float speed = sqrtf(dot3(p->vel, p->vel)), error = fabsf(p->pitch) * 0.63661975f * frame_ticks;
+		float step = error * MAP_LOOK_AUTOLEVEL_SCALE * speed, difference = -p->pitch;
+
+		p->pitch += clampf(difference, -step, step);                     /* interpolate_scalar toward level (the unit camera's autolevel is 0) */
+	}
 	p->pitch = clampf(p->pitch + delta_pitch, -PITCH_LIMIT, PITCH_LIMIT);
 }
 
@@ -651,25 +740,49 @@ void fp_update(fp_player *p, const fp_pad *pad, float seconds)
 {
 	fp_input input;
 	int ticks = 0;
+	unsigned edges;
+	float target;
 
 	fp_shape_input(pad, &input);
+	p->events.count = 0;
+	edges = pad->buttons & ~p->previous_buttons;         /* the buttons that went down this frame: the weapons see them once, on the next tick */
+	p->pending_edges |= edges;
+	p->previous_buttons = pad->buttons;
+	p->trigger = input.trigger;
+	if (edges & FP_AUTOLEVEL) p->autolevel_enabled = !p->autolevel_enabled;
 	look(p, &input, seconds);
 	p->tick_time += seconds;
 	while (p->tick_time >= 1.f / TICKS_PER_SECOND)
 	{
 		p->tick_time -= 1.f / TICKS_PER_SECOND;
-		if (ticks++ < 4) tick(p, input.forward_movement, input.strafe, input.jump, input.crouch);   /* a long frame does not run the physics away */
+		if (ticks++ < 4)
+		{
+			tick(p, input.forward_movement, input.strafe, input.jump, input.crouch, p->pending_edges);   /* a long frame does not run the physics away */
+			p->pending_edges = 0;
+		}
 	}
 	if (ticks > 4) p->tick_time = 0.f;
 	p->time += seconds;
+
+	/* the lens eases to the weapon's field of view over 0.18 s (first_person_camera.c: transition_time) */
+	target = fpw_field_of_view(&p->weapons, MAP_UNIT_FOV);
+	if (p->fov_to != target) { p->fov_from = p->field_of_view; p->fov_to = target; p->fov_time = 0.f; }
+	if (p->fov_time < 0.18f)
+	{
+		p->fov_time += seconds;
+		p->field_of_view = p->fov_time >= 0.18f ? p->fov_to : lerpf(p->fov_from, p->fov_to, p->fov_time / 0.18f);
+	}
+	else p->field_of_view = p->fov_to;
 }
 
 /* ---------- the camera ---------- */
 
-float fp_vertical_half_fov_degrees(void)
+float fp_vertical_half_fov_degrees(float horizontal_radians)
 {
-	return atanf(tanf(35.f * PI_F / 180.f) * 3.f / 4.f) * 180.f / PI_F;
+	return atanf(tanf(0.5f * horizontal_radians) * 3.f / 4.f) * 180.f / PI_F;
 }
+
+float fp_field_of_view(const fp_player *p) { return p->field_of_view; }
 
 void fp_camera(const fp_player *p, float eye[3], float target[3])
 {

@@ -1,7 +1,7 @@
 /* Host test of src/fp_demo.c: the demo plans a walk from the front of the fortress to the Chief in the middle of the valley, and
    the controller, given only the pad the demo makes, gets there, turning and jumping on the way, again and again.
 
-     cc -O1 -I src -o /tmp/fp_demo_test tools/fp_demo_test.c src/fp_demo.c src/fp_controller.c src/map_assets.c -lm && /tmp/fp_demo_test
+     cc -O1 -I src -o /tmp/fp_demo_test tools/fp_demo_test.c src/fp_demo.c src/fp_controller.c src/fp_weapon.c src/weapon_assets.c src/map_assets.c -lm && /tmp/fp_demo_test
 */
 #include <math.h>
 #include <stdio.h>
@@ -21,7 +21,7 @@ int main(void)
 	fp_player p;
 	fp_pad none = { 0, 0, 0, 0, 0 }, pad;
 	float dt = 1.f / 60.f, t, goal[2], dir[2], len, turned = 0.f, last_yaw, last_progress = 0.f, run_start = 0.f, longest = 0.f, closest = 1e9f, worst_error = 0.f;
-	int i, jumps = 0, was_airborne = 0, restarts = 0, arrivals = 0, was_arrived = 0;
+	int i, jumps = 0, was_airborne = 0, restarts = 0, arrivals = 0, was_arrived = 0, zoomed_seen = 0, fired_seen = 0;
 
 	dir[0] = MAP_DEMO_START_X - MAP_DEMO_CHIEF_X; dir[1] = MAP_DEMO_START_Y - MAP_DEMO_CHIEF_Y;
 	len = hypotf(dir[0], dir[1]);
@@ -43,6 +43,8 @@ int main(void)
 		}
 		last_progress = demo.progress;
 		fp_update(&p, &pad, dt);
+		if (p.weapons.zoom_level >= 0) zoomed_seen = 1;
+		{ int e; for (e = 0; e < p.events.count; e++) if (p.events.list[e].type == FPW_EVENT_FIRE && p.weapons.current == 1) fired_seen = 1; }
 		turned += fabsf(wrap(p.yaw - last_yaw)); last_yaw = p.yaw;
 		if (p.airborne && !was_airborne) jumps++;
 		was_airborne = p.airborne;
@@ -55,6 +57,7 @@ int main(void)
 	CHECK(arrivals >= 3, "arrived %d times", arrivals);
 	CHECK(jumps >= 2 * arrivals, "jumped %d times in %d walks", jumps, arrivals);
 	CHECK(closest < 0.8f, "arrived %.2f from the goal", closest);
+	CHECK(zoomed_seen && fired_seen, "the demo did not zoom (%d) and fire (%d) at the Chief", zoomed_seen, fired_seen);
 	CHECK(worst_error < 0.25f, "not looking at the Chief at the end: %.2f rad", worst_error);
 
 	/* a person's hand on the pad takes over, and Start gives the demo back from the start */

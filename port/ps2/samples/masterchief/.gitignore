@@ -6,3 +6,5 @@ src/assets.h
 __pycache__/
 src/map_assets.c
 src/map_assets.h
+src/weapon_assets.c
+src/weapon_assets.h

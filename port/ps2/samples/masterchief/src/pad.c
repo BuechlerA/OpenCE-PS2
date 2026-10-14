@@ -3,8 +3,9 @@ PAD.C
 
 libpad on port 1, slot 0. The DualShock gives sticks as bytes (0..255, 128 at rest, down and right positive) and
 the buttons with a bit cleared for a pressed one; the controller takes the Xbox's: signed 16 bits, up and right
-positive. The buttons the first-person controller reads: the d-pad, Cross (the Xbox's A, jump) and L3 (the left
-stick's click, crouch).
+positive. The buttons the first-person controller reads, as the Xbox's default layout has them: the d-pad, Cross (A: jump), Square (X: reload),
+Triangle (Y: switch weapons), Circle (B: melee), L3 (the left stick's click: crouch), R3 (the right stick's: zoom), R2 (the right trigger: fire; its
+pressure when the pad gives it), L2 (the left trigger: grenade), Select (Back: autolevel) and Start (the demo's).
 */
 
 #include <stdio.h>
@@ -18,7 +19,7 @@ stick's click, crouch).
 #include "pad.h"
 
 static char pad_area[256] __attribute__((aligned(64)));
-static int opened, analog_requested;
+static int opened, analog_requested, pressure_requested;
 
 int pad_init(void)
 {
@@ -56,6 +57,11 @@ int pad_read(fp_pad *pad, float seconds)
 		padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
 		analog_requested = 1;
 	}
+	else if (!pressure_requested && padInfoMode(0, 0, PAD_MODECURID, 0) == PAD_TYPE_DUALSHOCK)    /* and the buttons' pressure, for the trigger */
+	{
+		padEnterPressMode(0, 0);
+		pressure_requested = 1;
+	}
 	if (padRead(0, 0, &status) == 0) return 0;
 #ifdef PAD_DEBUG                  /* -DPAD_DEBUG: what libpad sees, twice a second */
 	{
@@ -73,6 +79,14 @@ int pad_read(fp_pad *pad, float seconds)
 	if (buttons & PAD_CROSS) pad->buttons |= FP_JUMP;
 	if (buttons & PAD_L3) pad->buttons |= FP_CROUCH;
 	if (buttons & PAD_START) pad->buttons |= FP_START;
+	if (buttons & PAD_SQUARE) pad->buttons |= FP_RELOAD;
+	if (buttons & PAD_TRIANGLE) pad->buttons |= FP_SWITCH_WEAPON;
+	if (buttons & PAD_CIRCLE) pad->buttons |= FP_MELEE;
+	if (buttons & PAD_R3) pad->buttons |= FP_ZOOM;
+	if (buttons & PAD_L2) pad->buttons |= FP_GRENADE;
+	if (buttons & PAD_SELECT) pad->buttons |= FP_AUTOLEVEL;
+	if (buttons & PAD_R2) pad->trigger = 255;                      /* the button; the pressure, if the pad gives it, replaces it */
+	if (padInfoPressMode(0, 0) == 1 && status.r2_p) pad->trigger = status.r2_p;
 	mode = padInfoMode(0, 0, PAD_MODECURID, 0);
 	if (mode == PAD_TYPE_ANALOG || mode == PAD_TYPE_DUALSHOCK)      /* a digital pad has no sticks: its bytes are not at rest */
 	{

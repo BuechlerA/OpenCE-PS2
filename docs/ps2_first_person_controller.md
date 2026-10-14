@@ -61,6 +61,42 @@ turn, the acceleration, the slope's speed, the jump's arc and the walls are the 
 - The orbit builds (stills, profile, mip audit, `ORBIT_CAMERA`) keep the Chief where he stood for the orbit
   (`MAP_CHIEF_*`), so their views and the mip floor audit stay valid.
 
+## Weapons, zoom and autolevel
+
+`src/fp_weapon.c` (30 Hz, no PS2 code) is the player's weapons, from `source/items/weapons.c`, the weapon parts of `source/units/units.c`
+and the flight of `source/items/projectiles.c`, on numbers `tools/export_weapons.py` reads from the map's weapon, projectile and
+first-person animation tags into `weapon_assets.[ch]` (generated, ignored by git): the nine hand weapons that have a first-person
+model in Blood Gulch (assault rifle, pistol, sniper rifle, shotgun, rocket launcher, plasma rifle, plasma pistol, needler,
+flamethrower): flags, ready and heat numbers, zoom levels and magnifications, movement penalties, each magazine (rounds, reload
+and chamber times) and trigger (rate of fire and its ramps, error cone, charging, spew, heat and age per round, the projectile), each
+projectile (velocity, range, gravity), and the first-person animation graph's table of animations by kind with each one's frame count and
+key frame (the original times a reload, a ready and a put-away by those frames: the assault rifle's reload is 87 ticks, its ready 29).
+
+Ported: the `weapon_update` loop (ready timer, triggers down, the secondary trigger's modes, the reload request, each magazine's
+reloading and chambering, each trigger's state machine, the rate-of-fire and error ramps, `weapon_trigger_can_fire_again`'s cadence, heat
+and overheating), firing (rounds, heat, age, misfire, the shot's random direction in its error cone, a shotgun's fan of pellets, the
+plasma pistol's alternate shots), reload (a shotgun's shell by shell), zoom (`weapon_rotate_zoom_level`: none, the levels, none; the
+magnification between the minimum and maximum by the level; the field of view over it; unzoomed on a switch and a melee), the unit's two
+weapons and switching (the put-away animation's ticks, then the ready's, during which it cannot fire), melee (the animation busies the
+weapon, a trace at the key frame) and a projectile's flight (its velocity and the player's along the shot, gravity, range) through the
+map's collision geometry and the Chief's capsule (`fp_trace`: the first surface a segment crosses from its front): an impact is an event.
+Not ported: effects, sound, damage (the Chief takes none), the weapon objects' own third-person animations (they time a recoil state that
+only blocks a reload for a few ticks, and the assault rifle has no graph of its own), vehicle weapons, picking weapons up, grenades (the
+button is read, the throw is not done), the flashlight, a projectile's detonation (a rocket's blast, a grenade's fuse) and the AI's use.
+
+Through the controller (`fp_player`): the DualShock's right trigger fires (its pressure when libpad gives it, else the button), Square
+reloads, Triangle switches weapons, Circle is melee, R3 zooms, L2 is the grenade, Select (Back) toggles the autolevel; the demo presses them
+too (at the Chief: the pistol, zoomed, a few rounds). The player carries the assault rifle and the pistol. Each button is seen by the
+weapons once, as an edge, on the next tick. The lens eases to the weapon's field of view over 0.18 s (`first_person_camera.c`'s
+transition time) and the look rates are divided by the magnification (`player_control.c`); the program recomputes the focal length, the
+clip planes, VU0's constants and the mip levels as the lens moves. The mip floor (`tools/mip_floor.json`) trims levels the orbit never
+reads, so a zoom shows them blurrier: `MIP_FLOOR=0 python3 tools/export_map.py` keeps them.
+
+**Autolevel** is the original's "autocenter" controller option (`player_ui_autolevel_enabled`), off in a new profile (the profile is
+zeroed): `player_control.c` levels the pitch toward the unit camera's autolevel (0 for the Chief) after the player has walked forward
+for `MAP_MIN_AUTOLEVEL_TICKS` (15) ticks without looking up or down, by `|pitch| * 0.6366 * look_autolevel_scale (0.5) * speed` a tick.
+It is here, off, toggled by Select, where the original has a menu.
+
 ## Walking on the map: the collision BSP
 
 The player collides with the map's own collision geometry, the geometry the original's biped is swept through, not the render
@@ -107,9 +143,9 @@ before that and the cell cache).
 
 Not ported: the other objects' collision (vehicles, items, the bipeds that are not the Chief), a Chief who moves (he would be
 tested as a pill against a pill), the scenery's permutations other than the first, the 2D trees of the leaves (flattened to
-the surface lists), the pitch autolevel; the unit camera's own pitch limits; the first-person weapon (hands and rifle); the
-zoom; the stun penalties; melee and the other actions; the original's slipping physics on steep ground. A fall into the
-void puts the player back at the start.
+the surface lists), the unit camera's own pitch limits (the Chief's are the defaults, 85.5 degrees); the first-person weapon's
+model (hands and gun: not drawn yet); the stun penalties; the original's slipping physics on steep ground. A fall into the void
+puts the player back at the start.
 
 ## Checking it
 
