@@ -72,7 +72,14 @@ enum
 
 	/* the claims: a bit for each byte of the largest tag cache */
 	CLAIM_BITS = 32,
+#ifdef HALO_PS2
+	/* the PS2 trusts its maps (they are the converter's) and has 1.2 MB less
+	to spare for each 9 MB of tag cache: it checks nothing, and keeps no
+	claims */
+	CLAIM_WORDS = 1,
+#else
 	CLAIM_WORDS = TAG_VALIDATE_MAXIMUM_TAG_CACHE_SIZE / CLAIM_BITS,
+#endif
 
 	/* a Custom Edition map's models (cache_file_formats.c) */
 	GBXMODEL_GROUP_TAG = 'mod2',
@@ -1172,6 +1179,9 @@ boolean tag_validate_tags(
 	struct tag_validate_header *header = tag_header;
 	struct tag_validation validation;
 
+#ifdef HALO_PS2
+	return TRUE;
+#endif
 	validation_begin(&validation, tag_header, tag_data_size, TAG_CACHE_SIZE, FALSE, map_name);
 	tag_validate_globals.file_ranges[0].offset = 0;
 	tag_validate_globals.file_ranges[0].size = file_length < 0 ? 0 : (unsigned long)file_length;
@@ -1215,6 +1225,10 @@ boolean tag_validate_custom_edition_tags(
 	struct tag_validation validation;
 	short range_index;
 
+#ifdef HALO_PS2
+	/* (the PS2 plays no Custom Edition map) */
+	return FALSE;
+#endif
 	validation_begin(&validation, tag_header, loaded_size, tag_cache_size, TRUE, map_name);
 	for (range_index = 0; range_index < file_range_count && range_index < MAXIMUM_TAG_VALIDATE_FILE_RANGES; range_index++)
 		tag_validate_globals.file_ranges[range_index] = file_ranges[range_index];
@@ -1255,6 +1269,9 @@ boolean tag_validate_structure_bsp(
 	struct tag_validation validation;
 	unsigned long tag_cache_offset = (unsigned long)((byte *)base - (byte *)header);
 
+#ifdef HALO_PS2
+	return TRUE;
+#endif
 	validation_new(&validation, base, (unsigned long)size);
 	validation.tag_index = tag_index;
 	if (!header || !instance || instance->group_tag != STRUCTURE_BSP_GROUP_TAG ||

@@ -715,8 +715,13 @@ Done so far:
 - The heap: the debug drawing's buffers are 64 primitives, not 8192
   (`rasterizer_debug.c`: 2 MB), the AI's debug information is one record
   of each, shared by the actors and the paths (`ai_debug.h`,
-  `ACTOR_DEBUG_INFO`: 10 MB, which only the debug rendering reads), and
-  the game's threads have 128 KB stacks, not 1 MB (`xbox_kernel.c`).
+  `ACTOR_DEBUG_INFO`: 10 MB, which only the debug rendering reads), the
+  game's threads have 128 KB stacks, not 1 MB (`xbox_kernel.c`), the tag
+  validator keeps no claims and checks nothing (`tag_validate.c`: 1.2 MB;
+  the PS2 plays the converter's maps), the profile's history is 8 frames,
+  not 256 (`profile.c`: 1.1 MB), and the null Direct3D's back and depth
+  buffers share a page (`ps2_d3d_null.c`: 2.4 MB). A level (bloodgulch)
+  leaves 6.5 MB of the 32 MB never taken.
 - The texture cache's copy buffer: the Xbox copies each map from the DVD
   to a cache file through a 5 MB buffer stolen from the texture cache,
   between two 1 MB guard zones of protected pages. On the PS2 the write
@@ -761,13 +766,13 @@ starts there (VU0 for the matrix maths, the scratchpad for the hot loops).
 
 Still to do:
 
-- A campaign level. Their tag data is 21 to 22 MB on the Xbox (14.4 MB
-  after the converter's reductions, Phase 2), and the tag cache is 9 MB,
-  which holds `sidewinder`'s (8.92 MB): `b30` stops at "the cache file is
-  damaged" on its 15.7 MB of tag data. A 14.4 MB cache needs 5.4 MB the
-  map has not got: the null Direct3D's back and depth buffers (2.4 MB)
-  go once nothing reads them, and the rest comes from the code (the ELF
-  has 3.5 MB of it and 5.6 MB of `.bss`) and from the game state's pools.
+- A campaign level. The unconverted maps' tags and largest BSP take 17.2
+  MB (`c20`, the least) to 21.8 MB, and the tag cache is 9 MB, which holds
+  `sidewinder`'s (8.92 MB): `b30` stops at "the cache file is damaged" on
+  its 15.7 MB of tag data. The converter's reductions project 13.7 to
+  14.4 MB (Phase 2), which the 6.5 MB of free heap holds (a tag cache of
+  up to 15.4 MB), leaving about 1 MB. Setting the tag cache to that size
+  (`halo_port_capacity.h`) is the converter's first use.
 - The textures: 2 MB of texture cache holds a few of a level's textures,
   so the rest are the default one and `debug.txt` says "YOU GOT STABBED"
   every ten seconds. The renderer's own texture memory replaces this

@@ -26,6 +26,7 @@ Called from the game (main.c, game_time.c).
 #include <stdlib.h>
 #include <string.h>
 #include <timer.h>
+#include <unistd.h>
 
 /* the game's */
 void main_set_map_name(char const *map_name);
@@ -161,6 +162,10 @@ void ps2_bench_update(unsigned char main_menu_scenario_loaded, unsigned char gam
 			platform_log("bench: %lu ticks, %.2f ms on average, %.2f ms the longest, %lu over %.0f ms",
 				bench.total_ticks, milliseconds(bench.total_cycles / bench.total_ticks),
 				milliseconds((double)bench.total_longest), bench.over_budget, BUDGET_MILLISECONDS);
+			/* the memory the heap has not taken yet: from its end (malloc's
+			sbrk) to the main thread's stack, 128 KB below the 32 MB */
+			platform_log("bench: heap: %lu bytes never taken (of 32 MB), its end at 0x%lx",
+				0x2000000UL - 0x20000UL - (unsigned long)sbrk(0), (unsigned long)sbrk(0));
 			platform_log("bench: done");
 			bench.state = _bench_done;
 		}
