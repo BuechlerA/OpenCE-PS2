@@ -1,7 +1,7 @@
 /* Host test of src/fp_weapon.c against the numbers the map's tags give: the assault rifle's cadence and magazine, reload and ready times from the
    first-person animations, the pistol's, the sniper rifle's zoom, switching, and shots against the map and the Chief.
 
-     cc -O1 -I src -o /tmp/fp_weapon_test tools/fp_weapon_test.c src/fp_weapon.c src/fp_controller.c src/map_assets.c src/weapon_assets.c -lm && /tmp/fp_weapon_test
+     cc -O1 -I src -o /tmp/fp_weapon_test tools/fp_weapon_test.c src/fp_weapon.c src/fp_controller.c src/fp_view.c src/fpm_assets.c src/map_assets.c src/weapon_assets.c -lm && /tmp/fp_weapon_test
 */
 #include <math.h>
 #include <stdio.h>

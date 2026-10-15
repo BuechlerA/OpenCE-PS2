@@ -4,7 +4,7 @@ The Master Chief sample's map scene (`port/ps2/samples/masterchief`) is first pe
 player over Blood Gulch; with no hand on the pad a demo walks the player from the front of one fortress to the
 Chief waiting in the middle of the valley (see "The demo"). The controller is Halo's own:
 the input shaping, the look, the biped's physics and the camera are ported from `source/`, and every number comes
-from the map's tags. Checked in PCSX2 only (the demo and an idle pad; no one has held a DualShock to it).
+from the map's tags. Checked in PCSX2 only (the demo and an idle pad; no one has held a DualShock to it, nor run it on hardware).
 
 ## Where each part comes from
 
@@ -33,7 +33,7 @@ sine of the tag's falloff and cutoff angles, and the minimum ground normal the c
 
 DualShock to the Xbox's, as the Xbox's default layout has them: left stick moves, right stick looks, d-pad moves
 at full throttle (overriding the stick, as the original's), Cross jumps (the Xbox's A), L3 crouches (the left
-stick's click). Nothing else is used: the sample has no weapon, grenades or actions.
+stick's click). The weapons' buttons are under "Weapons, zoom and autolevel".
 
 `src/pad.c` is libpad on port 1: it loads the console's `rom0:SIO2MAN` and `rom0:PADMAN`, asks the DualShock for
 its sticks (`PAD_MMODE_DUALSHOCK`, locked), and treats a digital pad as having no sticks (its stick bytes are not
@@ -54,8 +54,14 @@ turn, the acceleration, the slope's speed, the jump's arc and the walls are the 
 - The pilot chases the point 1.5 units ahead on the path. The right stick turns by the heading's error through the
   look function backwards, never past 0.8 (a stick at the stop would peg and accelerate the turn), the left stick runs
   (slower in a bend, stopped to turn when far off), the eyes follow the ground ahead, and the jump button is pressed
-  for 0.12 s at four marks along the path (20, 45, 70, 85 percent). At the goal it looks at the Chief for 3.5 s, then the
-  demo starts over.
+  for 0.12 s at four marks along the path (20, 45, 70, 85 percent). It fires a second's burst of the assault rifle at 33 and 80 percent
+  of the path (the trigger, as the right trigger: 255). At the goal it looks at the Chief (his chest: the ground at his feet is the top
+  of his capsule, which the first version aimed at, a head too high, so that no shot hit him) and plays the weapons for 15 s, by the pad's
+  buttons, one press 0.1 s long: a burst of the rifle at him (1.2 s in), the melee blow (3.0), a reload (4.3: 2.8 s, the rifle's
+  87 frames), the switch to the pistol (7.8: put away in 12 ticks, readied in 33), the zoom (9.8), five shots a press each (the pistol's
+  trigger is latched), the zoom off (13.6); then the demo starts over (a walk of about 20 s and the 15 s: 35 s). The pistol has one
+  zoom level (2x). The sniper rifle, which the task asked for if it was feasible, is not: the player carries two weapons (the rifle and
+  the pistol, `fp_init`) and its scope has an overlay of the HUD that is not drawn here.
 - Any stick past the dead zone or any button but Start takes the player over for good; Start restarts the demo.
   A demo that cannot plan, or a build with `FP_NO_DEMO`, leaves the pad alone in charge.
 - The orbit builds (stills, profile, mip audit, `ORBIT_CAMERA`) keep the Chief where he stood for the orbit
@@ -86,7 +92,7 @@ button is read, the throw is not done), the flashlight, a projectile's detonatio
 
 Through the controller (`fp_player`): the DualShock's right trigger fires (its pressure when libpad gives it, else the button), Square
 reloads, Triangle switches weapons, Circle is melee, R3 zooms, L2 is the grenade, Select (Back) toggles the autolevel; the demo presses them
-too (at the Chief: the pistol, zoomed, a few rounds). The player carries the assault rifle and the pistol. Each button is seen by the
+too (see "The demo"). The player carries the assault rifle and the pistol. Each button is seen by the
 weapons once, as an edge, on the next tick. The lens eases to the weapon's field of view over 0.18 s (`first_person_camera.c`'s
 transition time) and the look rates are divided by the magnification (`player_control.c`); the program recomputes the focal length, the
 clip planes, VU0's constants and the mip levels as the lens moves. The mip floor (`tools/mip_floor.json`) trims levels the orbit never
@@ -110,12 +116,33 @@ version of the animation decode and the skinning (`fp_view_test` with a weapon, 
 six decimals). The graph's animations are uncompressed frames (per node a rotation of four int16, a translation of three floats and a scale,
 by the node's flags; only unflagged components take the default pose).
 
-`draw_first_person` in `main.c` draws them after the map and the Chief, with the depth test on and the arms and gun's own projection (near plane
+`draw_first_person` in `main.c` draws them after the map and the Chief (and not while zoomed: `first_person_weapon_render_update` makes the weapon visible only with no zoom level; the first version drew it, small at the screen's foot, and a zoomed frame now costs the weapon's 3.3 ms less), with the depth test on and the arms and gun's own projection (near plane
 0.01, clipped against it only when a vertex is behind it). A bone's skin matrix is its inverse bind matrix and its graph node's; a light
 is carried into the bone's bind space instead of a normal out of it. On VU0 (macro mode; `NO_VU0` keeps the C path) the vertices take two matrix
 products by their bones, the projection is one divide, and a normal is lit by three dot products, a clamp and the lights' colours, its index
 into a gamma table coming out of the same registers: the EE packs the GS registers. The weapon costs 3.3 ms of the EE a frame (the C path:
 5.3; the first version, which also lit every vertex, about 9). VRAM: all 17 textures stay resident, 1.1 MB (0.6 MB free).
+
+## Shots: the muzzle flash, the impact marks and the HUD
+
+`main.c`'s `fx_*` (FIRST_PERSON builds): small flat-coloured primitives, a few dozen a frame, each blend a REGLIST packet of RGBAQ and XYZ2 (no texture,
+no lighting). They cost 0.02 to 0.07 ms of the EE a frame (the profile's "fp fx+hud"), which the weapon's 3.3 ms does not notice.
+
+- **Marks.** Each `FPW_EVENT_IMPACT` (and a melee blow that hit) not on the Chief (`b == 2`: he takes no damage, and a quad on his capsule would
+  float) puts a mark in a ring of 32 at the shot's position and normal: a dark scorch quad (alpha blended, 0.05 units from its centre to its side
+  plus 0.006 a unit of distance, so that it stays a few pixels) for 5 s, fading in the last 1.5 s, and in its first 0.12 s a flash (added). The
+  quads are drawn after the map and the Chief with the depth test on and a nudge toward the camera of 0.02 + 0.004 a unit of distance
+  (the 16-bit Z buffer does not separate a coplanar quad further than that); a mark nearer than 0.3 or further than 60 units is not drawn.
+- **Muzzle flash.** The trigger's `illumination` (the original's: 1 at a shot, down by 1/3 a tick for the rifle and the pistol, 0.1 s) scales an eight-pointed
+  star (alternate long and short points: bright centre, clearer points, added) at the gun's tip, in the weapon's view. The tip is the centroid of
+  the gun's bind-pose vertices within 4 mm of the largest x (+x is the barrel in every weapon's bind pose, checked on the nine), carried by that
+  vertex's node: `fpv_skin_matrix` each frame. The star is drawn in front of the whole gun (Z just under the near plane): at its own depth it was behind
+  the barrel's nearer parts and did not show (found in a PCSX2 still).
+- **HUD.** A crosshair (four ticks) and at the screen's lower left the magazine as a gauge, the rounds loaded in 7-segment digits (orange under a fifth
+  of the magazine) and the rounds carried under them, from the weapon's state. They are rectangles at the front of the Z range.
+
+Not done: the original's weapon HUD (reticles that change with the weapon, the zoomed scope overlay, the grenade and shield counts), shell
+ejection, the Chief's reaction (a hit mark on his armour), impact effects by material (dust, sparks), the flash's light on the map.
 
 ## Walking on the map: the collision BSP
 
@@ -163,8 +190,7 @@ before that and the cell cache).
 
 Not ported: the other objects' collision (vehicles, items, the bipeds that are not the Chief), a Chief who moves (he would be
 tested as a pill against a pill), the scenery's permutations other than the first, the 2D trees of the leaves (flattened to
-the surface lists), the unit camera's own pitch limits (the Chief's are the defaults, 85.5 degrees); the first-person weapon's
-model (hands and gun: not drawn yet); the stun penalties; the original's slipping physics on steep ground. A fall into the void
+the surface lists), the unit camera's own pitch limits (the Chief's are the defaults, 85.5 degrees); the stun penalties; the original's slipping physics on steep ground. A fall into the void
 puts the player back at the start.
 
 ## Checking it
@@ -184,10 +210,19 @@ puts the player back at the start.
 - `tools/fp_demo_test.c` (the command is in its header): the demo plans the walk, and the controller, given only the pad
   the demo makes, arrives next to the Chief, four times in 100 s, jumping four times a walk and facing him, never
   stuck; a touch of the pad takes over and Start restarts the demo.
+- `tools/fp_demo_test.c` also counts what the weapons did (rifle 203 shots and pistol 20 in 150 s, four reloads started and finished, four blows, put aways
+  and readies, zooms in and out, 84 impacts on the Chief), and prints the first walk's events with their times.
+- **Stills of the demo's states**: `make EXTRA_CFLAGS="-DFIRST_PERSON -DFP_STILL_SECONDS=22.95f"` plays that many seconds of the demo at start-up in 1/60 s steps (the
+  events print as `STILL <time>: event ...` with the final position and weapon state) and holds the frame; `rm src/main.o` first, since make does not see
+  the flag. The host test's events and the EE's agree to 0.02 s (melee 22.75 and 22.77 s, reload start 24.02 and 24.07). Times of the states
+  in the first walk (the arrival at about 19.7 s): rifle burst 20.9-22.0, melee 22.75, reload 24.07-26.90, put away 27.57, ready 27.97, zoom 29.57, pistol shots 30.1-32.5, zoom
+  off 33.37. PCSX2 with `-datapath` on a copy of the configuration with the console log on (`tools/ps2/pcsx2_run.py` does it, without a window) shows the
+  printed lines; the window capture is as for the orbit.
 - The demo is what PCSX2 shows with no one at the pad. `make FP_NO_DEMO=1` leaves the player standing, for the pad alone.
   `make EXTRA_CFLAGS=-DPAD_DEBUG` prints what libpad sees twice a second.
 - The frame rate of the demo, `make EXTRA_CFLAGS="-DPROFILE -DFIRST_PERSON"`: 59 to 60 fps, the EE busy
-  about 14.5 ms of 16.7 with the weapon (its draw 3.3 ms) (the orbit: 8 to 14), the widest views drawing 3,600 triangles. The builds for stills
+  14.5 to 15.4 ms of 16.7 with the weapon (its draw 3.3 ms, the marks, flash and HUD 0.02 to 0.07: 60 fps in the open stretches and the dwell, a vsync missed in 60 frames,
+  59.0 fps, in the fortress's, as before the effects, and 12.4 to 13.1 ms at the Chief; a zoomed frame draws no weapon) (the orbit: 8 to 14), the widest views drawing 3,600 triangles. The builds for stills
   (`-DDEBUG_SECONDS`), the profile and the mip audit keep the orbit camera so that builds see the same views, unless
   `-DFIRST_PERSON` is added; `make ORBIT_CAMERA=1` asks for the orbit in any build.
 

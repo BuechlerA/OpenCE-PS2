@@ -3,7 +3,8 @@ FP_DEMO.H
 
 The first-person demo: a player that walks by itself, through the gamepad the controller (fp_controller.h) reads, from the
 front of one fortress to the middle of the valley, turning where the path bends and jumping on the way, then stands
-looking at the Chief and starts again. The path is planned on the map's ground, at start-up. Touching the real pad
+looking at the Chief and starts again; it fires two bursts on the way, and at the Chief a burst, a blow, a reload, the pistol
+with its zoom and shots (the weapons the controller takes through the same pad). The path is planned on the map's ground, at start-up. Touching the real pad
 takes the player over; Start gives it back to the demo from the beginning.
 */
 #ifndef FP_DEMO_H
@@ -13,6 +14,7 @@ takes the player over; Start gives it back to the demo from the beginning.
 
 #define FP_DEMO_MAX_POINTS 64
 #define FP_DEMO_MAX_JUMPS 4
+#define FP_DEMO_BURSTS 2
 
 typedef struct
 {
@@ -26,6 +28,9 @@ typedef struct
 	float jump_at[FP_DEMO_MAX_JUMPS];                  /* distances along the path where the player jumps */
 	int jump_count, next_jump;
 	float jump_pulse;                                  /* seconds the jump button is still held */
+	float burst_at[FP_DEMO_BURSTS];                    /* distances along the path where the player fires a burst of the rifle */
+	int next_burst;
+	float burst_left;                                  /* seconds the trigger is still held */
 	float progress;                                    /* the distance along the path the player has got to */
 	float arrived;                                     /* seconds at the goal */
 	float stuck;                                       /* seconds without progress */

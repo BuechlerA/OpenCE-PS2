@@ -10,7 +10,9 @@ the walls) is the controller's. Two parts:
   - the pilot: it chases a point 1.5 units ahead on the path (pure pursuit), turning the right stick by the heading's error
     (through the inverse of the look function, so the turn is as fast as the error asks, never so fast the stick pegs and
     the turn accelerates), running the left stick forward (less in a sharp turn), jumping at marks along the path, and at
-    the end standing and looking at the Chief, switching to the pistol and zooming on him and firing, before starting over.
+    the end standing and looking at the Chief. The weapons go through the pad too, as a person presses them: two bursts of the
+    assault rifle on the way, then at the Chief a burst, a melee blow, a reload, the switch to the pistol, the zoom and single shots, the
+    zoom out, before starting over.
 */
 
 #include <math.h>
@@ -28,10 +30,11 @@ the walls) is the controller's. Two parts:
 #define CLEARANCE 0.5f                        /* ground must be there, and level, this far around a cell */
 #define LOOKAHEAD 1.5f
 #define ARRIVE_DISTANCE 0.7f
-#define DWELL_SECONDS 5.2f
+#define DWELL_SECONDS 15.f
 #define STUCK_SECONDS 4.f
 #define DEAD_RANGE 9000
 #define STICK_MAX 32767
+#define CHIEF_CHEST 0.4f                      /* the height above the Chief's feet that the demo aims at */
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 static float wrap_angle(float a) { while (a > PI_F) a -= 2.f * PI_F; while (a < -PI_F) a += 2.f * PI_F; return a; }
@@ -205,12 +208,13 @@ static void restart(fp_demo *d, fp_player *player)
 {
 	fp_init(player, d->start[0], d->start[1], atan2f(d->point[1][1] - d->point[0][1], d->point[1][0] - d->point[0][0]));
 	d->autopilot = 1;
-	d->next_jump = 0; d->jump_pulse = 0.f; d->progress = 0.f; d->arrived = 0.f; d->stuck = 0.f;
+	d->next_jump = 0; d->jump_pulse = 0.f; d->next_burst = 0; d->burst_left = 0.f; d->progress = 0.f; d->arrived = 0.f; d->stuck = 0.f;
 }
 
 int fp_demo_init(fp_demo *d, fp_player *player, float start_x, float start_y, float goal_x, float goal_y, float face_x, float face_y, const float via[][2], int via_count)
 {
 	static const float jump_fractions[FP_DEMO_MAX_JUMPS] = { 0.2f, 0.45f, 0.7f, 0.85f };
+	static const float burst_fractions[FP_DEMO_BURSTS] = { 0.33f, 0.8f };
 	int i;
 
 	memset(d, 0, sizeof(*d));
@@ -220,6 +224,7 @@ int fp_demo_init(fp_demo *d, fp_player *player, float start_x, float start_y, fl
 	d->planned = 1;
 	d->jump_count = d->length > 12.f ? FP_DEMO_MAX_JUMPS : d->length > 6.f ? 2 : 0;
 	for (i = 0; i < d->jump_count; i++) d->jump_at[i] = d->length * jump_fractions[i];
+	for (i = 0; i < FP_DEMO_BURSTS; i++) d->burst_at[i] = d->length * burst_fractions[i];
 	restart(d, player);
 	return 1;
 }
@@ -308,15 +313,26 @@ void fp_demo_pad(fp_demo *d, fp_player *player, const fp_pad *user, fp_pad *out,
 
 		d->arrived += seconds;
 		error = wrap_angle(atan2f(aim_y, aim_x) - player->yaw);
-		fp_ground(d->face[0], d->face[1], eye_z + 3.f, &aim_z, NULL, NULL);
-		pitch_error = atan2f(aim_z + 0.35f - eye_z, hypotf(aim_x, aim_y)) - player->pitch;
+		aim_z = MAP_DEMO_CHIEF_Z + CHIEF_CHEST;          /* (the ground there is the top of the Chief's capsule: aiming a little above it misses him) */
+		pitch_error = atan2f(aim_z - eye_z, hypotf(aim_x, aim_y)) - player->pitch;
 		out->right_x = (short)-turn_stick(error, MAP_LOOK_YAW_RATE * PI_F / 180.f);
 		out->right_y = turn_stick(pitch_error, MAP_LOOK_PITCH_RATE * PI_F / 180.f);
-		/* and the weapons, for as long as it stands there: the pistol out, zoomed on the Chief, a few rounds, the zoom off (the pad's buttons, as a person presses them) */
-		if (d->arrived > 0.3f && d->arrived < 0.4f) out->buttons |= FP_SWITCH_WEAPON;
-		if (d->arrived > 2.4f && d->arrived < 2.5f) out->buttons |= FP_ZOOM;
-		if (d->arrived > 3.0f && d->arrived < 3.8f) out->trigger = 255;
-		if (d->arrived > 4.4f && d->arrived < 4.5f) out->buttons |= FP_ZOOM;
+		/* and the weapons, for as long as it stands there (the pad's buttons, as a person presses them; a press is 0.1 s so that a frame sees it):
+		   a burst of the rifle at the Chief, a blow, a reload, the pistol out, zoomed (it has the one level), single shots (the pistol's trigger is latched: a press
+		   for each), the zoom off */
+		{
+			const float t = d->arrived;
+			static const float shots[] = { 10.4f, 11.0f, 11.6f, 12.2f, 12.8f };
+			int k;
+
+			if (t > 1.2f && t < 2.3f) out->trigger = 255;
+			if (t > 3.0f && t < 3.1f) out->buttons |= FP_MELEE;
+			if (t > 4.3f && t < 4.4f) out->buttons |= FP_RELOAD;
+			if (t > 7.8f && t < 7.9f) out->buttons |= FP_SWITCH_WEAPON;
+			if (t > 9.8f && t < 9.9f) out->buttons |= FP_ZOOM;
+			if (t > 13.6f && t < 13.7f) out->buttons |= FP_ZOOM;
+			for (k = 0; k < (int)(sizeof(shots) / sizeof(shots[0])); k++) if (t > shots[k] && t < shots[k] + 0.12f) out->trigger = 255;
+		}
 		if (d->arrived > DWELL_SECONDS) restart(d, player);
 		return;
 	}
@@ -338,4 +354,8 @@ void fp_demo_pad(fp_demo *d, fp_player *player, const fp_pad *user, fp_pad *out,
 	/* the jumps: a short press at each mark, on the ground */
 	if (d->next_jump < d->jump_count && d->progress >= d->jump_at[d->next_jump] && !player->airborne) { d->jump_pulse = 0.12f; d->next_jump++; }
 	if (d->jump_pulse > 0.f) { out->buttons |= FP_JUMP; d->jump_pulse -= seconds; }
+
+	/* the rifle's bursts on the way, a second long */
+	if (d->next_burst < FP_DEMO_BURSTS && d->progress >= d->burst_at[d->next_burst]) { d->burst_left = 1.f; d->next_burst++; }
+	if (d->burst_left > 0.f) { out->trigger = 255; d->burst_left -= seconds; }
 }

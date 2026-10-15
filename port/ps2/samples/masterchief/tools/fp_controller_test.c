@@ -1,7 +1,7 @@
 /* Host test of src/fp_controller.c against the exported map (src/map_assets.c): the original's numbers come out, the player never
    leaves the ground the map has, and cliffs stop it.
 
-     cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/map_assets.c src/fp_weapon.c src/weapon_assets.c -lm && /tmp/fp_controller_test
+     cc -O1 -I src -o /tmp/fp_controller_test tools/fp_controller_test.c src/map_assets.c src/fp_weapon.c src/fp_view.c src/fpm_assets.c src/weapon_assets.c -lm && /tmp/fp_controller_test
 
    (the controller is included, not linked, so that the test can look at the pill's spheres)
 */

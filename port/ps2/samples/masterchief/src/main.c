@@ -51,8 +51,8 @@
 
 #ifdef PROFILE                      /* -DPROFILE: time the frame's phases with the EE's cycle counter */
 #include <timer.h>
-enum { P_VU1, P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
-static const char *prof_name[P_COUNT] = { "vu1 kick", "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
+enum { P_VU1, P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_WEAPON, P_FX, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
+static const char *prof_name[P_COUNT] = { "vu1 kick", "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "fp weapon", "fp fx+hud", "submit", "queue_exec", "sync_flip" };
 static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled, prof_frame_start, prof_busy_max;
 static u32 prof_max[P_COUNT];
 static void prof_mark(int phase) { u32 t = cpu_ticks(); u32 d = t - prof_last; prof_sum[phase] += d; if (d > prof_max[phase]) prof_max[phase] = d; prof_last = t; }
@@ -2670,6 +2670,259 @@ static void fp_draw_model(GSGLOBAL *gs, const fpm_model *m, const short *graph_n
 }
 #endif
 
+
+/* ---------- what the shots leave and show: impact marks, the muzzle flash, the ammunition and the crosshair ---------- */
+
+/* Small flat-coloured primitives, a few dozen a frame: the marks are quads on the surface a shot hit (FPW_EVENT_IMPACT: a scorch that stays a
+   few seconds and a flash in its first moments), the muzzle flash a star of triangles at the gun's tip in the weapon's own view, and the HUD
+   rectangles in the screen's corner (the magazine as a gauge and 7-segment digits, as the original's HUD has the rounds loaded and carried).
+   All are RGBAQ and XYZ2 pairs in a REGLIST packet, a blend each: no texture, no lighting. */
+#define FX_MAX_MARKS 32
+#define FX_MARK_SECONDS 5.f
+#define FX_MARK_FADE 1.5f
+#define FX_FLASH_SECONDS 0.12f
+#define FX_MAX_VERTS 1536
+
+typedef struct { u64 rgbaq, xyz2; } fx_vertex;
+static fx_vertex fx_v[FX_MAX_VERTS];
+static int fx_count;
+static struct { float position[3], normal[3], age; int active; } fx_marks[FX_MAX_MARKS];
+static int fx_next_mark, fx_shots;
+static float fx_muzzle_bind[3];                  /* the tip of the gun in hand, in its bind pose, and the node that carries it */
+static int fx_muzzle_node = -1, fx_muzzle_weapon = -1;
+
+/* what the player's weapons did this frame, and a frame's time: the marks come and age */
+static void fx_feed(const fp_player *p, float seconds)
+{
+	int e, i;
+
+	for (i = 0; i < FX_MAX_MARKS; i++) if (fx_marks[i].active) { fx_marks[i].age += seconds; if (fx_marks[i].age > FX_MARK_SECONDS) fx_marks[i].active = 0; }
+	for (e = 0; e < p->events.count; e++)
+	{
+		const fpw_event *ev = &p->events.list[e];
+
+		if (ev->type == FPW_EVENT_FIRE) fx_shots++;
+		else if ((ev->type == FPW_EVENT_IMPACT || ev->type == FPW_EVENT_MELEE_HIT) && ev->b != 2)      /* (a shot at the Chief leaves no mark: he does not take damage) */
+		{
+			int k;
+
+			fx_marks[fx_next_mark].active = 1; fx_marks[fx_next_mark].age = 0.f;
+			for (k = 0; k < 3; k++) { fx_marks[fx_next_mark].position[k] = ev->position[k]; fx_marks[fx_next_mark].normal[k] = ev->normal[k]; }
+			fx_next_mark = (fx_next_mark + 1) % FX_MAX_MARKS;
+		}
+	}
+}
+
+static inline void fx_vertex_at(float x, float y, int iz, int r, int g, int b, int a)
+{
+	if (fx_count >= FX_MAX_VERTS) return;
+	fx_v[fx_count].rgbaq = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
+	fx_v[fx_count].xyz2 = GS_SETREG_XYZ2(to_gs_xy(x, gs_offset_x), to_gs_xy(y, gs_offset_y), iz);
+	fx_count++;
+}
+
+/* the vertices gathered go out as one packet in the blend given (an ALPHA register), then the list is empty */
+static void fx_flush(GSGLOBAL *gs, u64 alpha)
+{
+	u64 *q;
+	int i;
+
+	if (fx_count == 0) return;
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, alpha, 0);
+	set_prim(gs, NULL, 0, -1);
+	q = gsKit_heap_alloc(gs, fx_count, fx_count * 16, GIF_AD);
+	*q++ = GIF_TAG(fx_count, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
+	*q++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
+	for (i = 0; i < fx_count; i++) { *q++ = fx_v[i].rgbaq; *q++ = fx_v[i].xyz2; }
+	fx_count = 0;
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+}
+
+/* a point of the world in the view's space (x right, y up, z forward) */
+static void fx_to_view(const float *w, float *v)
+{
+	float d[3] = { w[0] - cam_pos[0], w[1] - cam_pos[1], w[2] - cam_pos[2] };
+
+	v[0] = d[0] * cam_right[0] + d[1] * cam_right[1] + d[2] * cam_right[2];
+	v[1] = d[0] * cam_up[0] + d[1] * cam_up[1] + d[2] * cam_up[2];
+	v[2] = d[0] * cam_fwd[0] + d[1] * cam_fwd[1] + d[2] * cam_fwd[2];
+}
+
+/* a quad on a surface (centre c, its normal, half-size r) in the colour given, both triangles, nudged toward the camera by `lift` world units */
+static void fx_surface_quad(const float *c, const float *n, float r, float lift, int red, int green, int blue, int alpha)
+{
+	static const float corner[4][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
+	static const int order[6] = { 0, 1, 2, 0, 2, 3 };
+	float axis[3] = { 0.f, 0.f, 1.f }, t1[3], t2[3], len, v[4][3];
+	svert sv[4];
+	int i, k;
+
+	if (fabsf(n[2]) > 0.9f) { axis[0] = 1.f; axis[2] = 0.f; }
+	t1[0] = n[1] * axis[2] - n[2] * axis[1]; t1[1] = n[2] * axis[0] - n[0] * axis[2]; t1[2] = n[0] * axis[1] - n[1] * axis[0];
+	len = sqrtf(t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2]);
+	if (len < 1e-6f) return;
+	for (k = 0; k < 3; k++) t1[k] /= len;
+	t2[0] = n[1] * t1[2] - n[2] * t1[1]; t2[1] = n[2] * t1[0] - n[0] * t1[2]; t2[2] = n[0] * t1[1] - n[1] * t1[0];
+	for (i = 0; i < 4; i++)
+	{
+		float w[3];
+
+		for (k = 0; k < 3; k++) w[k] = c[k] + n[k] * 0.004f + (t1[k] * corner[i][0] + t2[k] * corner[i][1]) * r;
+		fx_to_view(w, v[i]);
+		if (v[i][2] < z_near + 0.1f) return;
+		project(v[i], lift, &sv[i]);
+	}
+	for (i = 0; i < 6; i++)
+	{
+		const svert *s = &sv[order[i]];
+
+		fx_vertex_at(s->x, s->y, (int)((s->xyz2 >> 32) & 0xffffff), red, green, blue, alpha);
+	}
+}
+
+/* the impact marks, in the world after the map and the Chief: a scorch (alpha blended) that fades out, and a flash (added) in its first moments */
+static void fx_draw_marks(GSGLOBAL *gs)
+{
+	int i, any = 0;
+
+	for (i = 0; i < FX_MAX_MARKS; i++) any |= fx_marks[i].active;
+	if (!any) return;
+	for (i = 0; i < FX_MAX_MARKS; i++)
+	{
+		float v[3], fade;
+
+		if (!fx_marks[i].active) continue;
+		fx_to_view(fx_marks[i].position, v);
+		if (v[2] < 0.3f || v[2] > 60.f) continue;
+		fade = fx_marks[i].age > FX_MARK_SECONDS - FX_MARK_FADE ? (FX_MARK_SECONDS - fx_marks[i].age) / FX_MARK_FADE : 1.f;
+		fx_surface_quad(fx_marks[i].position, fx_marks[i].normal, 0.05f + 0.006f * v[2], 0.02f + 0.004f * v[2], 24, 16, 10, (int)(0x70 * fade));
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0));                      /* (Cs - Cd) * As + Cd */
+	for (i = 0; i < FX_MAX_MARKS; i++)
+	{
+		float v[3], flash;
+
+		if (!fx_marks[i].active || fx_marks[i].age > FX_FLASH_SECONDS) continue;
+		fx_to_view(fx_marks[i].position, v);
+		if (v[2] < 0.3f || v[2] > 60.f) continue;
+		flash = 1.f - fx_marks[i].age / FX_FLASH_SECONDS;
+		fx_surface_quad(fx_marks[i].position, fx_marks[i].normal, (0.09f + 0.012f * v[2]) * (0.6f + 0.4f * flash), 0.03f + 0.004f * v[2], 255, 210, 120, (int)(0x70 * flash));
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 2, 0, 1, 0));                      /* Cs * As + Cd */
+}
+
+/* the muzzle flash: an eight-pointed star of triangles at the gun's tip, bright at its centre and clear at its points, added to the picture, as long as the
+   trigger's illumination (weapons.c: set to 1 by a shot, down by its recovery each tick) lasts */
+static void fx_draw_flash(GSGLOBAL *gs, const fpm_weapon *fw, float t)
+{
+	const fpw_state *w = fpw_current_state(&player.weapons);
+	float m[12], tip[3], intensity, radius, phase;
+	int i, k;
+
+	if (!w || w->weapon != player.view.weapon || w->triggers[0].illumination <= 0.f) return;
+	if (fx_muzzle_weapon != player.view.weapon)            /* the tip: where the gun's vertices reach furthest along its barrel (+x in the bind pose) */
+	{
+		const fpm_model *g = fw->gun;
+		float far_x = -1e9f, sum[3] = { 0.f, 0.f, 0.f };
+		int n = 0, v;
+
+		for (v = 0; v < g->vertices; v++) if (g->position[v * 3] > far_x) far_x = g->position[v * 3];
+		for (v = 0; v < g->vertices; v++)
+			if (g->position[v * 3] > far_x - 0.004f) { for (k = 0; k < 3; k++) sum[k] += g->position[v * 3 + k]; if (!n) fx_muzzle_node = g->node[v * 2]; n++; }
+		for (k = 0; k < 3; k++) fx_muzzle_bind[k] = sum[k] / (float)n;
+		fx_muzzle_weapon = player.view.weapon;
+	}
+	fpv_skin_matrix(&player.view, fw->gun, fw->gun->graph_node, fx_muzzle_node, t, m);
+	for (k = 0; k < 3; k++) tip[k] = fx_muzzle_bind[0] * m[k] + fx_muzzle_bind[1] * m[3 + k] + fx_muzzle_bind[2] * m[6 + k] + m[9 + k];
+	intensity = w->triggers[0].illumination;
+	radius = 0.06f * (0.7f + 0.3f * intensity);
+	phase = (float)fx_shots * 1.3f;
+	for (i = 0; i < 8; i++)
+	{
+		/* the triangle (centre, the point, the next valley): the points alternate long and short */
+		float a0 = phase + (float)i * (float)M_PI / 4.f, a1 = a0 + (float)M_PI / 4.f, r0 = (i & 1) ? 0.55f : 1.f, r1 = (i & 1) ? 1.f : 0.55f;
+		float p[3][3] = { { tip[0], tip[1], tip[2] }, { tip[0], tip[1] + cosf(a0) * radius * r0, tip[2] + sinf(a0) * radius * r0 },
+		                  { tip[0], tip[1] + cosf(a1) * radius * r1, tip[2] + sinf(a1) * radius * r1 } };
+		svert sv[3];
+
+		for (k = 0; k < 3; k++) { fp_project(p[k], &sv[k]); sv[k].xyz2 = (sv[k].xyz2 & 0xffffffffull) | ((u64)(FP_Z_NEAR - 100) << 32); }     /* in front of the whole gun */
+		fx_vertex_at(sv[0].x, sv[0].y, (int)((sv[0].xyz2 >> 32) & 0xffffff), 255, 235, 170, (int)(0x50 + 0x30 * intensity));
+		fx_vertex_at(sv[1].x, sv[1].y, (int)((sv[1].xyz2 >> 32) & 0xffffff), 255, 150, 50, (int)(0x28 * intensity));
+		fx_vertex_at(sv[2].x, sv[2].y, (int)((sv[2].xyz2 >> 32) & 0xffffff), 255, 150, 50, (int)(0x28 * intensity));
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 2, 0, 1, 0));
+}
+
+/* a rectangle on the screen's glass, in buffer pixels, in front of everything */
+static void fx_rect(float x0, float y0, float x1, float y1, int red, int green, int blue, int alpha)
+{
+	static const int order[6][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 0 }, { 1, 1 }, { 0, 1 } };
+	int i;
+
+	for (i = 0; i < 6; i++) fx_vertex_at(order[i][0] ? x1 : x0, order[i][1] ? y1 : y0, 65534, red, green, blue, alpha);
+}
+
+/* a decimal digit as seven segments (a, b, c, d, e, f, g: top, upper right, lower right, bottom, lower left, upper left, middle), w x h with a stroke s */
+static void fx_digit(int digit, float x, float y, float w, float h, float s, int red, int green, int blue, int alpha)
+{
+	static const unsigned char segments[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+	unsigned m = segments[digit];
+
+	if (m & 1) fx_rect(x, y, x + w, y + s, red, green, blue, alpha);
+	if (m & 2) fx_rect(x + w - s, y, x + w, y + h * 0.5f + s * 0.5f, red, green, blue, alpha);
+	if (m & 4) fx_rect(x + w - s, y + h * 0.5f - s * 0.5f, x + w, y + h, red, green, blue, alpha);
+	if (m & 8) fx_rect(x, y + h - s, x + w, y + h, red, green, blue, alpha);
+	if (m & 16) fx_rect(x, y + h * 0.5f - s * 0.5f, x + s, y + h, red, green, blue, alpha);
+	if (m & 32) fx_rect(x, y, x + s, y + h * 0.5f + s * 0.5f, red, green, blue, alpha);
+	if (m & 64) fx_rect(x, y + h * 0.5f - s * 0.5f, x + w, y + h * 0.5f + s * 0.5f, red, green, blue, alpha);
+}
+
+/* a number right-aligned to x (at least one digit); returns its left edge */
+static float fx_number(int value, float right, float y, float w, float h, float s, int red, int green, int blue, int alpha)
+{
+	char text[8];
+	int n = 0, i;
+	float x = right;
+
+	if (value < 0) value = 0;
+	do { text[n++] = (char)(value % 10); value /= 10; } while (value && n < 7);
+	for (i = 0; i < n; i++)
+	{
+		x -= w;
+		fx_digit(text[i], x, y, w, h, s, red, green, blue, alpha);
+		x -= w * 0.4f;
+	}
+	return x + w * 0.4f;
+}
+
+/* the HUD: a crosshair, and at the screen's lower left the rounds loaded (large) over the rounds carried, with the magazine as a gauge (the original's HUD shows the
+   same numbers; its zoomed scope overlay is not drawn) */
+static void fx_draw_hud(GSGLOBAL *gs)
+{
+	const fpw_state *w = fpw_current_state(&player.weapons);
+	const fpw_weapon *def = fpw_current(&player.weapons);
+	float right = 36.f + 96.f, bottom = gs->Height - 34.f;        /* (the left corner: the gun holds the right one) */
+
+	/* the crosshair: four ticks around the aim */
+	fx_rect(screen_cx - 11.f, screen_cy - 1.f, screen_cx - 5.f, screen_cy + 1.f, 170, 225, 255, 0x70);
+	fx_rect(screen_cx + 5.f, screen_cy - 1.f, screen_cx + 11.f, screen_cy + 1.f, 170, 225, 255, 0x70);
+	fx_rect(screen_cx - 1.f, screen_cy - 11.f, screen_cx + 1.f, screen_cy - 5.f, 170, 225, 255, 0x70);
+	fx_rect(screen_cx - 1.f, screen_cy + 5.f, screen_cx + 1.f, screen_cy + 11.f, 170, 225, 255, 0x70);
+	if (w && def && def->magazine_count > 0)
+	{
+		const fpw_magazine_state *mag = &w->magazines[0];
+		int maximum = def->magazines[0].loaded_maximum, low = mag->rounds_loaded * 5 <= maximum, red = low ? 255 : 120, green = low ? 120 : 215, blue = low ? 60 : 255;
+		float fraction = maximum > 0 ? (float)mag->rounds_loaded / (float)maximum : 0.f, gauge_left = right - 96.f;
+
+		fx_rect(gauge_left - 2.f, bottom - 50.f, right + 2.f, bottom - 42.f, 0, 20, 40, 0x50);           /* the magazine: a frame and what is in it */
+		fx_rect(gauge_left, bottom - 48.f, gauge_left + 96.f * fraction, bottom - 44.f, red, green, blue, 0x90);
+		fx_number(mag->rounds_loaded, right, bottom - 36.f, 13.f, 24.f, 3.f, red, green, blue, 0x90);
+		fx_number(mag->rounds_total, right, bottom - 6.f, 7.f, 12.f, 2.f, 120, 215, 255, 0x70);
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0));
+}
+
 /* the arms and the gun, after the map and the Chief */
 static void draw_first_person(GSGLOBAL *gs)
 {
@@ -2678,6 +2931,7 @@ static void draw_first_person(GSGLOBAL *gs)
 	int l;
 
 	if (player.view.weapon < 0 || !fpm_weapons[player.view.weapon].present) return;
+	if (player.weapons.zoom_level >= 0) return;         /* first_person_weapon_render_update: the weapon is visible only with no zoom */
 	fw = &fpm_weapons[player.view.weapon];
 	if (t > 1.f) t = 1.f;
 	/* the lights in the camera's space (x forward, y left, z up) */
@@ -2702,6 +2956,7 @@ static void draw_first_person(GSGLOBAL *gs)
 	}
 	fp_draw_model(gs, &fpm_hands, fw->hands_graph_node, t, fp_uv_cache[0], 0);
 	fp_draw_model(gs, fw->gun, fw->gun->graph_node, t, fp_uv_cache[1], 1);
+	fx_draw_flash(gs, fw, t);
 }
 #endif
 
@@ -2898,7 +3153,13 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	gs->PrimAlphaEnable = GS_SETTING_OFF;
 #endif
 #ifdef FIRST_PERSON
+	PROF_MARK(P_SUBMIT);
+	fx_draw_marks(gs);
+	PROF_MARK(P_FX);
 	draw_first_person(gs);
+	PROF_MARK(P_WEAPON);
+	fx_draw_hud(gs);
+	PROF_MARK(P_FX);
 #endif
 	PROF_MARK(P_SUBMIT);
 }
@@ -3089,9 +3350,35 @@ int main(void)
 
 			last_now = now;
 			if (dt < 0.f || dt > 0.1f) dt = 0.f;
+#ifdef FP_STILL_SECONDS            /* a still of the demo: it plays FP_STILL_SECONDS in 1/60 s steps (the events print with their times), then holds */
+			static int still_played;
+
+			if (!still_played)
+			{
+				static const fp_pad none;
+				int step, e;
+
+				still_played = 1;
+				for (step = 0; step < (int)(FP_STILL_SECONDS * 60.f); step++)
+				{
+					fp_demo_pad(&demo, &player, &none, &pad, 1.f / 60.f);
+					fp_update(&player, &pad, 1.f / 60.f);
+					fx_feed(&player, 1.f / 60.f);
+					for (e = 0; e < player.events.count; e++)
+						if (player.events.list[e].type != FPW_EVENT_FIRE && player.events.list[e].type != FPW_EVENT_IMPACT)
+							printf("STILL %6.2f s: event %d (%d, %d)\n", (step + 1) / 60.f, player.events.list[e].type, player.events.list[e].a, player.events.list[e].b);
+				}
+				printf("STILL: %.2f s, at (%.2f, %.2f, %.2f) yaw %.1f pitch %.1f, weapon %d (view %d), illumination %.2f, trigger state %d, rounds %d\n", FP_STILL_SECONDS, player.pos[0], player.pos[1], player.pos[2], player.yaw * 57.2958f, player.pitch * 57.2958f,
+				       player.weapons.slots[player.weapons.current].weapon, player.view.weapon, player.weapons.slots[player.weapons.current].triggers[0].illumination, player.weapons.slots[player.weapons.current].triggers[0].state, player.weapons.slots[player.weapons.current].magazines[0].rounds_loaded);
+			}
+			dt = 0.f;
+			user = (fp_pad){ 0 };
+#else
 			pad_read(&user, now);
+#endif
 			fp_demo_pad(&demo, &player, &user, &pad, dt);      /* the demo's pad until a hand touches the real one (a demo that could not plan passes it through) */
 			fp_update(&player, &pad, dt);
+			fx_feed(&player, dt);
 			if (fabsf(fp_field_of_view(&player) - lens_fov) > 1e-4f) lens_set(gs, fp_field_of_view(&player));      /* the weapon's zoom */
 		}
 #endif
