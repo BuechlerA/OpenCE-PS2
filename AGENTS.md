@@ -21,6 +21,7 @@ fork's `main`.
 | `port/ps2/samples/masterchief/` | A stand-alone PS2 sample, not the game's build: it draws the Master Chief running with the assault rifle on Blood Gulch's terrain (EE, VU0, VU1 and GS, gsKit), from assets its exporters bake out of an Xbox map |
 | `tools/ps2/`, `tools/ps2_build.py` | The PS2 tools (map measuring and converting, PCSX2 runners) and the `ninja ps2` build ([tools/ps2/README.md](tools/ps2/README.md)) |
 | `docs/ps2_port_plan.md` | The plan, the memory budget and the phases |
+| `docs/ps2_renderer_design.md` | The design of the game's PS2 renderer (`source/rasterizer/ps2/`, not written yet): where it plugs in behind `rasterizer.h`, the frame's DMA chains, the VU1 programs, the texture cache, the hardware gate, the first milestone's files and steps |
 | `docs/ps2_ee_performance.md` | What the EE does slowly (measured), how to send primitives to the GS cheaply, how to profile in PCSX2 and its quirks: read before writing per-vertex or per-tick code |
 | `docs/ps2_first_person_controller.md` | The sample's first-person controller (the DualShock walks the player on Blood Gulch): what is ported from which file of `source/`, the buttons, the walking collision, what is not ported, how to check it: read before touching `fp_controller.c`, `pad.c` or the exporter's collision grid |
 | `docs/ps2_blood_gulch_map.md` | What Blood Gulch's data is (BSP, shaders, bitmap formats, scenery, sky), how the sample draws it on the GS, the video memory and EE budgets, the pitfalls met, and what is not done |
@@ -79,8 +80,8 @@ that only print):
   buffers with dithering (displayed at 640 wide: two focal lengths), a 16-bit
   Z buffer, the Chief's five textures (base map 256, rifle 128, masks 128 and
   4-bit, ammo display 32) and the map's, with the mip levels the camera's orbit
-  never reads left out (`tools/mip_floor.json`): 2.43 of 4.19 MB, 1.76 MB
-  spare. The sample prints what it allocated at start-up (`VRAM: ...`) and
+  never reads left out (`tools/mip_floor.json`), the cliff's base map at
+  128x256: 2.30 of 4.19 MB, 1.89 MB spare. The sample prints what it allocated at start-up (`VRAM: ...`) and
   stops if a texture did not fit (gsKit's failed allocation is address 0, the
   frame buffer, and the texture would draw from it). Work out what a new
   texture takes before adding it; masks and other greys go in 4-bit. The
@@ -101,11 +102,19 @@ that only print):
   goes in the second; 8-bit UNPACK data must be zero-padded to a quadword.
   VU1's data memory is readable from the EE (0x1100C000) when it has stopped:
   dump it to debug the microprogram.
+- VU0 in macro mode (COP2) stalls on every dependent instruction: a loop of
+  one vertex is as slow as the FPU, so work three or four vertices at once,
+  instruction by instruction (the specular code is generated:
+  `tools/gen_spec_vu0.py` -> `src/spec_vu0.h`; `-DSPEC_CHECK` compares it
+  with the FPU's). The registers vf1 to vf31 are free between calls but the
+  map code reloads its own at the start of `draw_map`.
 - gsKit sizes its buffers from the console's own video mode (PAL: 512 lines)
   before the sample forces NTSC: set `gs->Height` with `gs->Mode`.
 - GS coordinates are 12.4 fixed point in 16 bits around an origin gsKit puts
   at the screen's corner: a vertex further than 2048 pixels from it wraps. The
-  map clips at 1400 pixels outside the screen.
+  map clips at 64 pixels outside the screen: that margin also decides which chunks and triangles are processed and sent to the
+  GS, so a wide one costs EE time (1,400 pixels: 3 ms) and GS fill
+  ([docs/ps2_vram_and_vu1.md](docs/ps2_vram_and_vu1.md)); never go over 1,400.
 
 ## Rules
 

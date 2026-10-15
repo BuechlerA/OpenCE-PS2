@@ -188,7 +188,7 @@ disc and its "15m"; at the middle the reticle (the pistol's zoomed one is the sc
   constants (source constant colour, destination source alpha) I could not tie to the texture's alpha, so the shape is the alpha of an ordinary blend: it reads on a bright ground
   as well as a dark one (an added blend washed out on the desert's sand), which may differ from the Xbox's on a bright ground.
 - **A reticle's colours have alpha 0 in the tag** (`0x002896FF`), and it is visible in the Xbox's screenshot, so a crosshair is drawn opaque.
-- **Cost.** 0.24 ms of the EE a frame for about 20 quads (the HUD's own state is made at 30 Hz, but the draw packets are made every frame; a quad is a texture setup and six
+- **Cost** (measured before `main`'s later speed-ups were merged in: with them the EE is busy 7.5 to 13.5 ms over the walk, 60 fps, free video memory 563 KB, and the weapon, effects and HUD cost what they did). 0.24 ms of the EE a frame for about 20 quads (the HUD's own state is made at 30 Hz, but the draw packets are made every frame; a quad is a texture setup and six
   vertices); the EE is busy 15.0 to 15.4 ms of 16.67 in the fortress, up from 14.7 to 15.2, and the frame rate there stays at 59 to 60.
 - **Not done**: the motion sensor's blips and sweep (the Chief does not move: its backgrounds are drawn), the unit's integrated light meter (the flashlight), the multitexture
   overlays of the static elements (scan lines on some), the autoaim's red reticle (no target), the zoomed view's extra elements (the sniper's range numbers), the grenade
@@ -282,6 +282,11 @@ puts the player back at the start.
   `-DFIRST_PERSON` is added; `make ORBIT_CAMERA=1` asks for the orbit in any build.
 
 ## Pitfalls met
+
+- **The packet heap is 5 MB, not 6.** With the first-person scene's tables (the weapons' models and animations, the HUD's textures, the demo's planner grid) the program's static data
+  is 20 MB, and gsKit's 6 MB heap no longer fits the EE's 32 MB: its allocation fails and every packet is written through a NULL heap, which PCSX2 reports as a stream of
+  `TLB Miss, ... addr=0x30000010 [store]` while the picture shows only the sky and the Chief. A 5 MB heap runs the whole demo with none; do not raise it without checking
+  for those lines (`tools/ps2/pcsx2_run.py`).
 
 - The original presses the player into the ground each tick (a 1/128 push along the ground's normal) and its collision
   clips what the ground stops. Ported without the clip, the push's sideways part slid a player standing on a slope

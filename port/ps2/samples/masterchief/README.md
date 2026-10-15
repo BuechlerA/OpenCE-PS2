@@ -78,7 +78,7 @@ materials: the terrain, the cliffs and the two round metal bases) and bakes:
   counter-clockwise from outside and sorted into spans by base map, then lightmap page;
 - the base maps the environment shaders use, as 8-bit palettised textures with mip levels (DXT
   decoded, cut to 256 pixels on a side unless 1,000 or more triangles use the map; the ground is
-  256x256, the cliff 256x512);
+  256x256, the cliff 128x256 (`CLIFF_SIZE=source` keeps the map's 256x512));
 - each shader's primary and micro detail maps as 8-bit grey textures, 128 pixels a side with mips, the last
   level their average (a detail map tiles visibly far away, so it fades out); 7 of them, 148 KB;
 - the lightmap pages (RGB565, swizzled; their unused texels are a red and yellow checker, filled in from the
@@ -111,7 +111,7 @@ planes below, and the distance a piece of scenery is drawn to), then takes the t
 span. A triangle facing away from the camera (a plane test in the world) is dropped without its vertices being
 touched. The others' vertices are transformed and projected on VU0 (one divide, then the screen position, the depth
 and the four texture-coordinate pairs in one block) the first time a visible triangle needs them, once a frame. A
-triangle with a vertex behind the near plane or more than 1400 pixels off the screen (the GS's coordinates are 2048
+triangle with a vertex behind the near plane or more than 64 pixels off the screen (the GS's coordinates are 2048
 pixels either side of its origin, and gsKit puts that at the screen's corner: more wraps) is clipped in view space
 before projection: the camera stands inside the map. Each span's vertices are kept as 64-byte records (the ST of the
 base map, the lightmap, each detail map and the bump map, the reflection's colour, RGBAQ, XYZ2, in four quadwords). The textures are perspective-correct (Q = 1 / z) and may tile
@@ -139,7 +139,7 @@ triangle).
 
 - The frame buffers are 16 bits with dithering (`FB16`, the default with the map; `make NO_MAP=1` keeps
   32 bits): each pass quantises to 5 bits a channel again, and the dither keeps the result smooth.
-  Video memory: 2.43 MB of 4.19 MB in use (1.76 MB spare) with the Chief's and the map's textures (the program
+  Video memory: 2.30 MB of 4.19 MB in use (1.89 MB spare) with the Chief's and the map's textures (the program
   prints the budget at start-up, `VRAM: ...`, and stops if a texture did not fit: gsKit's failed allocation is
   address 0, the frame buffer, and the texture would draw from it). How it got there from 3.39 MB: the Chief's
   small textures, the mip levels the orbit never reads (`tools/mip_floor.json`), 512-wide buffers; see
@@ -147,8 +147,9 @@ triangle).
 - `gs->Height` is set to 448 with the NTSC mode: gsKit sized the buffers for the console's own mode
   before that (512 lines on a PAL BIOS), which put the 32-bit build over 4 MB without an error.
 - In PCSX2 (`-DPROFILE`, which steps the orbit by frame so that builds see the same views): 60 fps through the whole
-  4-second orbit; the EE is busy 7.8 to 12.4 ms of the 16.7 ms frame by where the camera points (10.1 ms on average,
-  its worst frame 14.5 ms) with the Chief on VU1 and the fog on (the EE's path: 9.6 to 14.2, mean 11.9). PCSX2 does
+  4-second orbit; the EE is busy 7.1 to 11.7 ms of the 16.7 ms frame by where the camera points (9.4 ms on average,
+  its worst frame 13.8 ms) with the Chief on VU1, his specular colours on VU0 and the fog on (the EE's path: 9.6 to
+  14.2, mean 11.9). PCSX2 does
   not time the GS. Checked only in PCSX2. What got it there (from 24 ms; see also `docs/ps2_ee_performance.md`):
   - The Chief's 20 animation frames are skinned and lit once at the start (his pose only changes 30 times a
     second and only the camera moves: `cached_pose`); a frame projects the cached positions, and gives each
@@ -175,7 +176,9 @@ All in [docs/ps2_vram_and_vu1.md](../../../../docs/ps2_vram_and_vu1.md), with th
   `MIP_FLOOR=0 python3 tools/export_map.py` keeps every level.
 - **The Chief on VU1** (`src/chief_vu1.vsm`, the map scene's default; needs `dvp-as` from the ps2dev toolchain on PATH):
   his armour and rifle, each two textured passes, are transformed, culled and drawn by a VU1 microprogram from a
-  prebuilt VIF1 chain per animation frame; the EE keeps the specular colours, the visor and the ammo display. The
-  picture equals the EE path's to 0.007/255; the EE saves 1.8 ms a frame.
+  prebuilt VIF1 chain per animation frame; the EE keeps the visor and the ammo display, and the cube-map lookups of the
+  specular colours, whose other work (the mirror direction, n.h^18, the gamma curves) runs on VU0 in macro mode,
+  three vertices at a time (`tools/gen_spec_vu0.py` writes `src/spec_vu0.h`; `-DNO_VU0_SPEC` keeps the FPU's). The
+  picture equals the EE path's to 0.007/255; the EE saves 1.8 ms a frame with VU1 and 0.7 with VU0.
 
 Not yet: the lights' glow, the sky's clouds, the vehicles.

@@ -29,7 +29,7 @@ MARGIN = 0.1      # levels: the GS's level of detail is fixed point, and Q has f
 
 def names_and_levels(text):
     """(base textures, detail maps) as [(name, levels)] in the order the program indexes them"""
-    base = re.findall(r'\{ map_tex\d+_pixels, map_tex\d+_clut, \d+, \d+, (\d+), \d+ \},\s*/\* (.*?) \*/', text)
+    base = re.findall(r'\{ map_tex\d+_pixels, map_tex\d+_clut, \d+, \d+, (\d+), \d+(?:, \d+)? \},\s*/\* (.*?) \*/', text)
     detail = re.findall(r'\{ map_detail\d+_pixels, \d+, \d+, (\d+) \},\s*/\* (.*?) \*/', text)
     return [(n, int(l)) for l, n in base], [(n, int(l)) for l, n in detail]
 

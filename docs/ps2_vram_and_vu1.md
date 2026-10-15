@@ -16,9 +16,9 @@ documents this builds on: [ps2_blood_gulch_map.md](ps2_blood_gulch_map.md) (the 
 | Video memory used | 3,385,088 of 4,194,304 bytes | **2,434,816** (free: 809,216 -> **1,759,488**, 928 KB gained) |
 | Frame buffers | two 640x448 16-bit + 16-bit Z: 1,720,320 | two 512x448 + Z: 1,376,256 |
 | Textures | 1,664,768 | 1,058,560 |
-| EE busy, mean over the 4 s orbit | 11.40 ms (worst frame 15.50) | **10.09 ms** (worst frame 14.48), with fog |
+| EE busy, mean over the 4 s orbit | 11.40 ms (worst frame 15.50) | **9.42 ms** (worst frame 13.81), with fog |
 | Fog | none | GS fog from the sky tag, +0.5 ms |
-| The Chief's textured passes | on the EE (3.5 ms) | VU1 (1.5 ms left: the specular colours) |
+| The Chief's textured passes | on the EE (3.5 ms) | VU1; their specular colours on VU0 (0.8 ms left, the cube lookup and the scatter) |
 | Picture | | the same, but fog; and 512 wide is a little soft across (below) |
 
 How each step moved video memory:
@@ -82,7 +82,8 @@ for; `tools/mip_audit.py` turns that into `tools/mip_floor.json` and `export_map
 - It saves 469 KB at 640 wide and 433 KB at 512 (the guard band reaches different vertices). The ground,
   the cliff and every texture near the camera keep their chains; what loses levels are the metal of the
   two bases and a few scenery maps, which the orbit never gets near.
-- The audit counts every vertex that reaches the GS, including those in the 1,400-pixel guard band, so it
+- The audit counts every vertex that reaches the GS, including those in the guard band (1,400 pixels when the audit was
+  run, 64 now: the table is conservative for the narrower band, and the levels it keeps are a superset), so it
   errs toward keeping a level.
 - **Sample-specific.** It describes one camera path. A free camera or a Chief somewhere else needs the audit
   run again or `MIP_FLOOR=0` (every level). The real game streams its textures and will not have a table.
@@ -173,11 +174,136 @@ with culling on to 0.005 to 0.007/255 at three angles; the output buffers hold 1
 of 36 (a third faces the camera); 60 fps in the profile. The EE's fallback and the other variants
 (`NO_MAP`, 640 wide, no fog, the exact fog pass) still build and boot.
 
-**Left on the EE, and the next steps:** the specular colours (a normalise, a cube-map lookup and n.h^18 for a
-quarter of the vertices a frame: 1.5 ms) could go to VU0 in macro mode (`vrsqrt`, the products) or to VU1
-with a sphere-map lookup; the map's 8 ms (culling, VU0 vertices, 64-byte records, four passes) is the
+**Left on the EE, and the next steps:** the specular colours were 1.5 ms of it (a normalise, a cube-map lookup and
+n.h^18 for a quarter of the vertices a frame): they are on VU0 now, next section; the map's 8 ms (culling, VU0 vertices, 64-byte records, four passes) is the
 real cost and would want VU1 with a vertex cache and clipping; the double-buffered input leaves room for
 more triangles a batch.
+
+## 6. The specular colours on VU0
+
+What the VU1 Chief left on the EE was the specular colour of a quarter of his and the rifle's vertices each frame
+(1.5 ms, 580 EE cycles a vertex). Measured by stage: the vector maths (two normalises, the mirror direction, n.h^18)
+197 cycles, the cube-map lookup 116, the gamma colour assembly 213. Now (`-DNO_VU0_SPEC` keeps the FPU's):
+
+| Stage | Cycles a vertex | |
+| --- | --- | --- |
+| A, VU0: v, n.v, mirror direction, half vector, n.h^18 | 58 (was 197) | |
+| cube lookup, EE | 117 | 73 KB of cube: it does not fit VU0's 4 KB |
+| C, VU0: the colour from cube, fres, spec, the lit sum, the gamma curves | 49 (was 213) | |
+| packing the colour and writing it to each of the vertex's slots, EE | 75 | scattered stores into a 22 KB array |
+
+EE busy over the orbit: 10.09 -> **9.42 ms** (worst frame 14.48 -> 13.81); the pictures are identical (0.001/255);
+the colour bytes agree with the FPU function to a mean of 0.05 levels, worst 1 of 128 (`-DSPEC_CHECK` prints it).
+
+- **Macro mode needs three vertices at once.** VU0 in macro mode stalls the EE on every dependent instruction, so
+  one vertex alone (45 operations and two reciprocal square roots in a chain) costs as much as the FPU did. The
+  code works on three, instruction by instruction, with the divide unit's waits filled with the next lane's
+  products; `tools/gen_spec_vu0.py` writes it (`src/spec_vu0.h`) with the three lanes' registers spelt out, and the
+  constants in vf25 to vf28. The batches are 48 vertices: the A stage, the cube lookups and the C stage each run
+  over a batch, so that their arrays stay in the 8 KB data cache.
+- **The gamma curve has no table on VU0:** x^(1/2.2) is a cubic in sqrt (x), 0.21 of the 128 levels at worst over
+  [0.03, 3] (the sample's arguments are 0.035 to 2.4); `vsqrt` is 7 cycles against `vrsqrt`'s 13. The static half,
+  the curve of a quarter of the lit sum (which is exactly 0.25^(1/2.2) times the curve of the sum), is a per-vertex
+  array made with the poses (`chief_ge`, `rifle_ge`: 950 KB), so each vertex takes three square roots, not six.
+- **What is left, and why it stays:** the cube lookup (117 cycles) and the write of each colour to its slots (75).
+  Both were probed before building anything, and neither pays enough:
+  - *The cube lookup is arithmetic, not cache misses:* with every texel read forced onto one hot cache line it
+    still costs 110 cycles (a divide, two float to integer conversions, the face choice's branches). Choosing the
+    face on VU0 branch-free (`|r|`, a max, three selection masks, the divide, the texel offset) would leave the
+    EE three byte loads (about 35 cycles) and add roughly 45 to 55 cycles of VU0 time that the EE waits for:
+    about 0.07 ms, under 1% of the frame, for a longer generator. Not done.
+  - *The scatter cannot become an index on VU1:* VU1 could read pass 2's colour by vertex from a small per-batch
+    table, but a batch of 12 triangles (36 vertices) touches vertices from all over the mesh: the median batch
+    spans 22 vertex numbers, the tenth worst 870, the worst 1,857 (the armour; the rifle's worst is 332), however
+    the triangles are ordered. A table of the whole mesh does not fit VU1's 16 KB beside the rest.
+  - *Doing the same scatter in a cache-friendly order does not help either:* refreshing the vertices in the order
+    of their first slot, with their slot lists flattened in that order, gave the same pictures and 9.42 ->
+    9.38 ms: the 52 cycles are the roughly 1,900 stores a frame (write-allocating into a 22 KB array) and a
+    vertex's later slots are spread through the mesh whatever the order. Reverted.
+  The next real saving for the Chief is not here: his EE share is now about 0.8 ms of the 9.4.
+
+## 7. The guard band, and detail passes that have faded out
+
+Measured in PCSX2 on the same profile as the rest of this file (EE busy, mean over the orbit); the GS numbers come
+from the triangles a frame sends, since PCSX2 does not time the GS.
+
+**The guard band was the biggest cost left.** `CLIP_MARGIN` (how far off the screen a triangle may reach before it is clipped)
+was 1,400 pixels, and the chunk-visibility test uses the same planes, so the frame processed and sent everything within 1,400
+pixels of the screen: 47 times the screen's area (3,312 by 3,248 pixels for a 512 by 448 screen).
+
+| `CLIP_MARGIN` | EE busy | Chunks in view | Vertices processed | Triangles sent |
+| --- | --- | --- | --- | --- |
+| 1,400 (before) | 10.04 ms | 52 | 2,073 | 2,969 |
+| 256 | 8.15 | 34 | 1,135 | 2,188 |
+| 128 | 7.46 | 28 | 913 | 1,895 |
+| **64 (now)** | **7.01** | 26 | 778 | 1,701 |
+
+The triangles the clipper cuts did not change (about 154 a frame, 1.0 ms: skipping the clip gives 6.02 ms). The picture: stills at
+0.6, 2.6 and 3.4 s differ from the 1,400 build by 0.13 to 0.28/255 on average, one step of the 16-bit buffer's dither on 0.3 to 0.7%
+of the ground's pixels (the clipped triangles interpolate a little differently); the cliffs, sky and Chief are identical, and the
+same build captured twice differs by exactly 0. On the GS, modelling the post-cull triangles (mean 5,269 px^2 against a median of 24)
+gives about 47 Mpixel a frame rasterised at 1,400 pixels (all passes) against 1.4 Mpixel that land on the screen, and about 2 to 3 at 64
+to 128. Whether the GS rejects off-screen pixels cheaply was not measured (no hardware): if it does not, this is the difference
+between 60 fps on a console and not.
+
+**Detail and bump passes where the map is flat.** A detail map's last mip level is its average, so where a pixel's level
+(log2 z + K / 16) reaches it the pass only multiplies by a constant (the grey / 128: 0.93 to 1.81 for these maps). `draw_map` now
+lays each span's triangles out nearest chunk first, leaves a detail or bump pass out for the chunks whose nearest depth is past
+where it flattens (`flat_z`, from the same K the TEX1 setting uses, plus 0.15 of a level) and multiplies their vertex colours by the
+constant instead (`flat_scale`, `scale_colour`: red and blue in one multiply, which needs the channels at 128 or under, so a span
+with a brighter vertex, as scenery has, keeps its passes). Each pass draws a prefix of the span.
+
+| | |
+| --- | --- |
+| Detail and bump vertices sent | 45% fewer (3,356 of 6,071 a frame) |
+| Their pixels (`-DPROFILE_AREA`) | **17.9% fewer** (865 of 1,053 Kpx a frame); the per-pixel model said 28%, a chunk's bounding sphere is coarser |
+| EE busy | 7.01 -> 7.20 ms (+0.19: sorting the chunks and scaling the colours; the pass packets are 0.13 ms cheaper) |
+| Picture | 2.6 and 3.4 s: 0.012 and 0.000/255 from step 1; 0.6 s (the far cliff wall): 1.2/255, a 1% brightening (+1.0, +3.2, +1.8 of 255 in R, G, B) from not truncating in the 16-bit buffer once per pass; no seams |
+
+With the VU0 specular colours of section 6 (measured before it, these steps are 10.02 -> 7.20 ms; it alone takes the Chief's EE share from 1.5 to
+0.85 ms), the whole frame is **6.54 ms** of EE mean over the orbit, the worst window 8.50, 60 fps.
+
+Not worth it, measured at 64 pixels (EE ms each pass costs: detail 0.31, lightmap 0.11, bump 0.05, reflection 0.01, fog 0.27, VU0
+0.9 ms saved): the passes are cheap for the EE; what they cost is the GS's fill.
+
+## 8. The cliff's base map at 128x256
+
+The cliff (1,342 triangles) had the map's own 256x512 base map, 175 KB with its chain. It is 128x256 now (`CLIFF_SIZE`, in the
+exporter: `source` restores the original), which takes the video memory from 2,434,816 to **2,303,744** bytes (free 1,759,488 ->
+**1,890,560**, 131 KB). Compared with the 256x512 build at three camera angles: close up the pictures are nearly the same (mean difference
+1.8 and 2.8/255, the cliff's fine detail energy 99 to 100% of the original: the grain comes from the detail passes, not the base
+map); the base map's colour is a little softer, and the far cliff wall differs by 1.2/255. 256x256 (98 KB) was tried and rejected: only
+the vertical axis is halved, so the level of detail the GS picks (from the geometric mean of the sides) lands half a level sharper
+than the 256x512 map would, and the far wall comes out blotchier (6.7/255) than the smaller 128x256 map, which halves both axes and keeps
+the texel to pixel ratio.
+
+## 9. 4-bit base maps, chosen by error (opt-in)
+
+`TEX4_MAX_ERR=<n> python3 tools/export_map.py` quantises each base map a second time to 16 colours (median cut, then
+Floyd-Steinberg error diffusion on every mip level, against the first level's palette; a cut-out keeps 15 colours and
+the last index transparent) and keeps it as a PSMT4 texture when `error4` is at most `n`: the RMS difference over
+0..255 between the picture and the 16-colour texture, both blurred by 1 pixel (the diffusion is noise the eye averages
+out, so the unblurred difference would punish it). Off by default (`n` = 0), so the default build is unchanged. The
+generated `map_texture_data` has a `bits` field; `texture_setup_mips` in `main.c` uploads each level as T4 or T8, and
+the exporter packs two texels a byte, the left one in the low nibble, each level on its own. The 16-entry CLUT is in
+plain order (not CSM1-swapped) and its allocation is the 8x2 block.
+
+Measured on Blood Gulch, at the 2.6 s still, in PCSX2 (not on hardware); the 8-bit chain here is the one the mip floor
+leaves (467 KB of pixels, with the cliff at 128x256, section 8):
+
+| `TEX4_MAX_ERR` | Textures at 4 bits | Pixels | Video memory used | Frame against the 8-bit build (mean abs, /255) |
+| --- | --- | --- | --- | --- |
+| off | 0 | 467 KB | 2,303,744 | |
+| 2.1 | 9 of 26 (the metal, two rocks, the teleporter and flag bases) | 422 KB | 2,251,776 (-51,968) | 0.000: none of them is in view |
+| 3.0 | 18 of 26, with the ground and the cliff | 341 KB | 2,153,984 (-149,760) | 4.1 (the ground's 12 in the lower right) |
+
+The nine textures that 3.0 adds to 2.1 are 98 KB of the 150, led by the ground (error 2.94) and the cliff (2.96), and they are
+also where the difference is. Side by side at 2x
+the cliff is indistinguishable; the ground's grain is a little coarser and a patch is slightly greener. The Chief is
+untouched. An earlier survey script that left the mip floor out overstated the saving (360 KB at 3.0) because it counted
+levels the build does not ship: use the exporter's own figures. Two caveats: the four cut-outs and the two
+`cap_ramp` gradients stay at 8 bits (smooth gradients are what 16 colours do worst at), and the frame time was not
+measured (the GS reads a 4-bit texel at the same rate).
 
 ## Pitfalls (each cost real time)
 
@@ -224,9 +350,11 @@ rm tools/mip_floor.json && python3 tools/export_map.py
 make EXTRA_CFLAGS=-DMIP_AUDIT
 python3 ../../../../tools/ps2/pcsx2_run.py masterchief.elf --until "MIPAUDIT done" > audit.log
 python3 tools/mip_audit.py audit.log && python3 tools/export_map.py
+# the specular code on VU0 (src/spec_vu0.h is checked in); make EXTRA_CFLAGS=-DSPEC_CHECK compares it with the FPU's
+python3 tools/gen_spec_vu0.py > src/spec_vu0.h
 ```
 
-Switches: `NO_FOG`, `FOG_EXACT_PASS`, `FOG_HAZE_GAIN=0.5f`, `SCREEN_WIDTH`, `NO_CHIEF_VU1` (make variable),
-`MIP_FLOOR=0` (exporter), `DETAIL_SIZE`, `RIFLE_TEX_SIZE`, `MASK_TEX_SIZE`, `DISPLAY_TEX_SIZE`,
+Switches: `NO_VU0_SPEC`, `SPEC_CHECK`, `NO_FOG`, `FOG_EXACT_PASS`, `FOG_HAZE_GAIN=0.5f`, `SCREEN_WIDTH`, `NO_CHIEF_VU1` (make variable),
+`CLIP_MARGIN` (default 64), `PROFILE_AREA` (with `PROFILE`: the pixels the detail passes draw), `MIP_FLOOR=0` (exporter), `CLIFF_SIZE`, `DETAIL_SIZE`, `RIFLE_TEX_SIZE`, `MASK_TEX_SIZE`, `DISPLAY_TEX_SIZE`,
 `BASE_TEX_SIZE` (exporters). Compare stills pixel by pixel after cropping the window's content area: a
 change that is meant to move nothing should move less than 0.01/255 on average.

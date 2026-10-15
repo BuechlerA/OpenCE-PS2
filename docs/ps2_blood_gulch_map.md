@@ -19,7 +19,7 @@ document is about the data and the design.
 | Geometry in the frame | 10,765 triangles and 11,498 vertices of map (5,503 and 5,790 of them the BSP, 5,202 triangles of scenery, 60 of sky), 26 base textures, 53 spans, 152 chunks |
 | Frame rate | 60 fps (one NTSC vsync) through the whole orbit |
 | EE time (PCSX2) | 8.9 to 13.3 ms of the 16.7 ms frame, by where the camera points; the worst single frame 15.2 ms (since then, with the Chief on VU1 and the fog: 7.8 to 12.4 ms, 10.1 on average, the worst frame 14.5; see [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)) |
-| Video memory | 3.39 of 4.19 MB, about 790 KB spare (since then 2.43 MB, 1.76 MB spare: [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)) |
+| Video memory | 3.39 of 4.19 MB, about 790 KB spare (since then 2.30 MB, 1.89 MB spare: [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)) |
 | Left out | The vehicles, the sky's clouds, the lights' glow, shadows of objects (see "Not done"); the fog came later |
 
 ## What the map is made of
@@ -101,7 +101,7 @@ Reads the map, writes `src/map_assets.[ch]` (gitignored: they are the game's dat
   **batches** (one per chunk).
 - **Textures:** DXT decoded and quantised to 256 colours (8 bits, median cut, the
   palette in the GS's CSM1 order), with mip levels quantised against the first
-  level's palette. Sizes: the ground 256x256 (512 at first), the cliff 256x512,
+  level's palette. Sizes: the ground 256x256 (512 at first), the cliff 256x512 (128x256 since: [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)),
   other BSP maps 256 at most, scenery 64 (128 for the biggest rock). A cut-out
   (foliage) takes 255 colours and index 255 for what is transparent, whose palette
   entry has alpha 0. The detail map's average is folded into a scenery base map
@@ -158,7 +158,7 @@ Reads the map, writes `src/map_assets.[ch]` (gitignored: they are the game's dat
 ### Video memory
 
 The numbers below are as of e90fbcec (3.39 MB). Where the memory went afterwards (the Chief's small textures, the mip
-audit, 512-wide buffers: 2.43 MB) and why the Chief's specular maps were never the big spender is in
+audit, 512-wide buffers, a smaller cliff map: 2.30 MB) and why the Chief's specular maps were never the big spender is in
 [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md).
 
 | | KB |
@@ -216,8 +216,9 @@ but little for the transform alone. The longer list is in
   origin gsKit puts at the screen's corner, so a vertex further than 2048 pixels
   wraps. A 1,700-pixel margin put the right edge (640 + 1,700) past it: huge
   triangles and stretched textures, with the vertex data itself correct. The
-  margin is 1,400. When the picture is wrong and the vertices look right, check the
-  packed XYZ2.
+  margin was 1,400 and is now 64 (it is also the distance off the screen at which
+  a chunk or triangle is still processed: [ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)). When the
+  picture is wrong and the vertices look right, check the packed XYZ2.
 - **A clipped vertex lies on the guard band's edge**, give or take rounding: a
   projection that leaves out-of-band vertices unfilled leaves garbage records for
   half the clipped triangles. Fill them (clamped).
