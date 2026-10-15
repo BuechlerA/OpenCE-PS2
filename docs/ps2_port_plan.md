@@ -1,9 +1,10 @@
 # PlayStation 2 port: analysis and plan
 
-Status: planning. Nothing in this document is implemented.
-(Later work has implemented parts of it; the map renderer of the Master Chief sample, a
-stand-alone PS2 scene with Blood Gulch's level, is described in
-[ps2_blood_gulch_map.md](ps2_blood_gulch_map.md).)
+Status: Phase 1 is under way (the plan's later sections say what is done).
+The renderer's research (a stand-alone PS2 scene with Blood Gulch's level and the
+Master Chief, since removed from the tree) is in [research/](research/).
+
+> Paths in this document and in the code's comments that name `port/linux`, `port/android`, `port/windows` or files of the Linux platform layer that are not in the tree (`d3d8_gl.c`, `tag_schema_*.c`, `tag_relocate.c`, `xiso.c`, ...) name the tree before the cleanup: `git show pre-ps2-cleanup:<path>`.
 
 Target: a retail PS2 (32 MB). Development uses PCSX2 with the default 32 MB
 of EE memory (not its 128 MB development-kit mode), so that the emulator
@@ -56,15 +57,15 @@ These facts drive the plan:
 | Fact | Where | Consequence for PS2 |
 | --- | --- | --- |
 | A decompilation of Xbox build 2342: 466 C files, about 490k lines, in 38 subsystems (AI 79k lines, rasterizer 46k, interface 42k, bitmaps 37k, game 32k, hs 28k). | `source/` | The game code is portable C. The x86 assembly is already replaced with C. |
-| The game is compiled with MSVC semantics (`-fms-extensions`, `-fshort-wchar`, `-malign-double`, `-fcommon`, `-freg-struct-return`) for ILP32. | `tools/linux_build.py`, `port/linux/include/halo_linux_prefix.h` | The PS2 EE is little-endian with 32-bit pointers, like the Xbox. Struct layouts can be kept identical to the Xbox's. |
+| The game is compiled with MSVC semantics (`-fms-extensions`, `-fshort-wchar`, `-malign-double`, `-fcommon`, `-freg-struct-return`) for ILP32. | `tools/linux_build.py`, `port/ps2/include/halo_linux_prefix.h` | The PS2 EE is little-endian with 32-bit pointers, like the Xbox. Struct layouts can be kept identical to the Xbox's. |
 | An ILP32 port to a non-x86 CPU already exists (Android, `arm64_32` guest). It found and fixed calling-convention mismatches (`tools/android_abi_check.py`, `halo_android_variadic_prototypes.h`). | `port/android/` | Much of the work for "not x86" is already done. MIPS EABI passes floats in their own registers, like AArch64, so the same fixes apply. |
 | The platform layer emulates the XDK: kernel, files, threads, memory, D3D8, DirectSound, XInput, Winsock. | `port/linux/src/` (about 30 files), `port/include/xdk/` | Most non-graphics files can be reused or used as a model (`xbox_kernel.c`, `xbox_files.c`, `xbox_xapi.c`). `d3d8_gl.c`, `nv2a_*.c` and `dsound_sdl.c` cannot be reused. |
 | The rasterizer has a clean API (`rasterizer.h`, about 100 functions: environment lightmaps, models, decals, detail objects, HUD, screen effects, and so on). The Xbox implementation is in `source/rasterizer/xbox/` (about 40 files). Outside it, only three files use D3D directly. | `source/rasterizer/` | A PS2 backend can replace `source/rasterizer/xbox/` at the `rasterizer.h` level, without emulating D3D. |
 | Sound goes through `platform_sound.h`, with `sound_dsound_xbox.c` as the Xbox implementation. | `source/sound/` | A `sound_ps2.c` that drives the SPU2 can replace it. |
-| Fixed memory map: game state at `0x80061000` (0x345000 bytes), tag cache at `0x803A6000` (0x1600000 bytes), then the texture cache (22 MB, 16 KB pages) and the sound cache (4 MB). The port enlarged all of these for the desktop. | `source/cache/physical_memory_map.c`, `port/linux/include/halo_port_capacity.h` | The PS2 build needs its own capacity branch, at Xbox values or smaller. |
-| A **tag schema** describes every pointer, count, index and file offset in every tag group, with compiler-checked offsets. The tag validator and the Custom Edition converter use it. | `port/linux/game/tag_schema*.c`, `tag_validate.c`, `custom_edition_cache.c`, `cache_file_formats.c` | This is the basis of the PS2 map converter: it can find every pointer that must be relocated and every resource that must be transcoded. |
+| Fixed memory map: game state at `0x80061000` (0x345000 bytes), tag cache at `0x803A6000` (0x1600000 bytes), then the texture cache (22 MB, 16 KB pages) and the sound cache (4 MB). The port enlarged all of these for the desktop. | `source/cache/physical_memory_map.c`, `port/ps2/include/halo_port_capacity.h` | The PS2 build needs its own capacity branch, at Xbox values or smaller. |
+| A **tag schema** describes every pointer, count, index and file offset in every tag group, with compiler-checked offsets. The tag validator and the Custom Edition converter use it. | `port/ps2/game/tag_schema*.c`, `tag_validate.c`, `custom_edition_cache.c`, `cache_file_formats.c` | This is the basis of the PS2 map converter: it can find every pointer that must be relocated and every resource that must be transcoded. |
 | Offline tools already read maps (`port/tools/cache_file_report.c`, `tools/map_validate.c`) and extract maps from an Xbox disc image (`port/linux/src/xiso.c`). | `port/tools/`, `tools/` | The converter can be built from these parts. |
-| Many features are new to the port: 128-player netcode, internet play with mbedtls, Opus voice chat, UPnP, Discord, updater, high-res HUD and text, frame interpolation, Custom Edition maps, anti-aliasing. | `port/linux/src/`, `port/linux/game/`, `port/third_party/` | None of these fits in 32 MB. The PS2 build leaves them out (see "Scope"). |
+| Many features are new to the port: 128-player netcode, internet play with mbedtls, Opus voice chat, UPnP, Discord, updater, high-res HUD and text, frame interpolation, Custom Edition maps, anti-aliasing. | `port/linux/src/`, `port/ps2/game/`, `port/third_party/` | None of these fits in 32 MB. The PS2 build leaves them out (see "Scope"). |
 
 ## Hardware comparison
 
@@ -116,7 +117,7 @@ own address at the top of the Xbox's 22 MB tag cache. Those addresses are
 the EE kernel's, which a PS2 program cannot use, and the PS2's tag cache is
 smaller. The game also expected the game state at a fixed address.
 
-Done (`port/linux/game/tag_relocate.c`, called by `cache_files.c` as the
+Done (`port/ps2/game/tag_relocate.c`, called by `cache_files.c` as the
 tags and each BSP load):
 
 - The PS2 reads the tags into its tag cache and moves every pointer they
@@ -486,7 +487,7 @@ The EE has no double-precision FPU. Each `double` operation is a software
 call that takes tens to hundreds of cycles (measured in PCSX2: a `double`
 add about 320 cycles, a float expression with a `double` literal about
 850, `powf` about 540, against 16 for a divide or a square root; see
-[ps2_ee_performance.md](ps2_ee_performance.md)). The game uses `double` in more
+[research/ee_performance.md](research/ee_performance.md)). The game uses `double` in more
 places than its 144 explicit uses:
 
 - **Implicit promotion.** In C, `float_value * 0.5` is computed in `double`,
@@ -588,7 +589,7 @@ object data into tag definitions (`tag_get`) many times each tick.
   Cache-heavy code runs faster there than on hardware, so PCSX2 profiles
   are optimistic. It does not time the GS at all, and it ignores PRE on a
   REGLIST GIF tag. How to profile there, and what its numbers are worth:
-  [ps2_ee_performance.md](ps2_ee_performance.md).
+  [research/ee_performance.md](research/ee_performance.md).
   - Profile with PCSX2's EE cache emulation on (it is slow).
   - Check timing on a real console at each gate. A PS2 that boots homebrew
     (for example with FreeMcBoot) and ps2link over the network adapter is
@@ -702,7 +703,7 @@ Done so far:
   their Xbox headers and memory (as `d3d8_resources.c`), states are kept,
   visibility tests see nothing, and the vertical blank callback runs at the
   PS2's vertical blank (`ps2_vblank.c`).
-- The kernel: `port/linux/src/xbox_kernel.c` builds as it is. ps2sdk's
+- The kernel: `port/ps2/src/xbox_kernel.c` builds as it is. ps2sdk's
   pthreads, condition variables with timeouts, recursive mutexes, clocks
   and sleeps behave as it needs (measured in PCSX2).
 - Threads: the EE's kernel does not share time between threads of one
@@ -908,7 +909,7 @@ and disc reads are milestones K4 to K6 of [ps2_kernel_plan.md](ps2_kernel_plan.m
 
 VU0 macro mode for `matrix_math.c` and `real_math.h` (the sample's
 skinning in VU0 macro mode takes about a third of the FPU's time:
-[ps2_ee_performance.md](ps2_ee_performance.md)), scratchpad buffers
+[research/ee_performance.md](research/ee_performance.md)), scratchpad buffers
 for hot loops, data cache layout of hot structures, packet building on the
 scratchpad, the order of AI updates, and per-level caps on particles and
 effects.

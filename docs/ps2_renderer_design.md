@@ -17,8 +17,8 @@ sizes of structures, capacities) are read from the source.
 
 What the sample is, and is not: `port/ps2/samples/masterchief` draws the Chief
 on Blood Gulch at 60 fps in PCSX2
-([ps2_blood_gulch_map.md](ps2_blood_gulch_map.md),
-[ps2_vram_and_vu1.md](ps2_vram_and_vu1.md)). It is built on precomputed data:
+([research/blood_gulch_map.md](research/blood_gulch_map.md),
+[research/vram_and_vu1.md](research/vram_and_vu1.md)). It is built on precomputed data:
 the Chief's poses cached for 20 frames (3.3 MB), his VIF chains built once at
 start-up for each frame of animation, a map baked by a Python exporter, every
 texture resident, no clipping and no lighting on VU1, and the map transformed
@@ -111,7 +111,7 @@ reason.
 - gsKit is not used by the game. Its queue and heap are the frame structure
   the port replaces (section 2), and its display setup sizes buffers for the
   console's own video mode before the program asks for one
-  ([ps2_vram_and_vu1.md](ps2_vram_and_vu1.md), "Pitfalls"). The game links
+  ([research/vram_and_vu1.md](research/vram_and_vu1.md), "Pitfalls"). The game links
   ps2sdk's `libdma`, `libgraph` and `libkernel`, and writes the GS's
   privileged registers (PMODE, SMODE2, DISPFB1/2, DISPLAY1/2, BGCOLOR) itself:
   about forty lines, with the values the sample measured. gsKit stays in the

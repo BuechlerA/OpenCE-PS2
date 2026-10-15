@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Checks that the PS2's tag relocation knows every pointer of a map
-(port/linux/game/tag_relocate.c; docs/ps2_port_plan.md, "Relocating the tag
+(port/ps2/game/tag_relocate.c; docs/ps2_port_plan.md, "Relocating the tag
 data"):
 
     python tools/ps2/relocation_check.py (--iso IMAGE | --maps DIR) [--only a10 ...]

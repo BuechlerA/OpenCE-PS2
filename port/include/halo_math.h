@@ -2,7 +2,7 @@
 HALO_MATH.H
 
 The same maths functions on every native port (included by the game's
-<math.h>: port/linux/include/math.h, port/windows/include/crt/math.h).
+<math.h>: port/ps2/include/math.h, port/windows/include/crt/math.h).
 
 In a system link game every machine simulates the players from the same
 inputs, and what the host does not correct (projectiles, devices, the

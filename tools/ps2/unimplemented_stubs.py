@@ -36,8 +36,7 @@ DEFAULT_LIBRARIES = ("m", "c", "cdvd", "pthread", "pthreadglue", "cglue", "kerne
 # the library names the game defines on purpose: its MSVC string functions
 # (source/cseries/cseries.c), which behave as newlib's
 OVERRIDES = {"strlwr", "strupr", "strnlen"}
-HEADER_ROOTS = (Path("source"), Path("port/include"), Path("port/linux/include"), Path("port/linux/src"),
-                Path("port/linux/game"), Path("port/ps2"))
+HEADER_ROOTS = (Path("source"), Path("port/include"), Path("port/ps2"))
 
 
 def tool(cc, name):

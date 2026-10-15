@@ -15,7 +15,7 @@ converted map is told from one that is not by its file's length.
 
 It also moves the map's tags, and each structure BSP, to where the PS2 reads
 them (PS2_TAG_CACHE_ADDRESS), as the PS2 build does for a map linked elsewhere
-(port/linux/game/tag_relocate.c, which finds the pointers as
+(port/ps2/game/tag_relocate.c, which finds the pointers as
 relocation_check.py does, the rules this uses): every pointer into the tags
 gets the difference between the addresses, and every pointer a BSP holds into
 itself the difference between where it was linked and where it is read, a page
@@ -23,13 +23,13 @@ after the tags. The PS2 then does none of it, and the tag schema it needs for
 it stays out of the build.
 
 Its other work is what the game does to the tags as it loads a map on the
-other builds (port/linux/game/tag_validate.c, which the PS2 build leaves out:
+other builds (port/ps2/game/tag_validate.c, which the PS2 build leaves out:
 its claims are 1.2 MB for each 9 MB of tag cache): every runtime value the
 tag schema names (a bitmap's address in the texture cache, a sound's played
 permutations) is set to the value it starts with. The Xbox's maps hold the
 values their last session left. The converted map says so in its header
 (PS2_MARK), which the PS2 build asks for. Nothing else in the tags changes:
-the retail maps need no correction, which tools/test_linux_port.py checks.
+the retail maps need no correction.
 
 The rest of the converter (docs/ps2_port_plan.md, Phase 2) comes after it.
 """

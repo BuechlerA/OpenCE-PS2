@@ -17,16 +17,15 @@ repository.
 | `map_budget.py` | The memory each map takes in the Xbox's 22 MB tag cache, by tag group and tag block: the shared tags, each structure BSP, and the peak. Also the textures and sounds that stay in the map file. |
 | `converter_prototype.py` | Runs four passes of the PS2 map converter without writing anything: animations in the engine's keyframe format at four tolerances, no super-high LOD, collision BSPs with 16-bit indices, script nodes trimmed. Reports the bytes each saves. |
 | `budget_projection.py` | Combines the results of the two tools above into each map's projected PS2 peak. |
-| `export_tag_schema.py` | Makes `tag_schema.json` from the tag schema in `port/linux/game/tag_schema_*.c`. |
-| `tag_schema.json` | The tag schema: each tag group and block definition, with the offsets and sizes of the Xbox ABI. Generated, committed. |
+| `tag_schema.json` | The tag schema: each tag group and block definition, with the offsets and sizes of the Xbox ABI. It was exported from the port's C tables (`tag_schema_*.c`, removed from the tree; see "Removed files" in the README) and is now the schema's only copy: edit it as data. |
 | `compile_check.py` | Compiles each of the game's C files for the PS2's EE with ps2dev's GCC, and reports which fail and why, grouped by error. Also reports the size of the code and data. |
 | `pcsx2_run.py` | Boots a PS2 program in PCSX2 without its window, and prints what it writes to the console. Stops when a given text appears or after a timeout. |
 | `convert_map.py` | The map converter's first pass: an Xbox map as the PS2 reads it (inflated, its tags' runtime values reset, its tags and BSPs moved to the PS2's tag cache). |
 | `pcsx2_bench.py` | Runs the PS2 build's benchmark in PCSX2: the game loads a level from the main menu, plays it with a scripted player and logs how long its simulation ticks take. |
-| `relocation_check.py` | Checks, on each map, that the PS2's tag relocation (`port/linux/game/tag_relocate.c`) knows every pointer in the tags and BSPs: it applies the same rules, then lists every other word that points into them. |
+| `relocation_check.py` | Checks, on each map, that the PS2's tag relocation (`tag_relocate.c`, removed from the tree and kept in the `pre-ps2-cleanup` tag) knows every pointer in the tags and BSPs: it applies the same rules, then lists every other word that points into them. |
 | `semantics_header.py` | Makes the PS2 build's `halo_msvc_semantics.h` (used by `ninja ps2` and `compile_check.py`). |
 | `unimplemented_stubs.py` | Writes a stub for each function the PS2 build calls and nothing defines yet (used by `ninja ps2`). |
-| `eebench/` | An EE program that prices float operations in cycles (`powf`, software doubles, divides, table lookups, VU-free transforms). Build with `make` in that folder, run with `pcsx2_run.py bench.elf --until "BENCH DONE"`. The results and the rules drawn from them: [docs/ps2_ee_performance.md](../../docs/ps2_ee_performance.md). |
+| `eebench/` | An EE program that prices float operations in cycles (`powf`, software doubles, divides, table lookups, VU-free transforms). Build with `make` in that folder, run with `pcsx2_run.py bench.elf --until "BENCH DONE"`. The results and the rules drawn from them: [docs/research/ee_performance.md](../../docs/research/ee_performance.md). |
 
 ## Measure the maps
 
@@ -55,22 +54,6 @@ python tools/ps2/relocation_check.py --iso assets/halo.xiso.iso
 The JSON files contain sizes and counts only, no game data. Keep them in
 `build/`, which git also ignores.
 
-## Make the schema again
-
-Do this when a `tag_schema_*.c` file or a tag structure changes:
-
-```bash
-python tools/ps2/export_tag_schema.py
-```
-
-The script compiles the schema with clang for the Xbox's ABI, with the
-flags of the Linux build, and reads the tables from the LLVM IR. On Linux
-it uses the system's 32-bit C headers. On other systems, give it a 32-bit
-x86 C library's headers, for example musl's:
-
-1. In a musl source tree, enter `make ARCH=i386 prefix=DIR install-headers`.
-2. Enter `python tools/ps2/export_tag_schema.py --libc-include DIR/include`.
-
 ## Build the game for the PS2
 
 `ninja ps2` builds `build/ps2/halo.elf` (`tools/ps2_build.py`). It needs the
@@ -98,8 +81,8 @@ stand in for data. So does an object that defines a name ps2sdk's libraries
 define (the linker would quietly take ours for the libraries' own calls
 too), apart from the few the game defines on purpose.
 
-`port/ps2/port.json` lists the Linux platform layer's files that the PS2
-build compiles as they are. `port/ps2/src` holds the PS2's own files.
+`port/ps2/port.json` lists the game's files, defines and include directories.
+`port/ps2/game` holds the port's changes to the game, `port/ps2/src` the platform layer.
 
 The game reads its files from `host:`, the ELF's folder `build/ps2`:
 `config.toml` (the settings, written with the defaults when it is
@@ -155,8 +138,8 @@ python tools/ps2/compile_check.py
 - The objects and the report (`compile_check.json`) go to
   `build/ps2/check`, apart from the objects of `ninja ps2`.
 
-The PS2 build uses the Linux build's MSVC environment under
-`port/ps2/include/halo_ps2_prefix.h`. It adds what GCC does not take from
+The PS2 build compiles the game in the Xbox's MSVC environment
+(`port/ps2/include`, `port/ps2/include/halo_ps2_prefix.h`). The prefix adds what GCC does not take from
 clang: `__int64`, the x86 calling conventions, `__declspec`, and MSVC's
 inline functions as weak GNU89 inlines.
 

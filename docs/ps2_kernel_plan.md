@@ -16,7 +16,7 @@ the shim that emulates it is how the game got running (below, "Where it
 stands"), and "What the PS2's architecture changes" says where the PS2's own
 design replaces it. The layer is:
 
-- the Xbox kernel emulation (`port/linux/src/xbox_kernel.c`, built as it is on
+- the Xbox kernel emulation (`port/ps2/src/xbox_kernel.c`, built as it is on
   ps2sdk's pthreads) and the PS2 files that support it (`port/ps2/src`);
 - the program's start-up: the IOP, its modules, the data root, the memory map;
 - the services a player needs that the platform layer still answers with

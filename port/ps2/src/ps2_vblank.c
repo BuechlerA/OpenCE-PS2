@@ -16,7 +16,7 @@ does, and the game's threads (main's, the loader's, input's) expect it.
 So every game thread has one priority, GAME_THREAD_PRIORITY, and each
 vertical blank rotates that priority's ready queue, giving each game thread
 its turn 60 times a second (50 on PAL). ps2sdk starts its pthreads, which
-the Win32 CreateThread makes (port/linux/src/xbox_kernel.c, whose
+the Win32 CreateThread makes (port/ps2/src/xbox_kernel.c, whose
 SetThreadPriority changes nothing), at that priority; main's thread starts
 higher and is moved down to it before main runs.
 */

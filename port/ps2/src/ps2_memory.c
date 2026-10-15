@@ -12,7 +12,7 @@ asks for the game state and the tag, texture and sound caches once, at
 start (physical_memory_map.c), so they are at the same addresses each run of
 a build, which saved games need (they are images of the game state); the
 map's tags are moved to wherever the tag cache is
-(port/linux/game/tag_relocate.c). Physical and virtual addresses are the
+(port/ps2/game/tag_relocate.c). Physical and virtual addresses are the
 same, which the PS2's Direct3D keeps in its resources
 (port/ps2/src/ps2_d3d_null.c).
 
