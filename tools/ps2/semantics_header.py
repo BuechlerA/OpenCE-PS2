@@ -3,7 +3,7 @@
 
     python tools/ps2/semantics_header.py --output FILE [--platform]
 
-It is tools/linux_msvc_semantics.py's header (file-scope struct tags, and
+It is tools/ps2/msvc_semantics.py's header (file-scope struct tags, and
 `#pragma weak` on every inline function) without the `#pragma weak` of the
 inline functions the source itself makes static, which GCC refuses: the
 game's `static __inline` functions and the XDK's D3DINLINE ones (`static
@@ -42,7 +42,7 @@ def main():
     else:
         scan = ["--all-inlines", "--tags", "source", "--inlines", "source", "--inlines", str(XDK_INCLUDE)]
         roots = [Path("source"), XDK_INCLUDE]
-    subprocess.run([sys.executable, "tools/linux_msvc_semantics.py", "--output", str(args.output), *scan],
+    subprocess.run([sys.executable, "tools/ps2/msvc_semantics.py", "--output", str(args.output), *scan],
                    check=True)
     static = static_inline_functions(roots)
     lines = args.output.read_text().splitlines(keepends=True)

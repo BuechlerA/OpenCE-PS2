@@ -1,8 +1,0 @@
-# generated from the game's map by tools/export_assets.py; never commit game data
-src/assets.c
-src/assets.h
-*.elf
-*.o
-__pycache__/
-src/map_assets.c
-src/map_assets.h

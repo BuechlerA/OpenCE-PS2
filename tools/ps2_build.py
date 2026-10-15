@@ -1,13 +1,13 @@
 """The PS2 build (ninja ps2): the game for the PlayStation 2's Emotion
 Engine, with ps2dev's GCC (docs/ps2_port_plan.md).
 
-The game's files, defines and include directories are the Linux build's
-(port/linux/port.json), with its MSVC environment (port/linux/include and
-the XDK declarations) under port/ps2/include/halo_ps2_prefix.h. port/ps2/port.json
-says which of the Linux platform layer's files the PS2 build compiles as they
-are; port/ps2/src holds the PS2's own. While the platform layer is brought
-up, every function the game calls that nothing defines yet is a stub that
-names itself and stops (tools/ps2/unimplemented_stubs.py).
+port/ps2/port.json lists the game's files, defines and include directories.
+The game is compiled in the Xbox's MSVC environment (port/ps2/include, the XDK
+declarations in port/include/xdk, and port/ps2/include/halo_ps2_prefix.h);
+port/ps2/game holds the port's changes to the game and port/ps2/src the
+platform layer. While the platform layer is brought up, every function the
+game calls that nothing defines yet is a stub that names itself and stops
+(tools/ps2/unimplemented_stubs.py).
 
 The toolchain is found through configure.py --ps2dev or the PS2DEV
 environment variable; without it, the build is left out.
@@ -18,24 +18,36 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from tools.android_build import VARIADIC_PROTOTYPE_FILES
-from tools.linux_build import (MUSL_MATH_DIR, PORT_DIR as LINUX_DIR, TOML_DIR, XDK_INCLUDE, ZLIB_DEFINES,
-                               ZLIB_DIR, ZLIB_SOURCES, _load_port_config, game_sources, musl_math_sources)
 from tools.ninja_syntax import Writer
 
 PS2_DIR = Path("port/ps2")
 PS2_CONFIG = PS2_DIR / "port.json"
+# the Xbox SDK declarations the game and the platform layer use, in place of
+# the SDK's headers (port/include/xdk/README.md)
+XDK_INCLUDE = Path("port/include/xdk")
+# the settings file's parser (port_config.c)
+TOML_DIR = Path("port/third_party/tomlc17")
+# musl's maths functions the game uses
+MUSL_MATH_DIR = Path("port/third_party/musl-math")
+# the port's zlib (port/third_party/zlib/zlib_prefixed.h): what inflates the
+# maps, data from anywhere, instead of the game's own 1.1.3 (its inflate
+# only, its names prefixed z_)
+ZLIB_DIR = Path("port/third_party/zlib")
+ZLIB_SOURCES = ("adler32.c", "crc32.c", "inffast.c", "inflate.c", "inftrees.c", "uncompr.c", "zutil.c")
+# (its names prefixed, and the one Z_PREFIX leaves, its error messages, which
+# the game's zlib names the same)
+ZLIB_DEFINES = ("-DZ_PREFIX", "-Dz_errmsg=z_port_errmsg")
 # where the tag cache is: halo_port_capacity.h has it too, and says so if they differ
 TAG_CACHE_ADDRESS = "0xEB0000"
 PREFIX = PS2_DIR / "include" / "halo_ps2_prefix.h"
-# the files that call variadic functions without their prototype, which the
-# Android build gives them (tools/android_abi_check.py finds them): the EE's
-# n32 ABI passes floating-point arguments in their own registers too
-VARIADIC_PROTOTYPES = Path("port/android/include/halo_android_variadic_prototypes.h")
+# the files that call variadic functions without their prototype get this
+# header (port.json "variadic_prototype_files"): the EE's n32 ABI passes
+# floating-point arguments in their own registers
+VARIADIC_PROTOTYPES = PS2_DIR / "include" / "halo_variadic_prototypes.h"
 
-# The Linux build's ABI flags (tools/linux_build.py, LINUX_ABI_FLAGS) that
-# carry over: the EE's n32 ABI already aligns 8-byte members as MSVC does, so
-# -malign-double has no counterpart, and -m32 and --target are clang's.
+# The ABI flags of the MSVC environment the game was written for. The EE's n32
+# ABI already aligns 8-byte members as MSVC does, so -malign-double has no
+# counterpart.
 # -G0 and the toolchain's default abicalls, as ps2sdk's own libraries are
 # built (docs/ps2_port_plan.md: a small-data area barely shrinks the code).
 EE_FLAGS = [
@@ -52,12 +64,10 @@ EE_FLAGS = [
 ]
 # memory is the PS2's limit (docs/ps2_port_plan.md, "Code and constant data")
 OPTIMISATION = "-Os"
-# tools/linux_build.py GAME_FLAGS: C89 with MSVC's leniency. GCC 14 and later
-# make implicit declarations, implicit int and pointer/integer mismatches
-# errors; -fpermissive makes them warnings again, as -Wno-error=... does for
-# clang.
+# C89 with MSVC's leniency. GCC 14 and later make implicit declarations,
+# implicit int and pointer/integer mismatches errors; -fpermissive makes them
+# warnings again.
 GAME_FLAGS = ["-std=gnu89", "-D__STRICT_ANSI__", "-w", "-fpermissive"]
-# tools/linux_build.py PLATFORM_FLAGS, less clang's warning options
 PLATFORM_FLAGS = ["-std=gnu11", "-D_GNU_SOURCE", "-DHALO_LINUX_PLATFORM_LAYER", "-w", "-fpermissive"]
 
 
@@ -74,9 +84,22 @@ def _load_config() -> Dict[str, Any]:
         return json.load(f)
 
 
+def game_sources(config: Dict[str, Any]) -> List[Path]:
+    """the game's C sources (port.json "game"): every one under its root but
+    those excluded"""
+    game = config["game"]
+    excluded = set(game.get("exclude", []))
+    return sorted(source for source in Path(game["root"]).rglob("*.c") if source.as_posix() not in excluded)
+
+
+def musl_math_sources() -> List[Path]:
+    """musl's maths functions the game uses (port/third_party/musl-math)"""
+    return sorted((MUSL_MATH_DIR / "src").glob("*.c"))
+
+
 def ps2_configure_inputs() -> List[Path]:
     """Files whose change must re-run configure.py."""
-    return [Path(__file__), PS2_CONFIG, PS2_DIR / "src", LINUX_DIR / "game"]
+    return [Path(__file__), PS2_CONFIG, PS2_DIR / "src", PS2_DIR / "game"]
 
 
 def _quote(path: Any) -> str:
@@ -87,10 +110,10 @@ def _quote(path: Any) -> str:
 def game_compile_flags(sdk: Path, semantics_header: Path) -> List[str]:
     """the flags of the game's files and of the port's game units (without
     the optimisation, which the caller chooses)"""
-    config = _load_port_config()
+    config = _load_config()
     return [*EE_FLAGS, *GAME_FLAGS,
             "-include", str(PREFIX), "-include", str(semantics_header),
-            f"-I{LINUX_DIR / 'include'}", "-iquote", config["game_sources"],
+            f"-I{PS2_DIR / 'include'}", "-iquote", config["game_units"],
             *[f"-D{d}" for d in config["game"].get("defines", [])],
             *[f"-I{d}" for d in config["game"]["include_dirs"]],
             f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}",
@@ -98,10 +121,10 @@ def game_compile_flags(sdk: Path, semantics_header: Path) -> List[str]:
 
 
 def ps2_game_units() -> List[Path]:
-    """the port's game units (port/linux/game) the PS2 build compiles"""
-    excluded = set(_load_config()["port_game_units"]["exclude"])
-    config = _load_port_config()
-    return [s for s in sorted(Path(config["game_sources"]).glob("*.c")) if s.name not in excluded]
+    """the port's game units (port/ps2/game) the PS2 build compiles"""
+    config = _load_config()
+    excluded = set(config["game_units_exclude"]["files"])
+    return [s for s in sorted(Path(config["game_units"]).glob("*.c")) if s.name not in excluded]
 
 
 def generate_ps2_build(n: Writer, sln: Any) -> None:
@@ -136,10 +159,10 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
     game_headers = sorted(p for p in Path("source").rglob("*") if p.suffix in (".c", ".h"))
     xdk = sorted(XDK_INCLUDE.glob("*.h"))
     n.build(outputs=semantics_header, rule="ps2_semantics", variables={"kind": ""},
-            implicit=[Path("tools/ps2/semantics_header.py"), Path("tools/linux_msvc_semantics.py"), *xdk,
+            implicit=[Path("tools/ps2/semantics_header.py"), Path("tools/ps2/msvc_semantics.py"), *xdk,
                       *game_headers])
     n.build(outputs=platform_semantics_header, rule="ps2_semantics", variables={"kind": "--platform"},
-            implicit=[Path("tools/ps2/semantics_header.py"), Path("tools/linux_msvc_semantics.py"), *xdk])
+            implicit=[Path("tools/ps2/semantics_header.py"), Path("tools/ps2/msvc_semantics.py"), *xdk])
 
     objects: List[Path] = []
 
@@ -151,28 +174,25 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
                 variables={"cflags": " ".join(_quote(f) if " " in f else f for f in cflags)})
 
     game = [*game_compile_flags(sdk, semantics_header), OPTIMISATION, *release]
-    for source in game_sources(_load_port_config()):
-        extra = ["-include", str(VARIADIC_PROTOTYPES)] if source.as_posix() in VARIADIC_PROTOTYPE_FILES else []
+    variadic = set(config["variadic_prototype_files"]["files"])
+    for source in game_sources(config):
+        extra = ["-include", str(VARIADIC_PROTOTYPES)] if source.as_posix() in variadic else []
         add_object(source, game + extra)
     for source in ps2_game_units():
         add_object(source, game)
 
     platform = [*EE_FLAGS, *PLATFORM_FLAGS, OPTIMISATION, *release,
                 "-include", str(PREFIX), "-include", str(platform_semantics_header),
-                f"-I{PS2_DIR / 'src'}", f"-I{LINUX_DIR / 'src'}", f"-I{LINUX_DIR / 'include'}",
+                f"-I{PS2_DIR / 'src'}", f"-I{PS2_DIR / 'include'}",
                 "-Isource", "-Isource/cseries", f"-I{TOML_DIR}",
                 f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}", "-idirafter", str(XDK_INCLUDE)]
-    # the posix_* files talk to the C library only, with its own headers (as
-    # the Linux build has them, tools/linux_build.py)
+    # the posix_* files talk to the C library only, with its own headers
     posix = [*EE_FLAGS, "-std=gnu11", "-D_GNU_SOURCE", "-DHALO_PS2", "-w", OPTIMISATION, *release,
              f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}"]
-    for name in config["linux_platform_sources"]["files"]:
-        add_object(LINUX_DIR / "src" / name, posix if name.startswith("posix_") else platform)
     for source in sorted(Path(config["platform_sources"]).glob("*.c")):
-        add_object(source, platform)
+        add_object(source, posix if source.name.startswith("posix_") else platform)
 
-    # the same maths, zlib and settings file parser as the other builds
-    # (tools/linux_build.py)
+    # the settings file's parser, zlib and the maths
     add_object(TOML_DIR / "tomlc17.c", [*EE_FLAGS, "-std=gnu11", "-w", OPTIMISATION])
     for name in ZLIB_SOURCES:
         add_object(ZLIB_DIR / name, [*EE_FLAGS, "-std=gnu11", *ZLIB_DEFINES, "-w", OPTIMISATION])
