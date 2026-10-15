@@ -406,8 +406,16 @@ struct hs_stack_frame
 	long expression_index;
 	void *result;
 	short size;
-	byte data[2];
+	/* port: the slots start at offset 14 on the Xbox, 2 past a multiple of 4,
+	so every long in them is a misaligned access, which the EE faults on.
+	They start at 16, the end of the header, and hs_stack_allocate rounds
+	each to 4 bytes, so a frame and its next frame stay aligned */
+	short pad;
+	byte data[];
 };
+
+typedef char hs_stack_frame_layout_assert[
+	sizeof(struct hs_stack_frame) == 16 && offsetof(struct hs_stack_frame, data) == 16 ? 1 : -1];
 
 struct hs_global_datum
 {
@@ -2879,6 +2887,9 @@ static void *hs_stack_allocate(
 	match_hs_assert("c:\\halo\\SOURCE\\hs\\hs_runtime.c", 0x37f, thread_index,
 		frame->data+frame->size+size<=thread->stack_data+HS_THREAD_STACK_SIZE,
 		"stack overflow.");
+
+	/* port: 4-byte slots (see hs_stack_frame) */
+	size = (size+3)&~3;
 
 	/* port: none past the thread's stack (hs_stack_overflow); the caller
 	returns on NULL */

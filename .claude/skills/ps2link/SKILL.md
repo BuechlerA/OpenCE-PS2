@@ -46,7 +46,11 @@ ping -c 3 -t 5 192.168.0.10; arp -a | grep "192.168.0.10)"
    game's `host:` root: `config.toml`, `maps/ui.map` (converted with
    `tools/ps2/convert_map.py`), and the saves under `z/` go there. A worktree
    has no `assets/`; use `/Users/alex/Developer/OpenCE/assets/maps/`.
-2. In that folder: `ps2client -h 192.168.0.10 execee host:halo.elf`.
+2. **Send a stripped copy:** `mips64r5900el-ps2-elf-strip -o halo_s.elf build/ps2/halo.elf`
+   (3.4 MB instead of 26 MB; the same addresses). The unstripped ELF
+   loaded once and then stalled in the next runs; the stripped one has loaded
+   every time since. Keep the unstripped ELF for `addr2line`.
+   In that folder: `ps2client -h 192.168.0.10 execee host:halo_s.elf`.
 3. **Leave `ps2client` running.** It serves `host:` for the whole run, so a
    short `timeout` on it cuts the game's file access. When wrapping it with
    `timeout`, use 200 s or more and kill only that process (`pkill -f "ps2client -h"`
@@ -91,7 +95,9 @@ writes `crash.txt` in the host folder.
 - Address error, store/load (codes 4 and 5) with an odd or non-multiple-of-4
   `BadVAddr` is an unaligned access. The first one found this way was
   `debug_malloc`'s trailing signature (`source/cseries/debug_memory.c`),
-  fixed with memcpy helpers marked `port:`.
+  fixed with memcpy helpers marked `port:`. The second was the script
+  runtime's stack (`hs_stack_frame` slots started 2 bytes past a multiple
+  of 4); expect more of the same kind, one per run.
 - `HALO_PS2_CRASH_TEST=trap|null|unaligned python configure.py` builds a copy
   that faults at start-up to test the report. PCSX2 handles the null store and
   ignores the unaligned one; only the console tests those two.
@@ -123,9 +129,11 @@ To undo: copy the backup image over `MemoryCards/PS2/BOOT/BootCard-1.mcd`.
 
 - `dumpmem` wrote no file ("Unknown device 'mc'", fd -19), and `dumpreg`
   printed nothing. Do not rely on either until checked.
-- A second run of `halo.elf` after the `debug_malloc` fix has not completed:
-  the ELF load stalled, then `ps2client` printed nothing. The cause (the muddled
-  reset, the network, or PS2Link) is unknown.
+- Why the unstripped 26 MB ELF stalled while loading is not known; the
+  stripped copy avoids it (checked in two loads after a power cycle).
+- After the console's EE hangs (a stalled load, or a crash that parked it), the
+  IOP can keep answering pings while `ps2client reset` does nothing. A power
+  cycle fixed that once. A reset after a *handled* crash (`crash.txt`) works.
 - ps2link itself is unmodified (the stock `RenameMe` build, 0269a955). Keeping
   the EE serving RPCs after a fault, or a reset that returns to ps2link without
   the BIOS, would need a build from `github.com/ps2dev/ps2link`.
