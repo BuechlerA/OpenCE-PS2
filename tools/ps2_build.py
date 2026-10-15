@@ -195,6 +195,12 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
                 f"-I{PS2_DIR / 'src'}", f"-I{PS2_DIR / 'include'}",
                 "-Isource", "-Isource/cseries", f"-I{TOML_DIR}",
                 f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}", "-idirafter", str(XDK_INCLUDE)]
+    # HALO_PS2_CRASH_TEST=null|unaligned|trap when configure.py runs
+    # makes the build fault on purpose at start-up (ps2_crash.c), to check the
+    # fault report
+    crash_test = os.environ.get("HALO_PS2_CRASH_TEST")
+    if crash_test:
+        platform.append(f"-DHALO_PS2_CRASH_TEST_{crash_test.upper()}")
     # the posix_* files talk to the C library only, with its own headers
     posix = [*EE_FLAGS, "-std=gnu11", "-D_GNU_SOURCE", "-DHALO_PS2", "-w", OPTIMISATION, *release,
              f"-I{sdk / 'ee/include'}", f"-I{sdk / 'common/include'}"]

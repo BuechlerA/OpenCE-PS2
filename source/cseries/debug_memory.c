@@ -150,6 +150,27 @@ typedef char debug_memory_header_size_must_be_0x20[
 typedef char debug_memory_header_checksum_offset_must_be_0x1c[
 	offsetof(struct debug_memory_header, checksum) == 0x1C ? 1 : -1];
 
+/* port: the trailing signature sits right after the caller's bytes, at an
+   address that is not a multiple of 4 whenever the size is not. The Xbox's
+   x86 allows that; the PS2's EE raises an address error exception. */
+static unsigned long debug_memory_read_trailer(
+	const struct debug_memory_header *header)
+{
+	unsigned long signature;
+
+	memcpy(&signature, (const byte *)(header + 1) + header->size, sizeof(signature));
+	return signature;
+}
+
+static void debug_memory_write_trailer(
+	struct debug_memory_header *header,
+	unsigned long size)
+{
+	unsigned long signature = debug_memory_trailing_signature;
+
+	memcpy((byte *)(header + 1) + size, &signature, sizeof(signature));
+}
+
 struct memory_status
 {
 	unsigned long minimum_available_memory;
@@ -432,7 +453,7 @@ void debug_check_memory(
 		match_vassert(
 			"c:\\halo\\SOURCE\\cseries\\debug_memory.c",
 			199,
-			*(unsigned long *)((byte *)(header + 1) + header->size) ==
+			debug_memory_read_trailer(header) ==
 				debug_memory_trailing_signature,
 			csprintf(
 				temporary,
@@ -473,8 +494,7 @@ void *debug_malloc(
 		header->line = line;
 		header->allocation_id = debug_memory_globals.next_allocation_id++;
 		header->size = size;
-		*(unsigned long *)((byte *)(header + 1) + size) =
-			debug_memory_trailing_signature;
+		debug_memory_write_trailer(header, size);
 		debug_memory_add_pointer(header);
 
 		pointer = header + 1;
@@ -567,8 +587,7 @@ void *debug_realloc(
 		header->file = file;
 		header->allocation_id = debug_memory_globals.next_allocation_id++;
 		header->size = size;
-		*(unsigned long *)((byte *)(header + 1) + size) =
-			debug_memory_trailing_signature;
+		debug_memory_write_trailer(header, size);
 		debug_memory_add_pointer(header);
 
 		result = header + 1;
@@ -695,7 +714,7 @@ static void debug_check_pointer_overrun(
 	match_vassert(
 		"c:\\halo\\SOURCE\\cseries\\debug_memory.c",
 		199,
-		*(unsigned long *)((byte *)(header + 1) + header->size) ==
+		debug_memory_read_trailer(header) ==
 			debug_memory_trailing_signature,
 		csprintf(
 			temporary,
