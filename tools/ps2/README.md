@@ -117,6 +117,14 @@ emulated cycles, which leave out the caches' and the memory's waits: compare
 builds with it, and measure on a PS2 for the gate. Of the campaign's levels only `c20` fits the PS2's tag cache
 (`docs/ps2_port_plan.md`, Phase 1).
 
+A fault on the EE (an address error, a bus error, a trap) writes the
+registers, the exception and a scan of the stack to `host:crash.txt` and the
+console (`port/ps2/src/ps2_crash.c`); name the addresses with `addr2line`
+as below. `HALO_PS2_CRASH_TEST=trap python configure.py` (also `null` and
+`unaligned`) makes a build that faults at start-up, to check the report.
+PCSX2 services a null pointer's TLB miss and an unaligned access itself:
+only a PS2 faults on them.
+
 An assertion prints the call sites of the stack (the game's stack walk
 scans for them) as addresses in `debug.txt`; name them with ps2dev's
 `mips64r5900el-ps2-elf-addr2line -f -e build/ps2/halo.elf ADDRESS...`.
