@@ -104,17 +104,35 @@ shell_idle(
 int main(
 	void)
 {
+#ifdef HALO_PS2
+	/* port: debug text on the screen and ps2link's console (port/ps2/src/ps2_debug.c) */
+	ps2_debug_init();
+	ps2_debug_log("main: start");
+#endif
 	fuck_code_in_the_eye();
 	rasterizer_preinitialize__fill_you_up_with_the_devils_cock();
 	physical_memory_allocate();
+#ifdef HALO_PS2
+	ps2_debug_log("main: physical memory allocated");
+#endif
 
 	__try
 	{
 		if (shell_initialize())
 		{
+#ifdef HALO_PS2
+			ps2_debug_log("main: shell initialized, entering the main loop");
+#endif
 			main_loop();
+#ifdef HALO_PS2
+			ps2_debug_log("main: the main loop returned");
+#endif
 			shell_dispose();
 		}
+#ifdef HALO_PS2
+		else
+			ps2_debug_log("main: shell_initialize failed");
+#endif
 	}
 	__except (generic_exception_filter(GetExceptionCode(), GetExceptionInformation()))
 	{

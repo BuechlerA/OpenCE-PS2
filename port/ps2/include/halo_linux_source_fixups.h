@@ -37,6 +37,10 @@ void render_interpolation_first_person(short local_player_index, struct real_mat
 float render_interpolation_game_time_sec(long ticks);
 
 #ifdef HALO_PS2
+/* the PS2's debug text, on the screen and ps2link's console (port/ps2/src/ps2_debug.c) */
+void ps2_debug_init(void);
+void ps2_debug_log(char const *format, ...);
+void ps2_debug_frame(unsigned char main_menu_scenario_loaded, unsigned char game_in_progress);
 /* the PS2's benchmark (port/ps2/src/ps2_bench.c) */
 void ps2_bench_update(unsigned char main_menu_scenario_loaded, unsigned char game_in_progress);
 void ps2_bench_tick_begin(void);

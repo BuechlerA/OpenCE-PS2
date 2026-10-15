@@ -25,19 +25,29 @@ threads, asynchronous procedure calls, time, memory and debug output.
 
 /* ---------- logging */
 
+#ifdef HALO_PS2
+void ps2_debug_log(char const *format, ...);
+#endif
+
 void platform_log(const char *format, ...)
 {
 	va_list arguments;
 
 #ifdef HALO_PS2
-	fputs("halo-ps2: ", stderr);
+	/* the screen and ps2link's console (ps2_debug.c) */
+	char message[256];
+
+	va_start(arguments, format);
+	vsnprintf(message, sizeof(message), format, arguments);
+	va_end(arguments);
+	ps2_debug_log("halo-ps2: %s", message);
 #else
 	fputs("halo-linux: ", stderr);
-#endif
 	va_start(arguments, format);
 	vfprintf(stderr, format, arguments);
 	va_end(arguments);
 	fputc('\n', stderr);
+#endif
 }
 
 void platform_unimplemented(const char *name)

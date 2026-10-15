@@ -3439,7 +3439,8 @@ void main_loop(
 			/* automated system link tests (port/linux/game/network_test.c) */
 			network_test_update(main_globals.main_menu_scenario_loaded, main_globals.seconds_elapsed);
 #ifdef HALO_PS2
-			/* port: the PS2's benchmark (port/ps2/src/ps2_bench.c) */
+			/* port: the PS2's debug text (port/ps2/src/ps2_debug.c) and benchmark (ps2_bench.c) */
+			ps2_debug_frame(main_globals.main_menu_scenario_loaded, game_in_progress());
 			ps2_bench_update(main_globals.main_menu_scenario_loaded, game_in_progress());
 #endif
 			/* port: voice chat, in the lobby and in game (port/linux/game/network_voice.c) */
