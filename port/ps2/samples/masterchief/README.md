@@ -4,14 +4,18 @@ A stand-alone sample, not the game's PS2 build (`tools/ps2_build.py`, `port/ps2/
 README for the game data) and bakes the Chief and the assault rifle out of it; no game data is
 committed here (`src/assets.c`, `src/assets.h` and the ELF are generated and ignored).
 
-The scene (Chief running in place with the assault rifle on Blood Gulch's terrain, the camera orbiting
-him) as a PS2 program: EE code skins, lights and projects every vertex; the GS draws Gouraud textured triangles
+The scene (Chief running in place with the assault rifle on Blood Gulch's terrain; the camera is the player's eyes,
+walked by a demo or a DualShock, or orbits him in the builds for stills and profiles: see
+[docs/ps2_first_person_controller.md](../../../../docs/ps2_first_person_controller.md)) as a PS2 program: EE code skins, lights and projects every vertex; the GS draws Gouraud textured triangles
 (8-bit palettised textures, 16-bit Z). Built with ps2dev and gsKit.
 
     python3 tools/export_assets.py     # run from here; reads HALO_MAP (default assets/maps/bloodgulch.map) -> src/assets.[ch]
     python3 tools/export_map.py        # the map's structure BSP -> src/map_assets.[ch]
+    python3 tools/export_weapons.py    # the hand weapons' tags -> src/weapon_assets.[ch] (the first-person controller's weapons)
+    python3 tools/export_fp_models.py  # the first-person arms, guns and textures -> src/fpm_assets.[ch]
     make                               # PS2DEV, PS2SDK set; writes masterchief.elf
     make NO_MAP=1                      # the Chief alone, on the old ground grid (needs no map_assets)
+    make FP_NO_DEMO=1                  # the player stands for the pad alone (else a demo walks it to the Chief); ORBIT_CAMERA=1: the camera orbits the Chief
     make NO_CHIEF_VU1=1                # the Chief drawn by the EE, not VU1 (the map scene's default)
     PCSX2 -nogui -batch -elf masterchief.elf
 

@@ -34,14 +34,31 @@
 #include "map_assets.h"
 #endif
 
+/* The map scene is first person: the DualShock walks the player on Blood Gulch (fp_controller.c, pad.c), the Chief stands
+   where he did. The camera orbiting him is for comparing builds: it is the scene of -DORBIT_CAMERA, of the stills
+   (-DDEBUG_SECONDS), the mip audit and the profile, unless -DFIRST_PERSON asks for the walk in those. */
+#if !defined(NO_MAP) && !defined(FIRST_PERSON) && !defined(ORBIT_CAMERA) && !defined(DEBUG_SECONDS) && !defined(MIP_AUDIT) && !defined(PROFILE)
+#define FIRST_PERSON
+#endif
+#if defined(FIRST_PERSON) && defined(NO_MAP)
+#error "the first-person controller walks on the map: it needs the map scene"
+#endif
+#ifdef FIRST_PERSON
+#include "fp_controller.h"
+#include "fp_demo.h"
+#include "fp_hud.h"
+#include "fpm_assets.h"
+#include "pad.h"
+#endif
+
 #if RIFLE_MASK_SIZE != RIFLE_TEX_SIZE
 #error "the rifle's second pass shares its UV registers with the first: its mask must be as big as its base map"
 #endif
 
 #ifdef PROFILE                      /* -DPROFILE: time the frame's phases with the EE's cycle counter */
 #include <timer.h>
-enum { P_VU1, P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
-static const char *prof_name[P_COUNT] = { "vu1 kick", "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "submit", "queue_exec", "sync_flip" };
+enum { P_VU1, P_SETUP, P_MAPV, P_MAPT, P_GROUND, P_SKIN, P_RIFLE, P_WEAPON, P_FX, P_SUBMIT, P_EXEC, P_FLIP, P_COUNT };
+static const char *prof_name[P_COUNT] = { "vu1 kick", "setup", "map verts", "map tris", "ground/passes", "skin_chief", "rifle+disp", "fp weapon", "fp fx+hud", "submit", "queue_exec", "sync_flip" };
 static u32 prof_sum[P_COUNT], prof_last, prof_tris, prof_tris_culled, prof_frame_start, prof_busy_max;
 static u32 prof_max[P_COUNT];
 static void prof_mark(int phase) { u32 t = cpu_ticks(); u32 d = t - prof_last; prof_sum[phase] += d; if (d > prof_max[phase]) prof_max[phase] = d; prof_last = t; }
@@ -115,7 +132,7 @@ static inline float dot(const float *a, const float *b)
 }
 
 #define MAX_VERTS 2200
-#define MAX_TRIS 2000
+#define MAX_TRIS 4400
 
 /* ---------- VU0 in macro mode: the transforms ---------- */
 
@@ -230,6 +247,92 @@ static inline void vu0_skin(const mat4 *b0, const mat4 *b1, const vec4 *p, const
 		: : "r"(b0), "r"(b1), "r"(p), "r"(n), "r"(w), "r"(pw), "r"(nw), "r"(pv) : "memory");
 }
 
+/* ---- the first-person weapon's vertices (the stages of fp_draw_model) ---- */
+
+/* a point (w 1) by one bone: out = p * m (a mat4 whose columns were permuted by the caller to give (y, z, x): the weapon's view order) */
+static inline void vu0_fp_skin1(const mat4 *m, const vec4 *p, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%1)\n"
+		"lqc2 $vf4, 0(%0)\n" "lqc2 $vf5, 16(%0)\n" "lqc2 $vf6, 32(%0)\n" "lqc2 $vf7, 48(%0)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddaz.xyz $ACC, $vf6, $vf1z\n" "vmaddw.xyz $vf2, $vf7, $vf1w\n"
+		"sqc2 $vf2, 0(%2)\n"
+		: : "r"(m), "r"(p), "r"(out) : "memory");
+}
+
+/* the same by two bones, blended by w = (w0, w1, 0, 0) */
+static inline void vu0_fp_skin2(const mat4 *b0, const mat4 *b1, const vec4 *p, const vec4 *w, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%2)\n" "lqc2 $vf3, 0(%3)\n"
+		"lqc2 $vf4, 0(%0)\n" "lqc2 $vf5, 16(%0)\n" "lqc2 $vf6, 32(%0)\n" "lqc2 $vf7, 48(%0)\n"
+		"lqc2 $vf8, 0(%1)\n" "lqc2 $vf9, 16(%1)\n" "lqc2 $vf10, 32(%1)\n" "lqc2 $vf11, 48(%1)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddaz.xyz $ACC, $vf6, $vf1z\n" "vmaddw.xyz $vf12, $vf7, $vf1w\n"
+		"vmulax.xyz $ACC, $vf8, $vf1x\n" "vmadday.xyz $ACC, $vf9, $vf1y\n" "vmaddaz.xyz $ACC, $vf10, $vf1z\n" "vmaddw.xyz $vf13, $vf11, $vf1w\n"
+		"vmulax.xyz $ACC, $vf12, $vf3x\n" "vmaddy.xyz $vf14, $vf13, $vf3y\n"
+		"vmove.w $vf14, $vf0\n"
+		"sqc2 $vf14, 0(%4)\n"
+		: : "r"(b0), "r"(b1), "r"(p), "r"(w), "r"(out) : "memory");
+}
+
+/* The weapon's constants, kept in vf24-vf31 for the whole draw: the screen scale (-focal_x, -focal), the screen's centre plus the GS's origin, the depth's
+   (A, B) in z (iz = A - B * min (x, 1)), 512 for the gamma table's index, the ambient light and the three lights' colours */
+static inline void vu0_fp_load_constants(const vec4 *c)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf24, 0(%0)\n" "lqc2 $vf25, 16(%0)\n" "lqc2 $vf26, 32(%0)\n" "lqc2 $vf27, 48(%0)\n"
+		"lqc2 $vf28, 64(%0)\n" "lqc2 $vf29, 80(%0)\n" "lqc2 $vf30, 96(%0)\n" "lqc2 $vf31, 112(%0)\n"
+		: : "r"(c));
+}
+
+/* a point in the weapon's view order (y, z, x) to the screen: out_f gets the screen x and y (floats), out_i their fixed-point packing and the depth (ints) */
+static inline void vu0_fp_project(const vec4 *p, vec4 *out_f, vec4 *out_i)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"vdiv $Q, $vf0w, $vf1z\n"
+		"vminiw.z $vf5, $vf1, $vf0w\n"
+		"vwaitq\n"
+		"vmulq.xy $vf2, $vf1, $Q\n" "vmul.xy $vf2, $vf2, $vf24\n" "vadd.xy $vf2, $vf2, $vf25\n"
+		"vftoi4.xy $vf3, $vf2\n"
+		"vmuly.z $vf5, $vf5, $vf26y\n" "vsub.z $vf6, $vf26, $vf5\n" "vftoi0.z $vf6, $vf6\n"
+		"vmove.xy $vf6, $vf3\n"
+		"sqc2 $vf2, 0(%1)\n" "sqc2 $vf6, 0(%2)\n"
+		: : "r"(p), "r"(out_f), "r"(out_i) : "memory");
+}
+
+/* a vertex's lit colour as the gamma table's three indices: its normal n (w 0) against a bone's lights (3 rows: the lights' dot products with the normal's
+   x, y and z), the three dot products clamped at 0, mixed with the lights' colours over the ambient, times 512 */
+static inline void vu0_fp_light1(const vec4 *n, const vec4 *rows, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n"
+		"lqc2 $vf4, 0(%1)\n" "lqc2 $vf5, 16(%1)\n" "lqc2 $vf6, 32(%1)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddz.xyz $vf2, $vf6, $vf1z\n"
+		"vmax.xyz $vf2, $vf2, $vf0\n"
+		"vmulax.xyz $ACC, $vf29, $vf2x\n" "vmadday.xyz $ACC, $vf30, $vf2y\n" "vmaddaz.xyz $ACC, $vf31, $vf2z\n" "vmaddw.xyz $vf3, $vf28, $vf0w\n"
+		"vmul.xyz $vf3, $vf3, $vf27\n" "vftoi0.xyz $vf3, $vf3\n"
+		"sqc2 $vf3, 0(%2)\n"
+		: : "r"(n), "r"(rows), "r"(out) : "memory");
+}
+
+/* the same for a vertex of two bones: the two bones' dot products blended by w before the clamp */
+static inline void vu0_fp_light2(const vec4 *n, const vec4 *rows0, const vec4 *rows1, const vec4 *w, vec4 *out)
+{
+	__asm__ __volatile__(
+		"lqc2 $vf1, 0(%0)\n" "lqc2 $vf9, 0(%3)\n"
+		"lqc2 $vf4, 0(%1)\n" "lqc2 $vf5, 16(%1)\n" "lqc2 $vf6, 32(%1)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddz.xyz $vf2, $vf6, $vf1z\n"
+		"lqc2 $vf4, 0(%2)\n" "lqc2 $vf5, 16(%2)\n" "lqc2 $vf6, 32(%2)\n"
+		"vmulax.xyz $ACC, $vf4, $vf1x\n" "vmadday.xyz $ACC, $vf5, $vf1y\n" "vmaddz.xyz $vf7, $vf6, $vf1z\n"
+		"vmulax.xyz $ACC, $vf2, $vf9x\n" "vmaddy.xyz $vf2, $vf7, $vf9y\n"
+		"vmax.xyz $vf2, $vf2, $vf0\n"
+		"vmulax.xyz $ACC, $vf29, $vf2x\n" "vmadday.xyz $ACC, $vf30, $vf2y\n" "vmaddaz.xyz $ACC, $vf31, $vf2z\n" "vmaddw.xyz $vf3, $vf28, $vf0w\n"
+		"vmul.xyz $vf3, $vf3, $vf27\n" "vftoi0.xyz $vf3, $vf3\n"
+		"sqc2 $vf3, 0(%4)\n"
+		: : "r"(n), "r"(rows0), "r"(rows1), "r"(w), "r"(out) : "memory");
+}
+
 /* the meshes' vertices as the VU reads them: 16-byte quads, the position's w 1, the normal's 0,
    and the skinning weights as (w, 1 - w) */
 static vec4 chief_p4[MAX_VERTS], chief_n4[MAX_VERTS], chief_w4[MAX_VERTS], rifle_p4[MAX_VERTS], rifle_n4[MAX_VERTS];
@@ -270,10 +373,24 @@ static void pack_vertices(void)
 #define MAP_CAMERA_HEIGHT 0.35f     /* ... this far above his centre */
 #define MAP_NEAR 0.15f
 #define MAP_FAR 500.f
+#ifdef FIRST_PERSON                 /* the walk ends at the Chief in the middle of the valley, and he faces the one who comes */
+#define CHIEF_X MAP_DEMO_CHIEF_X
+#define CHIEF_Y MAP_DEMO_CHIEF_Y
+#define CHIEF_Z MAP_DEMO_CHIEF_Z
+#define CHIEF_HEADING MAP_DEMO_CHIEF_HEADING
+#else
+#define CHIEF_X MAP_CHIEF_X
+#define CHIEF_Y MAP_CHIEF_Y
+#define CHIEF_Z MAP_CHIEF_Z
 #define CHIEF_HEADING 0.f           /* radians about the vertical */
+#endif
 #endif
 
 static float cam_pos[3], cam_right[3], cam_up[3], cam_fwd[3];
+#ifdef FIRST_PERSON
+static fp_player player;
+static fp_demo demo;
+#endif
 /* The frame buffers are SCREEN_WIDTH pixels wide and 448 high; the display stretches them over the same 640x448 picture
    (gsKit sets the horizontal magnification from the width), so at 512 each pixel is 1.25 times as wide as it is high
    and the horizontal focal length is 512 / 640 of the vertical one: the field of view and the aspect do not change.
@@ -1555,17 +1672,13 @@ static int lod_k(float density, float size, float scale)
 	return k < -2048 ? -2048 : (k > 2047 ? 2047 : k);
 }
 
-static void map_lod_setup(void)
+/* what depends on the lens (focal length): the constants VU0 projects with, the guard band VU0 culls with, and the mip levels the GS is told to pick */
+static void lens_dependent_setup(void)
 {
-	int t, d, i;
-
+	int t, d;
 #ifndef NO_VU0
-	for (i = 0; i < MAP_VERTS; i++)
-	{
-		map_p4[i].v[0] = map_pos[i * 3]; map_p4[i].v[1] = map_pos[i * 3 + 1]; map_p4[i].v[2] = map_pos[i * 3 + 2]; map_p4[i].v[3] = 1.f;
-		map_uvlm[i].v[0] = map_uv[i * 2]; map_uvlm[i].v[1] = map_uv[i * 2 + 1]; map_uvlm[i].v[2] = map_lmuv[i * 2]; map_uvlm[i].v[3] = map_lmuv[i * 2 + 1];
-		map_uv2[i].v[0] = map_uv[i * 2]; map_uv2[i].v[1] = map_uv[i * 2 + 1]; map_uv2[i].v[2] = map_uv[i * 2]; map_uv2[i].v[3] = map_uv[i * 2 + 1];
-	}
+	int i;
+
 	{
 		float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
 
@@ -1575,21 +1688,6 @@ static void map_lod_setup(void)
 		vu_band_x0 = clip_x_min + ox; vu_band_x1 = clip_x_max + ox; vu_band_y0 = clip_y_min + oy; vu_band_y1 = clip_y_max + oy;
 	}
 #endif
-	for (i = 0; i < MAP_VERTS; i++)
-		map_rgb32[i] = map_color[i * 4] | (map_color[i * 4 + 1] << 8) | (map_color[i * 4 + 2] << 16) | (0x80u << 24);
-	for (t = 0; t < MAP_TEXTURES; t++)
-		for (d = 0; d < 2; d++)
-			detail_scale[t][d] = map_detail_of[t].detail[d] < 0 ? 0.f : map_detail_of[t].scale[d];
-	for (t = 0; t < MAP_TEXTURES; t++) detail_scale[t][2] = map_detail_of[t].detail[2] < 0 ? 0.f : map_detail_of[t].scale[2];
-#ifndef NO_VU0
-	for (t = 0; t <= MAP_TEXTURES; t++)
-	{
-		detail_scale4[t].v[0] = detail_scale4[t].v[1] = detail_scale[t][0];
-		detail_scale4[t].v[2] = detail_scale4[t].v[3] = detail_scale[t][1];
-		bump_scale4[t].v[0] = bump_scale4[t].v[1] = bump_scale4[t].v[2] = bump_scale4[t].v[3] = detail_scale[t][2];
-	}
-#endif
-
 	for (t = 0; t < MAP_TEXTURES; t++)
 	{
 		lod_k_base[t] = lod_k(map_tex_density[t], sqrtf((float)map_textures[t].width * map_textures[t].height), 1.f);
@@ -1614,6 +1712,37 @@ static void map_lod_setup(void)
 			flat_scale[t][d] = g->pixels[size - 1] * 2u;      /* the palette's alpha is the grey, and 128 is 1 */
 		}
 	}
+}
+
+static void map_lod_setup(void)
+{
+	int t, d, i;
+
+#ifndef NO_VU0
+	for (i = 0; i < MAP_VERTS; i++)
+	{
+		map_p4[i].v[0] = map_pos[i * 3]; map_p4[i].v[1] = map_pos[i * 3 + 1]; map_p4[i].v[2] = map_pos[i * 3 + 2]; map_p4[i].v[3] = 1.f;
+		map_uvlm[i].v[0] = map_uv[i * 2]; map_uvlm[i].v[1] = map_uv[i * 2 + 1]; map_uvlm[i].v[2] = map_lmuv[i * 2]; map_uvlm[i].v[3] = map_lmuv[i * 2 + 1];
+		map_uv2[i].v[0] = map_uv[i * 2]; map_uv2[i].v[1] = map_uv[i * 2 + 1]; map_uv2[i].v[2] = map_uv[i * 2]; map_uv2[i].v[3] = map_uv[i * 2 + 1];
+	}
+#endif
+	for (i = 0; i < MAP_VERTS; i++)
+		map_rgb32[i] = map_color[i * 4] | (map_color[i * 4 + 1] << 8) | (map_color[i * 4 + 2] << 16) | (0x80u << 24);
+	for (t = 0; t < MAP_TEXTURES; t++)
+		for (d = 0; d < 2; d++)
+			detail_scale[t][d] = map_detail_of[t].detail[d] < 0 ? 0.f : map_detail_of[t].scale[d];
+	for (t = 0; t < MAP_TEXTURES; t++) detail_scale[t][2] = map_detail_of[t].detail[2] < 0 ? 0.f : map_detail_of[t].scale[2];
+#ifndef NO_VU0
+	for (t = 0; t <= MAP_TEXTURES; t++)
+	{
+		detail_scale4[t].v[0] = detail_scale4[t].v[1] = detail_scale[t][0];
+		detail_scale4[t].v[2] = detail_scale4[t].v[3] = detail_scale[t][1];
+		bump_scale4[t].v[0] = bump_scale4[t].v[1] = bump_scale4[t].v[2] = bump_scale4[t].v[3] = detail_scale[t][2];
+	}
+#endif
+
+	lens_dependent_setup();
+
 	/* scale_colour's lanes need every channel of a vertex that gets the scale at 128 or under (the exporter's hue); a span with a
 	   brighter one (scenery's lit colours reach 255, and some of it shares a base map with the BSP) keeps all its passes */
 	for (i = 0; i < MAP_SPANS; i++)
@@ -1631,6 +1760,20 @@ static void map_lod_setup(void)
 	}
 }
 
+#ifdef FIRST_PERSON
+static float lens_fov;
+
+/* the zoom changes the lens: the focal length, the clip planes (from it), what VU0 and the mip levels take from it */
+static void lens_set(GSGLOBAL *gs, float horizontal_fov)
+{
+	lens_fov = horizontal_fov;
+	focal = (1.f / tanf(fp_vertical_half_fov_degrees(horizontal_fov) * (float)M_PI / 180.f)) * gs->Height * 0.5f;
+	focal_x = focal * (float)gs->Width / 640.f;
+	clip_setup(gs);
+	lens_dependent_setup();
+}
+#endif
+
 /* the camera orbits the Chief; he stands where the exporter found the ground */
 static xform chief_placement;
 
@@ -1641,9 +1784,9 @@ static void placement_setup(void)
 	memset(&chief_placement, 0, sizeof(chief_placement));
 	chief_placement.r[0][0] = c; chief_placement.r[0][1] = s; chief_placement.r[1][0] = -s; chief_placement.r[1][1] = c; chief_placement.r[2][2] = 1.f;
 	apply_vector(&chief_placement, foot, rf);
-	chief_placement.t[0] = MAP_CHIEF_X - rf[0];
-	chief_placement.t[1] = MAP_CHIEF_Y - rf[1];
-	chief_placement.t[2] = MAP_CHIEF_Z - rf[2];
+	chief_placement.t[0] = CHIEF_X - rf[0];
+	chief_placement.t[1] = CHIEF_Y - rf[1];
+	chief_placement.t[2] = CHIEF_Z - rf[2];
 }
 #endif
 
@@ -2367,14 +2510,903 @@ static void camera_look(const float *eye, const float *target)
 	cam_up[2] = cam_right[0] * cam_fwd[1] - cam_right[1] * cam_fwd[0];
 }
 
+#if defined(FIRST_PERSON) && !defined(NO_MAP)
+/* The Chief's passes (VU1's, the EE's) project every vertex without clipping: behind the camera the divide mirrors him across the
+   screen, and close up or far to a side his vertices pass the GS's 2048-pixel limit and wrap. The orbit never let either happen;
+   a walking camera does, so he is drawn only where his bounding sphere is in front of the near plane and its projection stays
+   inside what the GS takes. Out of that view he is drawn through a view that sends every vertex to one point: only degenerate
+   triangles, which nothing draws (VU1 still runs its stream, which ends with the FINISH the map's queue waits for). */
+static int chief_in_view(const xform *view)
+{
+	const float r = MODEL_RADIUS * 1.15f;
+	const float centre[3] = { CHIEF_X, CHIEF_Y, CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
+	float v[3], depth, extent;
+
+	apply_point(view, centre, v);
+	depth = v[2] - r;                            /* the nearest any vertex can be */
+	if (depth < z_near + 0.05f) return 0;
+	extent = r / depth * focal;                  /* the most a vertex can be from the centre's projection, in pixels */
+	return fabsf(v[0]) / v[2] * focal_x + extent < 1800.f && fabsf(v[1]) / v[2] * focal + extent < 1800.f
+	    && fabsf(v[0]) / v[2] * focal_x - extent < screen_cx && fabsf(v[1]) / v[2] * focal - extent < screen_cy;
+}
+#endif
+
+#if defined(FIRST_PERSON) && !defined(NO_MAP)
+/* ---------- the first-person weapon: the arms and the gun ---------- */
+
+/* The models are skinned by the node matrices fp_view.c makes (in the camera's own space: x forward, y left, z up), lit by the three lights (turned into that
+   space), clipped against a near plane (the arms start behind the eye) and drawn after the map in a slice of the Z buffer in front of anything it holds
+   (the pill's radius keeps the map's own surfaces further than the slice's start). One pass, the base map only. */
+
+#define FP_MAX_VERTS 3600
+#define FP_EXTRA_VERTS 3000
+#define FP_NEAR 0.035f                    /* the near plane of the weapon's view, world units */
+#define FP_Z_NEAR 65500                   /* the Z values the weapon spans: 62000 (a unit away) to 65500 (at the near plane) */
+#define FP_Z_RANGE 3500.f
+#define FP_DISPLAY_Z_NUDGE 40             /* the weapon's display, over its panel: 0.01 of a unit toward the eye */
+
+static texture fp_tex[FPM_TEXTURES];
+static float fp_p[FP_MAX_VERTS + FP_EXTRA_VERTS][3], fp_t[FP_EXTRA_VERTS][2], fp_c[FP_EXTRA_VERTS][3];   /* (the extras: a vertex made by the clip has its colour and texture coordinate here) */
+static svert fp_sv[FP_MAX_VERTS + FP_EXTRA_VERTS];
+static unsigned short fp_tris[FP_MAX_VERTS * 2 * 3], fp_visible[FP_MAX_VERTS * 2 * 3];
+static unsigned char fp_needed[FP_MAX_VERTS + FP_EXTRA_VERTS];
+static u64 fp_uv_cache[2][FP_MAX_VERTS];  /* a model's vertices' texture coordinates as the GS takes them: hands, gun */
+static int fp_uv_weapon = -1;
+static float fp_light[3][3];              /* the lights' directions in the camera's space */
+
+static texture fp_atlas_tex;               /* the frames of the weapons' displays' numeric maps (the digits, the compass): 4-bit */
+
+static void fp_textures_setup(GSGLOBAL *gs)
+{
+	int i;
+
+	for (i = 0; i < FPM_TEXTURES; i++) texture_setup(gs, &fp_tex[i], FPM_TEXTURE_SIZE, GS_PSM_T8, fpm_textures[i].pixels, fpm_textures[i].clut);
+	texture_setup_psm(gs, &fp_atlas_tex, FPM_ATLAS_W, FPM_ATLAS_H, GS_PSM_T4, fpm_atlas_pixels, fpm_atlas_clut, 0);
+}
+
+#ifndef NO_VU0
+static void fp_vu0_setup(void);
+#endif
+
+/* a vertex's position in the camera's space to the weapon's view and the screen, in the weapon's slice of the Z buffer */
+static inline void fp_project(const float *p, svert *o)
+{
+	float inv = 1.f / p[0], d = p[0] > 1.f ? 1.f : p[0];
+	int iz = FP_Z_NEAR - (int)((d - FP_NEAR) * (FP_Z_RANGE / (1.f - FP_NEAR)));
+
+	o->x = screen_cx - p[1] * inv * focal_x;
+	o->y = screen_cy - p[2] * inv * focal;
+	o->xyz2 = GS_SETREG_XYZ2(to_gs_xy(o->x, gs_offset_x), to_gs_xy(o->y, gs_offset_y), iz);
+}
+
+/* the triangles of tri[0 .. n) as one REGLIST packet (draw_textured, for triangles already culled) */
+static void fp_draw_list(GSGLOBAL *gs, const texture *x, const svert *v, const unsigned short *vis, int n)
+{
+	int i, qwords = (n * 3 * 3 + 1) / 2;
+	u64 *p;
+
+	if (n == 0) return;
+	set_prim(gs, x, 1, -1);
+	p = gsKit_heap_alloc(gs, qwords, qwords * 16, GIF_AD);
+	*p++ = GIF_TAG(n * 3, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 3);
+	*p++ = (u64)GS_RGBAQ | ((u64)GS_UV << 4) | ((u64)GS_XYZ2 << 8);
+	for (i = 0; i < n * 3; i++)
+	{
+		const svert *s = &v[vis[i]];
+
+		*p++ = s->rgbaq; *p++ = s->uv; *p++ = s->xyz2;
+	}
+}
+
+/* one model: skinned, projected, its triangles clipped to the near plane and culled, the vertices they use lit, and drawn part by part */
+#ifdef NO_VU0
+static void fp_draw_model(GSGLOBAL *gs, const fpm_model *m, const short *graph_node, float t, u64 *uv_cache, int which)
+{
+	float skin[FPV_MAX_NODES][12], node_light[FPV_MAX_NODES][3][3];
+	int nodes = m->node_count < FPV_MAX_NODES ? m->node_count : FPV_MAX_NODES, n, v, l, c, part, count = m->vertices, extra = 0, any_near = 0;
+	const unsigned short *tris = m->triangle;
+	int part_first[FPM_MAX_PARTS], part_count[FPM_MAX_PARTS], tri_count = 0, visible_count = 0;
+
+	for (n = 0; n < nodes; n++)
+	{
+		const float *r = skin[n];
+
+		fpv_skin_matrix(&player.view, m, graph_node, n, t, skin[n]);
+		/* a light's direction in the node's own bind space: a normal n is lit by (n R) . L = n . (R L), so no vertex's normal is transformed */
+		for (l = 0; l < 3; l++)
+			for (c = 0; c < 3; c++) node_light[n][l][c] = r[c * 3] * fp_light[l][0] + r[c * 3 + 1] * fp_light[l][1] + r[c * 3 + 2] * fp_light[l][2];
+	}
+	for (v = 0; v < count; v++)
+	{
+		const float *p = &m->position[v * 3], *sa = skin[m->node[v * 2]];
+		float x = p[0] * sa[0] + p[1] * sa[3] + p[2] * sa[6] + sa[9], y = p[0] * sa[1] + p[1] * sa[4] + p[2] * sa[7] + sa[10], z = p[0] * sa[2] + p[1] * sa[5] + p[2] * sa[8] + sa[11];
+		unsigned wa = m->weight[v];
+
+		if (wa != 255)
+		{
+			const float *sb = skin[m->node[v * 2 + 1]];
+			float wf = wa * (1.f / 255.f), wb = 1.f - wf;
+
+			x = x * wf + (p[0] * sb[0] + p[1] * sb[3] + p[2] * sb[6] + sb[9]) * wb;
+			y = y * wf + (p[0] * sb[1] + p[1] * sb[4] + p[2] * sb[7] + sb[10]) * wb;
+			z = z * wf + (p[0] * sb[2] + p[1] * sb[5] + p[2] * sb[8] + sb[11]) * wb;
+		}
+		fp_p[v][0] = x; fp_p[v][1] = y; fp_p[v][2] = z;
+		if (x < FP_NEAR) any_near = 1;
+		fp_needed[v] = 0;
+	}
+	/* the triangles of each part: all of them if every vertex is beyond the near plane, else the ones across it cut */
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = m->parts[part].first_triangle, last = first + m->parts[part].triangle_count;
+
+		part_first[part] = tri_count; part_count[part] = 0;
+		if (!any_near) { part_first[part] = first; part_count[part] = last - first; continue; }
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2], idx[3] = { ia, ib, ic };
+			int inside = (fp_p[ia][0] >= FP_NEAR) + (fp_p[ib][0] >= FP_NEAR) + (fp_p[ic][0] >= FP_NEAR);
+
+			if (inside == 0) continue;
+			if (inside == 3)
+			{
+				fp_tris[tri_count * 3] = ia; fp_tris[tri_count * 3 + 1] = ib; fp_tris[tri_count * 3 + 2] = ic; tri_count++; part_count[part]++;
+			}
+			else
+			{
+				/* Sutherland-Hodgman against x = near: a polygon of three or four vertices, fanned */
+				unsigned short poly[4];
+				int pc = 0, e;
+
+				for (e = 0; e < 3; e++)
+				{
+					unsigned short a = idx[e], b = idx[(e + 1) % 3];
+					int a_in = fp_p[a][0] >= FP_NEAR, b_in = fp_p[b][0] >= FP_NEAR;
+
+					if (a_in) poly[pc++] = a;
+					if (a_in != b_in && extra < FP_EXTRA_VERTS)
+					{
+						float f = (FP_NEAR - fp_p[a][0]) / (fp_p[b][0] - fp_p[a][0]);
+						int nv = count + extra++, k;
+
+						for (k = 0; k < 3; k++) fp_p[nv][k] = fp_p[a][k] + (fp_p[b][k] - fp_p[a][k]) * f;
+						fp_p[nv][0] = FP_NEAR;
+						{
+							/* the new vertex's colour and texture coordinate are blended when it is lit and projected: it keeps its edge's two ends */
+							fp_t[nv - count][0] = (float)a; fp_t[nv - count][1] = (float)b; fp_c[nv - count][0] = f;
+						}
+						poly[pc++] = (unsigned short)nv;
+					}
+				}
+				for (e = 1; e + 1 < pc; e++)
+				{
+					fp_tris[tri_count * 3] = poly[0]; fp_tris[tri_count * 3 + 1] = poly[e]; fp_tris[tri_count * 3 + 2] = poly[e + 1]; tri_count++; part_count[part]++;
+				}
+			}
+		}
+	}
+	if (any_near) tris = fp_tris;
+	/* the vertices: projected; then the triangles facing the camera, and the vertices they use marked */
+	for (v = 0; v < count + extra; v++) if (fp_p[v][0] >= FP_NEAR * 0.5f) fp_project(fp_p[v], &fp_sv[v]);
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = part_first[part], last = first + part_count[part];
+
+		part_first[part] = visible_count / 3;
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2];
+			const svert *a = &fp_sv[ia], *b = &fp_sv[ib], *cc = &fp_sv[ic];
+			float area = (b->x - a->x) * (cc->y - a->y) - (cc->x - a->x) * (b->y - a->y);
+
+			if (area * CULL_SIGN <= 0.f) continue;
+			fp_visible[visible_count++] = ia; fp_visible[visible_count++] = ib; fp_visible[visible_count++] = ic;
+			fp_needed[ia] = fp_needed[ib] = fp_needed[ic] = 1;
+		}
+		part_count[part] = visible_count / 3 - part_first[part];
+	}
+	/* the lit colour and the texture coordinate of each vertex a triangle uses (a vertex the clip made takes its edge's ends' colours) */
+	for (v = 0; v < count; v++)
+	{
+		const float *nl_a, *nl_b;
+		float nx, ny, nz, sum[3], d;
+		int wa;
+
+		if (!fp_needed[v]) continue;
+		nx = m->normal[v * 3] * (1.f / 127.f); ny = m->normal[v * 3 + 1] * (1.f / 127.f); nz = m->normal[v * 3 + 2] * (1.f / 127.f);
+		wa = m->weight[v];
+		sum[0] = ambient[0]; sum[1] = ambient[1]; sum[2] = ambient[2];
+		nl_a = &node_light[m->node[v * 2]][0][0];
+		if (wa == 255)
+		{
+			d = nx * nl_a[0] + ny * nl_a[1] + nz * nl_a[2]; if (d > 0.f) { sum[0] += d * light_color[0][0]; sum[1] += d * light_color[0][1]; sum[2] += d * light_color[0][2]; }
+			d = nx * nl_a[3] + ny * nl_a[4] + nz * nl_a[5]; if (d > 0.f) { sum[0] += d * light_color[1][0]; sum[1] += d * light_color[1][1]; sum[2] += d * light_color[1][2]; }
+			d = nx * nl_a[6] + ny * nl_a[7] + nz * nl_a[8]; if (d > 0.f) { sum[0] += d * light_color[2][0]; sum[1] += d * light_color[2][1]; sum[2] += d * light_color[2][2]; }
+		}
+		else
+		{
+			float wf = wa * (1.f / 255.f), wb = 1.f - wf;
+
+			nl_b = &node_light[m->node[v * 2 + 1]][0][0];
+			for (l = 0; l < 3; l++)
+			{
+				d = (nx * nl_a[l * 3] + ny * nl_a[l * 3 + 1] + nz * nl_a[l * 3 + 2]) * wf + (nx * nl_b[l * 3] + ny * nl_b[l * 3 + 1] + nz * nl_b[l * 3 + 2]) * wb;
+				if (d > 0.f) { sum[0] += d * light_color[l][0]; sum[1] += d * light_color[l][1]; sum[2] += d * light_color[l][2]; }
+			}
+		}
+		fp_sv[v].rgbaq = diffuse_rgbaq(sum);
+		fp_sv[v].uv = uv_cache[v];
+	}
+	for (v = count; v < count + extra; v++)
+	{
+		int a = (int)fp_t[v - count][0], b = (int)fp_t[v - count][1], k;
+		float f = fp_c[v - count][0];
+		unsigned ca[4], cb[4];
+
+		if (!fp_needed[v]) continue;
+		/* a vertex of the cut: the colour and the coordinates of its edge's ends, by the same fraction */
+		for (k = 0; k < 3; k++) { ca[k] = (unsigned)((fp_sv[a].rgbaq >> (8 * k)) & 0xff); cb[k] = (unsigned)((fp_sv[b].rgbaq >> (8 * k)) & 0xff); }
+		fp_sv[v].rgbaq = GS_SETREG_RGBAQ((int)(ca[0] + (cb[0] - (int)ca[0]) * f), (int)(ca[1] + ((int)cb[1] - (int)ca[1]) * f), (int)(ca[2] + ((int)cb[2] - (int)ca[2]) * f), 0x80, 0x00);
+		{
+			int ua = (int)(uv_cache[a] & 0xffff), va = (int)((uv_cache[a] >> 16) & 0xffff), ub = (int)(uv_cache[b] & 0xffff), vb = (int)((uv_cache[b] >> 16) & 0xffff);
+
+			fp_sv[v].uv = GS_SETREG_UV((int)(ua + (ub - ua) * f), (int)(va + (vb - va) * f));
+		}
+	}
+	for (part = 0; part < m->part_count; part++)
+		if (part_count[part]) fp_draw_list(gs, &fp_tex[m->parts[part].texture], fp_sv, &fp_visible[part_first[part] * 3], part_count[part]);
+}
+
+#else
+/* The same on VU0 (macro mode): the vertices and the lights' dot products by the bones' matrices and the screen's constants in its registers. The vertices'
+   positions are kept in (y, z, x, 1) order, so that the projection's divide is by the z lane and its scale applies to the xy lanes. */
+static vec4 fp_p4[2][FP_MAX_VERTS], fp_n4[2][FP_MAX_VERTS], fp_w4[2][FP_MAX_VERTS];
+static vec4 fp_pv[FP_MAX_VERTS + FP_EXTRA_VERTS], fp_sf[FP_MAX_VERTS + FP_EXTRA_VERTS], fp_si[FP_MAX_VERTS + FP_EXTRA_VERTS];
+static mat4 fp_skin4[FPV_MAX_NODES];
+static vec4 fp_ltm[FPV_MAX_NODES][3];
+static vec4 fp_const[8] __attribute__((aligned(16)));
+static unsigned char fp_gamma[1280];
+
+static void fp_vu0_setup(void)
+{
+	int i;
+
+	for (i = 0; i < 1280; i++) fp_gamma[i] = to_half_byte(gamma_enc_in_range(i * (1.f / 512.f)));
+}
+
+/* a model's vertices as the aligned vectors VU0 reads, once for a weapon in hand */
+static void fp_vectors(const fpm_model *m, int which)
+{
+	int v;
+
+	for (v = 0; v < m->vertices; v++)
+	{
+		fp_p4[which][v].v[0] = m->position[v * 3]; fp_p4[which][v].v[1] = m->position[v * 3 + 1]; fp_p4[which][v].v[2] = m->position[v * 3 + 2]; fp_p4[which][v].v[3] = 1.f;
+		fp_n4[which][v].v[0] = m->normal[v * 3] * (1.f / 127.f); fp_n4[which][v].v[1] = m->normal[v * 3 + 1] * (1.f / 127.f); fp_n4[which][v].v[2] = m->normal[v * 3 + 2] * (1.f / 127.f); fp_n4[which][v].v[3] = 0.f;
+		fp_w4[which][v].v[0] = m->weight[v] * (1.f / 255.f); fp_w4[which][v].v[1] = 1.f - fp_w4[which][v].v[0]; fp_w4[which][v].v[2] = fp_w4[which][v].v[3] = 0.f;
+	}
+}
+
+static void fp_draw_model(GSGLOBAL *gs, const fpm_model *m, const short *graph_node, float t, u64 *uv_cache, int which)
+{
+	float skin[FPV_MAX_NODES][12];
+	int nodes = m->node_count < FPV_MAX_NODES ? m->node_count : FPV_MAX_NODES, n, v, l, c, part, count = m->vertices, extra = 0, any_near = 0;
+	const unsigned short *tris = m->triangle;
+	int part_first[FPM_MAX_PARTS], part_count[FPM_MAX_PARTS], tri_count = 0, visible_count = 0;
+	float ox = gs_offset_x / 16.f, oy = gs_offset_y / 16.f;
+	const vec4 *p4 = fp_p4[which], *n4 = fp_n4[which], *w4 = fp_w4[which];
+
+	/* the constants: screen scale and centre, the depth, the gamma index's scale, the ambient light and the lights' colours */
+	fp_const[0].v[0] = -focal_x; fp_const[0].v[1] = -focal; fp_const[0].v[2] = fp_const[0].v[3] = 0.f;
+	fp_const[1].v[0] = screen_cx + ox; fp_const[1].v[1] = screen_cy + oy; fp_const[1].v[2] = fp_const[1].v[3] = 0.f;
+	fp_const[2].v[1] = FP_Z_RANGE / (1.f - FP_NEAR); fp_const[2].v[2] = (float)FP_Z_NEAR + FP_NEAR * fp_const[2].v[1]; fp_const[2].v[0] = fp_const[2].v[3] = 0.f;
+	fp_const[3].v[0] = fp_const[3].v[1] = fp_const[3].v[2] = 512.f; fp_const[3].v[3] = 0.f;
+	for (c = 0; c < 3; c++) { fp_const[4].v[c] = ambient[c]; fp_const[5].v[c] = light_color[0][c]; fp_const[6].v[c] = light_color[1][c]; fp_const[7].v[c] = light_color[2][c]; }
+	fp_const[4].v[3] = fp_const[5].v[3] = fp_const[6].v[3] = fp_const[7].v[3] = 0.f;
+	vu0_fp_load_constants(fp_const);
+
+	for (n = 0; n < nodes; n++)
+	{
+		const float *r = skin[n];
+
+		fpv_skin_matrix(&player.view, m, graph_node, n, t, skin[n]);
+		/* the bone's matrix with its columns in the view's order (y, z, x) */
+		for (c = 0; c < 3; c++)
+		{
+			fp_skin4[n].row[c].v[0] = r[c * 3 + 1]; fp_skin4[n].row[c].v[1] = r[c * 3 + 2]; fp_skin4[n].row[c].v[2] = r[c * 3]; fp_skin4[n].row[c].v[3] = 0.f;
+		}
+		fp_skin4[n].row[3].v[0] = r[10]; fp_skin4[n].row[3].v[1] = r[11]; fp_skin4[n].row[3].v[2] = r[9]; fp_skin4[n].row[3].v[3] = 1.f;
+		/* a light in the bone's bind space: a normal n is lit by (n R) . L = n . (R L); the row k holds the three lights' k components */
+		for (l = 0; l < 3; l++)
+			for (c = 0; c < 3; c++) fp_ltm[n][c].v[l] = r[c * 3] * fp_light[l][0] + r[c * 3 + 1] * fp_light[l][1] + r[c * 3 + 2] * fp_light[l][2];
+		for (c = 0; c < 3; c++) fp_ltm[n][c].v[3] = 0.f;
+		/* (fp_ltm[n][k].v[l]: the light l's component k: the dot product of the bone's row k with the light) */
+	}
+	for (v = 0; v < count; v++)
+	{
+		int a = m->node[v * 2];
+
+		if (m->weight[v] == 255) vu0_fp_skin1(&fp_skin4[a], &p4[v], &fp_pv[v]);
+		else vu0_fp_skin2(&fp_skin4[a], &fp_skin4[m->node[v * 2 + 1]], &p4[v], &w4[v], &fp_pv[v]);
+		if (fp_pv[v].v[2] < FP_NEAR) any_near = 1;
+		fp_needed[v] = 0;
+	}
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = m->parts[part].first_triangle, last = first + m->parts[part].triangle_count;
+
+		part_first[part] = tri_count; part_count[part] = 0;
+		if (!any_near) { part_first[part] = first; part_count[part] = last - first; continue; }
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2], idx[3] = { ia, ib, ic };
+			int inside = (fp_pv[ia].v[2] >= FP_NEAR) + (fp_pv[ib].v[2] >= FP_NEAR) + (fp_pv[ic].v[2] >= FP_NEAR);
+
+			if (inside == 0) continue;
+			if (inside == 3)
+			{
+				fp_tris[tri_count * 3] = ia; fp_tris[tri_count * 3 + 1] = ib; fp_tris[tri_count * 3 + 2] = ic; tri_count++; part_count[part]++;
+			}
+			else
+			{
+				unsigned short poly[4];
+				int pc = 0, e;
+
+				for (e = 0; e < 3; e++)
+				{
+					unsigned short a = idx[e], b = idx[(e + 1) % 3];
+					int a_in = fp_pv[a].v[2] >= FP_NEAR, b_in = fp_pv[b].v[2] >= FP_NEAR;
+
+					if (a_in) poly[pc++] = a;
+					if (a_in != b_in && extra < FP_EXTRA_VERTS)
+					{
+						float f = (FP_NEAR - fp_pv[a].v[2]) / (fp_pv[b].v[2] - fp_pv[a].v[2]);
+						int nv = count + extra++, k;
+
+						for (k = 0; k < 2; k++) fp_pv[nv].v[k] = fp_pv[a].v[k] + (fp_pv[b].v[k] - fp_pv[a].v[k]) * f;
+						fp_pv[nv].v[2] = FP_NEAR; fp_pv[nv].v[3] = 1.f;
+						fp_t[nv - count][0] = (float)a; fp_t[nv - count][1] = (float)b; fp_c[nv - count][0] = f;
+						fp_needed[nv] = 0;
+						poly[pc++] = (unsigned short)nv;
+					}
+				}
+				for (e = 1; e + 1 < pc; e++)
+				{
+					fp_tris[tri_count * 3] = poly[0]; fp_tris[tri_count * 3 + 1] = poly[e]; fp_tris[tri_count * 3 + 2] = poly[e + 1]; tri_count++; part_count[part]++;
+				}
+			}
+		}
+	}
+	if (any_near) tris = fp_tris;
+	/* the screen: every vertex in front of the near plane's half, through VU0 */
+	for (v = 0; v < count + extra; v++)
+	{
+		if (fp_pv[v].v[2] < FP_NEAR * 0.5f) continue;
+		vu0_fp_project(&fp_pv[v], &fp_sf[v], &fp_si[v]);
+		{
+			int ix = *(int *)&fp_si[v].v[0], iy = *(int *)&fp_si[v].v[1], iz = *(int *)&fp_si[v].v[2];
+
+			fp_sv[v].x = fp_sf[v].v[0]; fp_sv[v].y = fp_sf[v].v[1];
+			fp_sv[v].xyz2 = GS_SETREG_XYZ2(ix < 0 ? 0 : (ix > 65535 ? 65535 : ix), iy < 0 ? 0 : (iy > 65535 ? 65535 : iy), iz);
+		}
+	}
+	for (part = 0; part < m->part_count; part++)
+	{
+		int i, first = part_first[part], last = first + part_count[part];
+
+		part_first[part] = visible_count / 3;
+		for (i = first; i < last; i++)
+		{
+			unsigned short ia = tris[i * 3], ib = tris[i * 3 + 1], ic = tris[i * 3 + 2];
+			const svert *a = &fp_sv[ia], *b = &fp_sv[ib], *cc = &fp_sv[ic];
+			float area = (b->x - a->x) * (cc->y - a->y) - (cc->x - a->x) * (b->y - a->y);
+
+			if (area * CULL_SIGN <= 0.f) continue;
+			fp_visible[visible_count++] = ia; fp_visible[visible_count++] = ib; fp_visible[visible_count++] = ic;
+			fp_needed[ia] = fp_needed[ib] = fp_needed[ic] = 1;
+		}
+		part_count[part] = visible_count / 3 - part_first[part];
+	}
+	/* the lit colour of each vertex a triangle uses: its gamma table indices from VU0, then the bytes */
+	for (v = 0; v < count; v++)
+	{
+		vec4 idx;
+		int i0, i1, i2;
+
+		if (!fp_needed[v]) continue;
+		if (m->weight[v] == 255) vu0_fp_light1(&n4[v], fp_ltm[m->node[v * 2]], &idx);
+		else vu0_fp_light2(&n4[v], fp_ltm[m->node[v * 2]], fp_ltm[m->node[v * 2 + 1]], &w4[v], &idx);
+		i0 = *(int *)&idx.v[0]; i1 = *(int *)&idx.v[1]; i2 = *(int *)&idx.v[2];
+		fp_sv[v].rgbaq = GS_SETREG_RGBAQ(fp_gamma[i0 > 1279 ? 1279 : i0], fp_gamma[i1 > 1279 ? 1279 : i1], fp_gamma[i2 > 1279 ? 1279 : i2], 0x80, 0x00);
+		fp_sv[v].uv = uv_cache[v];
+	}
+	for (v = count; v < count + extra; v++)
+	{
+		int a = (int)fp_t[v - count][0], b = (int)fp_t[v - count][1], k;
+		float f = fp_c[v - count][0];
+		int ca[3], cb[3];
+
+		if (!fp_needed[v]) continue;
+		for (k = 0; k < 3; k++) { ca[k] = (int)((fp_sv[a].rgbaq >> (8 * k)) & 0xff); cb[k] = (int)((fp_sv[b].rgbaq >> (8 * k)) & 0xff); }
+		fp_sv[v].rgbaq = GS_SETREG_RGBAQ((int)(ca[0] + (cb[0] - ca[0]) * f), (int)(ca[1] + (cb[1] - ca[1]) * f), (int)(ca[2] + (cb[2] - ca[2]) * f), 0x80, 0x00);
+		{
+			int ua = (int)(uv_cache[a] & 0xffff), va = (int)((uv_cache[a] >> 16) & 0xffff), ub = (int)(uv_cache[b] & 0xffff), vb = (int)((uv_cache[b] >> 16) & 0xffff);
+
+			fp_sv[v].uv = GS_SETREG_UV((int)(ua + (ub - ua) * f), (int)(va + (vb - va) * f));
+		}
+	}
+	for (part = 0; part < m->part_count; part++)
+		if (part_count[part]) fp_draw_list(gs, &fp_tex[m->parts[part].texture], fp_sv, &fp_visible[part_first[part] * 3], part_count[part]);
+}
+#endif
+
+
+/* ---------- the weapon's own display: the rifle's digits, compass and icons ---------- */
+
+/* The parts of the gun's model that are transparent chicago shaders (fpm_display_part): geometry on one node of the gun, drawn added to the picture with no light,
+   after the gun (rasterizer_xbox_transparent_geometry.c's numeric counters: the digits are frames of one map, chosen by the rounds loaded, fp_view.c). A few dozen
+   vertices, so on the EE; in front of the gun's own surfaces (the display sits a hair above its panel). */
+#define FP_DISPLAY_MAX_VERTS 32
+static svert fp_display_sv[FP_DISPLAY_MAX_VERTS];
+
+static void fp_draw_display(GSGLOBAL *gs, const fpm_weapon *fw, float t)
+{
+	const fpw_state *w = fpw_current_state(&player.weapons);
+	float compass;
+	int part, rounds, maximum;
+
+	if (!fw->display_count || !w || w->weapon != player.view.weapon) return;
+	rounds = w->magazines[0].rounds_loaded;
+	maximum = fpw_weapons[w->weapon].magazine_count ? fpw_weapons[w->weapon].magazines[0].loaded_maximum : 0;
+	compass = fpv_compass_value(player.yaw);
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 2, 2, 1, 0x80), 0);          /* Cs + Cd */
+	for (part = 0; part < fw->display_count; part++)
+	{
+		const fpm_display_part *d = &fw->display[part];
+		const texture *tex = d->texture >= 0 ? &fp_tex[d->texture] : &fp_atlas_tex;
+		float m[12], origin_u = 0.f, origin_v = 0.f;
+		int frame = fpv_display_frame(d, rounds, maximum, compass), v, behind = 0;
+
+		if (d->vertices > FP_DISPLAY_MAX_VERTS) continue;
+		fpv_skin_matrix(&player.view, fw->gun, fw->gun->graph_node, d->node, t, m);
+		if (frame >= 0)         /* a frame of the atlas: its corner in texels */
+		{
+			int slot = d->atlas_first + frame;
+
+			origin_u = (float)((slot % (FPM_ATLAS_W / FPM_ATLAS_FRAME)) * FPM_ATLAS_FRAME);
+			origin_v = (float)((slot / (FPM_ATLAS_W / FPM_ATLAS_FRAME)) * FPM_ATLAS_FRAME);
+		}
+		for (v = 0; v < d->vertices; v++)
+		{
+			const float *b = &d->position[v * 3], *uv = &d->uv[v * 2];
+			float p[3];
+			svert *o = &fp_display_sv[v];
+
+			p[0] = b[0] * m[0] + b[1] * m[3] + b[2] * m[6] + m[9];
+			p[1] = b[0] * m[1] + b[1] * m[4] + b[2] * m[7] + m[10];
+			p[2] = b[0] * m[2] + b[1] * m[5] + b[2] * m[8] + m[11];
+			if (p[0] < FP_NEAR * 2.f) { behind = 1; break; }
+			fp_project(p, o);
+			o->xyz2 = (o->xyz2 & 0xffffffffull) | ((u64)((int)((o->xyz2 >> 32) & 0xffffff) + FP_DISPLAY_Z_NUDGE) << 32);
+			o->rgbaq = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
+			if (frame >= 0)
+			{
+				float tu = uv[0] * FPM_ATLAS_FRAME, tv = uv[1] * FPM_ATLAS_FRAME;
+
+				tu = tu < 0.5f ? 0.5f : tu > FPM_ATLAS_FRAME - 0.5f ? FPM_ATLAS_FRAME - 0.5f : tu;      /* (not into the next frame) */
+				tv = tv < 0.5f ? 0.5f : tv > FPM_ATLAS_FRAME - 0.5f ? FPM_ATLAS_FRAME - 0.5f : tv;
+				o->uv = GS_SETREG_UV((int)((origin_u + tu) * 16.f), (int)((origin_v + tv) * 16.f));
+			}
+			else o->uv = uv_reg(uv[0], uv[1], (float)FPM_TEXTURE_SIZE);
+		}
+		if (behind) continue;
+		fp_draw_list(gs, tex, fp_display_sv, d->triangle, d->triangles);
+	}
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+}
+
+/* ---------- what the shots leave and show: impact marks, the muzzle flash, the ammunition and the crosshair ---------- */
+
+/* Small flat-coloured primitives, a few dozen a frame: the marks are quads on the surface a shot hit (FPW_EVENT_IMPACT: a scorch that stays a
+   few seconds and a flash in its first moments), the muzzle flash a star of triangles at the gun's tip in the weapon's own view, and the HUD
+   rectangles in the screen's corner (the magazine as a gauge and 7-segment digits, as the original's HUD has the rounds loaded and carried).
+   All are RGBAQ and XYZ2 pairs in a REGLIST packet, a blend each: no texture, no lighting. */
+#define FX_MAX_MARKS 32
+#define FX_MARK_SECONDS 5.f
+#define FX_MARK_FADE 1.5f
+#define FX_FLASH_SECONDS 0.12f
+#define FX_MAX_VERTS 1536
+
+typedef struct { u64 rgbaq, xyz2; } fx_vertex;
+static fx_vertex fx_v[FX_MAX_VERTS];
+static int fx_count;
+static struct { float position[3], normal[3], age; int active; } fx_marks[FX_MAX_MARKS];
+static int fx_next_mark, fx_shots;
+static float fx_muzzle_bind[3];                  /* the tip of the gun in hand, in its bind pose, and the node that carries it */
+static int fx_muzzle_node = -1, fx_muzzle_weapon = -1;
+
+/* what the player's weapons did this frame, and a frame's time: the marks come and age */
+static void fx_feed(const fp_player *p, float seconds)
+{
+	int e, i;
+
+	for (i = 0; i < FX_MAX_MARKS; i++) if (fx_marks[i].active) { fx_marks[i].age += seconds; if (fx_marks[i].age > FX_MARK_SECONDS) fx_marks[i].active = 0; }
+	for (e = 0; e < p->events.count; e++)
+	{
+		const fpw_event *ev = &p->events.list[e];
+
+		if (ev->type == FPW_EVENT_FIRE) fx_shots++;
+		else if ((ev->type == FPW_EVENT_IMPACT || ev->type == FPW_EVENT_MELEE_HIT) && ev->b != 2)      /* (a shot at the Chief leaves no mark: he does not take damage) */
+		{
+			int k;
+
+			fx_marks[fx_next_mark].active = 1; fx_marks[fx_next_mark].age = 0.f;
+			for (k = 0; k < 3; k++) { fx_marks[fx_next_mark].position[k] = ev->position[k]; fx_marks[fx_next_mark].normal[k] = ev->normal[k]; }
+			fx_next_mark = (fx_next_mark + 1) % FX_MAX_MARKS;
+		}
+	}
+}
+
+static inline void fx_vertex_at(float x, float y, int iz, int r, int g, int b, int a)
+{
+	if (fx_count >= FX_MAX_VERTS) return;
+	fx_v[fx_count].rgbaq = GS_SETREG_RGBAQ(r, g, b, a, 0x00);
+	fx_v[fx_count].xyz2 = GS_SETREG_XYZ2(to_gs_xy(x, gs_offset_x), to_gs_xy(y, gs_offset_y), iz);
+	fx_count++;
+}
+
+/* the vertices gathered go out as one packet in the blend given (an ALPHA register), then the list is empty */
+static void fx_flush(GSGLOBAL *gs, u64 alpha)
+{
+	u64 *q;
+	int i;
+
+	if (fx_count == 0) return;
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, alpha, 0);
+	set_prim(gs, NULL, 0, -1);
+	q = gsKit_heap_alloc(gs, fx_count, fx_count * 16, GIF_AD);
+	*q++ = GIF_TAG(fx_count, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, 2);
+	*q++ = (u64)GS_RGBAQ | ((u64)GS_XYZ2 << 4);
+	for (i = 0; i < fx_count; i++) { *q++ = fx_v[i].rgbaq; *q++ = fx_v[i].xyz2; }
+	fx_count = 0;
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+}
+
+/* a point of the world in the view's space (x right, y up, z forward) */
+static void fx_to_view(const float *w, float *v)
+{
+	float d[3] = { w[0] - cam_pos[0], w[1] - cam_pos[1], w[2] - cam_pos[2] };
+
+	v[0] = d[0] * cam_right[0] + d[1] * cam_right[1] + d[2] * cam_right[2];
+	v[1] = d[0] * cam_up[0] + d[1] * cam_up[1] + d[2] * cam_up[2];
+	v[2] = d[0] * cam_fwd[0] + d[1] * cam_fwd[1] + d[2] * cam_fwd[2];
+}
+
+/* a quad on a surface (centre c, its normal, half-size r) in the colour given, both triangles, nudged toward the camera by `lift` world units */
+static void fx_surface_quad(const float *c, const float *n, float r, float lift, int red, int green, int blue, int alpha)
+{
+	static const float corner[4][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
+	static const int order[6] = { 0, 1, 2, 0, 2, 3 };
+	float axis[3] = { 0.f, 0.f, 1.f }, t1[3], t2[3], len, v[4][3];
+	svert sv[4];
+	int i, k;
+
+	if (fabsf(n[2]) > 0.9f) { axis[0] = 1.f; axis[2] = 0.f; }
+	t1[0] = n[1] * axis[2] - n[2] * axis[1]; t1[1] = n[2] * axis[0] - n[0] * axis[2]; t1[2] = n[0] * axis[1] - n[1] * axis[0];
+	len = sqrtf(t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2]);
+	if (len < 1e-6f) return;
+	for (k = 0; k < 3; k++) t1[k] /= len;
+	t2[0] = n[1] * t1[2] - n[2] * t1[1]; t2[1] = n[2] * t1[0] - n[0] * t1[2]; t2[2] = n[0] * t1[1] - n[1] * t1[0];
+	for (i = 0; i < 4; i++)
+	{
+		float w[3];
+
+		for (k = 0; k < 3; k++) w[k] = c[k] + n[k] * 0.004f + (t1[k] * corner[i][0] + t2[k] * corner[i][1]) * r;
+		fx_to_view(w, v[i]);
+		if (v[i][2] < z_near + 0.1f) return;
+		project(v[i], lift, &sv[i]);
+	}
+	for (i = 0; i < 6; i++)
+	{
+		const svert *s = &sv[order[i]];
+
+		fx_vertex_at(s->x, s->y, (int)((s->xyz2 >> 32) & 0xffffff), red, green, blue, alpha);
+	}
+}
+
+/* the impact marks, in the world after the map and the Chief: a scorch (alpha blended) that fades out, and a flash (added) in its first moments */
+static void fx_draw_marks(GSGLOBAL *gs)
+{
+	int i, any = 0;
+
+	for (i = 0; i < FX_MAX_MARKS; i++) any |= fx_marks[i].active;
+	if (!any) return;
+	for (i = 0; i < FX_MAX_MARKS; i++)
+	{
+		float v[3], fade;
+
+		if (!fx_marks[i].active) continue;
+		fx_to_view(fx_marks[i].position, v);
+		if (v[2] < 0.3f || v[2] > 60.f) continue;
+		fade = fx_marks[i].age > FX_MARK_SECONDS - FX_MARK_FADE ? (FX_MARK_SECONDS - fx_marks[i].age) / FX_MARK_FADE : 1.f;
+		fx_surface_quad(fx_marks[i].position, fx_marks[i].normal, 0.05f + 0.006f * v[2], 0.02f + 0.004f * v[2], 24, 16, 10, (int)(0x70 * fade));
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0));                      /* (Cs - Cd) * As + Cd */
+	for (i = 0; i < FX_MAX_MARKS; i++)
+	{
+		float v[3], flash;
+
+		if (!fx_marks[i].active || fx_marks[i].age > FX_FLASH_SECONDS) continue;
+		fx_to_view(fx_marks[i].position, v);
+		if (v[2] < 0.3f || v[2] > 60.f) continue;
+		flash = 1.f - fx_marks[i].age / FX_FLASH_SECONDS;
+		fx_surface_quad(fx_marks[i].position, fx_marks[i].normal, (0.09f + 0.012f * v[2]) * (0.6f + 0.4f * flash), 0.03f + 0.004f * v[2], 255, 210, 120, (int)(0x70 * flash));
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 2, 0, 1, 0));                      /* Cs * As + Cd */
+}
+
+/* the muzzle flash: an eight-pointed star of triangles at the gun's tip, bright at its centre and clear at its points, added to the picture, as long as the
+   trigger's illumination (weapons.c: set to 1 by a shot, down by its recovery each tick) lasts */
+static void fx_draw_flash(GSGLOBAL *gs, const fpm_weapon *fw, float t)
+{
+	const fpw_state *w = fpw_current_state(&player.weapons);
+	float m[12], tip[3], intensity, radius, phase;
+	int i, k;
+
+	if (!w || w->weapon != player.view.weapon || w->triggers[0].illumination <= 0.f) return;
+	if (fx_muzzle_weapon != player.view.weapon)            /* the tip: where the gun's vertices reach furthest along its barrel (+x in the bind pose) */
+	{
+		const fpm_model *g = fw->gun;
+		float far_x = -1e9f, sum[3] = { 0.f, 0.f, 0.f };
+		int n = 0, v;
+
+		for (v = 0; v < g->vertices; v++) if (g->position[v * 3] > far_x) far_x = g->position[v * 3];
+		for (v = 0; v < g->vertices; v++)
+			if (g->position[v * 3] > far_x - 0.004f) { for (k = 0; k < 3; k++) sum[k] += g->position[v * 3 + k]; if (!n) fx_muzzle_node = g->node[v * 2]; n++; }
+		for (k = 0; k < 3; k++) fx_muzzle_bind[k] = sum[k] / (float)n;
+		fx_muzzle_weapon = player.view.weapon;
+	}
+	fpv_skin_matrix(&player.view, fw->gun, fw->gun->graph_node, fx_muzzle_node, t, m);
+	for (k = 0; k < 3; k++) tip[k] = fx_muzzle_bind[0] * m[k] + fx_muzzle_bind[1] * m[3 + k] + fx_muzzle_bind[2] * m[6 + k] + m[9 + k];
+	intensity = w->triggers[0].illumination;
+	radius = 0.05f * (0.7f + 0.3f * intensity);
+	phase = (float)fx_shots * 1.3f;
+	for (i = 0; i < 8; i++)
+	{
+		/* the triangle (centre, the point, the next valley): the points alternate long and short */
+		float a0 = phase + (float)i * (float)M_PI / 4.f, a1 = a0 + (float)M_PI / 4.f, r0 = (i & 1) ? 0.55f : 1.f, r1 = (i & 1) ? 1.f : 0.55f;
+		float p[3][3] = { { tip[0], tip[1], tip[2] }, { tip[0], tip[1] + cosf(a0) * radius * r0, tip[2] + sinf(a0) * radius * r0 },
+		                  { tip[0], tip[1] + cosf(a1) * radius * r1, tip[2] + sinf(a1) * radius * r1 } };
+		svert sv[3];
+
+		for (k = 0; k < 3; k++) { fp_project(p[k], &sv[k]); sv[k].xyz2 = (sv[k].xyz2 & 0xffffffffull) | ((u64)(FP_Z_NEAR - 100) << 32); }     /* in front of the whole gun */
+		fx_vertex_at(sv[0].x, sv[0].y, (int)((sv[0].xyz2 >> 32) & 0xffffff), 255, 235, 170, (int)(0x40 + 0x40 * intensity));
+		fx_vertex_at(sv[1].x, sv[1].y, (int)((sv[1].xyz2 >> 32) & 0xffffff), 255, 150, 50, 0);
+		fx_vertex_at(sv[2].x, sv[2].y, (int)((sv[2].xyz2 >> 32) & 0xffffff), 255, 150, 50, 0);
+	}
+	fx_flush(gs, GS_SETREG_ALPHA(0, 2, 0, 1, 0));
+}
+
+/* ---------- the HUD ---------- */
+
+/* The original's HUD (fp_hud.c, from the tags: the ammunition and grenade panels, the shield, health and motion sensor, the crosshair), drawn as quads of the baked images
+   (hud_assets.h): an image is a rectangle of an 8-bit texture with a palette (alpha / intensity), tinted by the vertex colour and blended; a meter's texture holds a shape and
+   a fill order in each texel and gets a palette for its value (fph_meter_palette), uploaded when it changes, so one quad draws a meter of any value. Placed in the
+   Xbox's 640 x 480 frame scaled to the 640 x 448 display (the buffer is 512 wide: x is scaled by 0.8). */
+static texture hud_tex[HUD_TEXTURES];
+static unsigned hud_meter_palette_sent[HUD_TEXTURES][256];        /* what a meter's palette in video memory holds: the GS-ordered palette */
+static int hud_meter_palette_known[HUD_TEXTURES];
+static fph_state hud_state;
+static fph_player hud_player;
+static float hud_tick_time;
+static int hud_ready, hud_dirty = 1, hud_quad_count;       /* the quads are remade after a tick of the HUD (30 Hz), not each frame */
+
+static void hud_textures_setup(GSGLOBAL *gs)
+{
+	static unsigned zero[256];
+	int i;
+
+	for (i = 0; i < HUD_TEXTURES; i++)
+	{
+		const hud_texture *t = &hud_textures[i];
+
+		texture_setup_psm(gs, &hud_tex[i], t->width, t->height, GS_PSM_T8, t->pixels, t->clut ? t->clut : zero, 0);
+	}
+	fph_init(&hud_state);
+	hud_ready = 1;
+}
+
+/* the player's state as the HUD reads it (weapons.c: weapon_build_weapon_interface_state) */
+static void hud_gather(void)
+{
+	const fpw_state *w = fpw_current_state(&player.weapons);
+	fph_player *h = &hud_player;
+
+	memset(h, 0, sizeof(*h));
+	h->weapon = -1; h->zoom_level = player.weapons.zoom_level; h->shield = 1.f; h->health = 1.f; h->grenade_count = 2;
+	h->primary_trigger = player.trigger > 0.f;
+	if (w)
+	{
+		const fpw_weapon *def = &fpw_weapons[w->weapon];
+		int m;
+
+		h->weapon = w->weapon < HUD_WEAPONS ? w->weapon : -1;
+		h->heat = w->heat; h->age = w->age; h->overheated = (w->flags & FPW_FLAG_OVERHEATED) != 0;
+		h->magazine_count = def->magazine_count < 2 ? def->magazine_count : 2;
+		for (m = 0; m < h->magazine_count; m++)
+		{
+			h->magazines[m].reloading = w->magazines[m].state == FPW_MAGAZINE_RELOADING || w->magazines[m].state == FPW_MAGAZINE_CHAMBERING;
+			h->magazines[m].can_fire = w->magazines[m].state == FPW_MAGAZINE_IDLE;
+			h->magazines[m].rounds_loaded = w->magazines[m].rounds_loaded;
+			h->magazines[m].rounds_loaded_maximum = def->magazines[m].loaded_maximum;
+			h->magazines[m].rounds_remaining = w->magazines[m].rounds_total;
+		}
+	}
+}
+
+/* the HUD's own 30 Hz tick (hud_update_weapon), for the seconds of a frame */
+static void hud_feed(float seconds)
+{
+	hud_tick_time += seconds;
+	hud_gather();
+	while (hud_tick_time >= 1.f / 30.f)
+	{
+		hud_tick_time -= 1.f / 30.f;
+		fph_tick(&hud_state, &hud_player);
+		hud_dirty = 1;
+	}
+}
+
+/* a meter's palette into video memory (when it changed): 256 colours as a 16 x 16 image of 32 bits at the texture's palette, in the order the GS reads them (the entry i is kept at
+   (i & 0xE7) | ((i & 8) << 1) | ((i & 0x10) >> 1)); its alpha is on the GS's scale, 0x80 for 1 */
+static void hud_send_meter_palette(GSGLOBAL *gs, int index, const unsigned *entries)
+{
+	unsigned ordered[256];
+	u64 *p;
+	int i;
+
+	for (i = 0; i < 256; i++)
+	{
+		unsigned e = entries[i];
+		unsigned a = (e >> 24) > 0 ? (((e >> 24) + 1) >> 1) : 0;
+
+		ordered[(i & 0xE7) | ((i & 8) << 1) | ((i & 0x10) >> 1)] = (e & 0xFFFFFF) | (a << 24);
+	}
+	if (hud_meter_palette_known[index] && !memcmp(ordered, hud_meter_palette_sent[index], sizeof(ordered))) return;
+	memcpy(hud_meter_palette_sent[index], ordered, sizeof(ordered));
+	hud_meter_palette_known[index] = 1;
+	/* an image transfer into the palette's place: BITBLTBUF, TRXPOS, TRXREG and TRXDIR, then the 64 quadwords of the image */
+	p = gsKit_heap_alloc(gs, 4 + 1 + 64, (4 + 1 + 64) * 16, GIF_AD);
+	*p++ = GIF_TAG(4, 0, 0, 0, GSKIT_GIF_FLG_PACKED, 1);
+	*p++ = GIF_AD;
+	*p++ = GS_SETREG_BITBLTBUF(0, 0, 0, hud_tex[index].t.VramClut / 256, 1, GS_PSM_CT32); *p++ = GS_BITBLTBUF;
+	*p++ = GS_SETREG_TRXPOS(0, 0, 0, 0, 0); *p++ = GS_TRXPOS;
+	*p++ = GS_SETREG_TRXREG(16, 16); *p++ = GS_TRXREG;
+	*p++ = 0; *p++ = GS_TRXDIR;
+	*p++ = GIF_TAG(64, 1, 0, 0, GSKIT_GIF_FLG_IMAGE, 0);
+	*p++ = 0;
+	memcpy(p, ordered, sizeof(ordered));
+}
+
+/* the quads of the HUD, in front of everything */
+static void hud_draw(GSGLOBAL *gs)
+{
+	static fph_quad quads[FPH_MAX_QUADS];
+	fph_window window = { 48, 34, 592, 414 };         /* the Xbox's title safe frame (48, 36 to 592, 444 of 480 lines) on the display's 448 */
+	const float sx = (float)gs->Width / 640.f;
+	int n, i, current_blend = -1;
+
+	if (!hud_ready) return;
+	if (hud_dirty) { hud_quad_count = fph_render(&hud_state, &hud_player, &window, quads, FPH_MAX_QUADS); hud_dirty = 0; }
+	n = hud_quad_count;
+	gs->PrimFogEnable = GS_SETTING_OFF;
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	for (i = 0; i < n; i++)
+	{
+		const fph_quad *q = &quads[i];
+		const hud_image *im = &hud_images[q->image];
+		const hud_texture *ht = &hud_textures[im->texture];
+		texture *tex = &hud_tex[im->texture];
+		svert sv[4];
+		static const unsigned short order[6] = { 0, 1, 2, 0, 2, 3 };
+		float xs[2] = { q->x0 * sx, q->x1 * sx }, ys[2] = { q->y0, q->y1 };
+		float us[2] = { (float)im->x0, (float)im->x1 }, vs[2] = { (float)im->y0, (float)im->y1 };
+		u64 rgbaq;
+		int k, blend = 0;
+
+		if (q->kind == FPH_METER)
+		{
+			static struct { int threshold, flash_threshold; unsigned gradient_min, gradient_max, flash, empty; float fade; int known; } last[HUD_TEXTURES];
+			typeof(last[0]) *l = &last[im->texture];
+
+			if (!l->known || l->threshold != q->threshold || l->flash_threshold != q->flash_threshold || l->gradient_min != q->gradient_min || l->gradient_max != q->gradient_max ||
+			    l->flash != q->flash || l->empty != q->empty || l->fade != q->fade)
+			{
+				unsigned palette[256];
+
+				l->threshold = q->threshold; l->flash_threshold = q->flash_threshold; l->gradient_min = q->gradient_min; l->gradient_max = q->gradient_max;
+				l->flash = q->flash; l->empty = q->empty; l->fade = q->fade; l->known = 1;
+				fph_meter_palette(q, palette);
+				hud_send_meter_palette(gs, im->texture, palette);
+			}
+			rgbaq = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
+		}
+		else
+			rgbaq = GS_SETREG_RGBAQ((q->color >> 17) & 0x7f, (q->color >> 9) & 0x7f, (q->color >> 1) & 0x7f, (q->color >> 25) & 0x7f, 0x00);        /* half the tint: the GS doubles it */
+		if (blend != current_blend)
+		{
+			gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);          /* blended: (Cs - Cd) * As + Cd */
+			current_blend = blend;
+		}
+		for (k = 0; k < 4; k++)
+		{
+			int cx = (k == 1 || k == 2), cy = (k >= 2);
+
+			sv[k].x = xs[cx]; sv[k].y = ys[cy];
+			sv[k].rgbaq = rgbaq;
+			sv[k].uv = GS_SETREG_UV((int)(us[cx] * 16.f), (int)(vs[cy] * 16.f));
+			sv[k].xyz2 = GS_SETREG_XYZ2(to_gs_xy(xs[cx], gs_offset_x), to_gs_xy(ys[cy], gs_offset_y), 65534);
+		}
+		(void)ht;
+		fp_draw_list(gs, tex, sv, order, 2);
+	}
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+}
+
+/* the arms and the gun, after the map and the Chief */
+static void draw_first_person(GSGLOBAL *gs)
+{
+	const fpm_weapon *fw;
+	float t = player.tick_time * 30.f;
+	int l;
+
+	if (player.view.weapon < 0 || !fpm_weapons[player.view.weapon].present) return;
+	if (player.weapons.zoom_level >= 0) return;         /* first_person_weapon_render_update: the weapon is visible only with no zoom */
+	fw = &fpm_weapons[player.view.weapon];
+	if (t > 1.f) t = 1.f;
+	/* the lights in the camera's space (x forward, y left, z up) */
+	for (l = 0; l < 3; l++)
+	{
+		fp_light[l][0] = light_dir[l][0] * cam_fwd[0] + light_dir[l][1] * cam_fwd[1] + light_dir[l][2] * cam_fwd[2];
+		fp_light[l][1] = -(light_dir[l][0] * cam_right[0] + light_dir[l][1] * cam_right[1] + light_dir[l][2] * cam_right[2]);
+		fp_light[l][2] = light_dir[l][0] * cam_up[0] + light_dir[l][1] * cam_up[1] + light_dir[l][2] * cam_up[2];
+	}
+	gs->PrimFogEnable = GS_SETTING_OFF;
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+	if (fp_uv_weapon != player.view.weapon)        /* the texture coordinates, once for a weapon in hand (the arms' are the same for all) */
+	{
+		int i;
+
+		fp_uv_weapon = player.view.weapon;
+		for (i = 0; i < fpm_hands.vertices; i++) fp_uv_cache[0][i] = uv_reg(fpm_hands.uv[i * 2], fpm_hands.uv[i * 2 + 1], (float)FPM_TEXTURE_SIZE);
+		for (i = 0; i < fw->gun->vertices; i++) fp_uv_cache[1][i] = uv_reg(fw->gun->uv[i * 2], fw->gun->uv[i * 2 + 1], (float)FPM_TEXTURE_SIZE);
+#ifndef NO_VU0
+		fp_vectors(&fpm_hands, 0); fp_vectors(fw->gun, 1);
+#endif
+	}
+	fp_draw_model(gs, &fpm_hands, fw->hands_graph_node, t, fp_uv_cache[0], 0);
+	fp_draw_model(gs, fw->gun, fw->gun->graph_node, t, fp_uv_cache[1], 1);
+	fp_draw_display(gs, fw, t);
+	fx_draw_flash(gs, fw, t);
+}
+#endif
+
 static void render_frame(GSGLOBAL *gs, float seconds)
 {
 	float theta = 2.f * (float)M_PI * seconds / ORBIT_SECONDS;
 	float cycles = seconds / CYCLE_SECONDS;
 	int frame = (int)(fmodf(cycles, 1.f) * ANIM_FRAMES) % ANIM_FRAMES;
 	float scroll = -ANIM_STRIDE * cycles;
-	float c = cosf(theta), s = sinf(theta);
+	float c __attribute__((unused)) = cosf(theta), s __attribute__((unused)) = sinf(theta);   /* the orbit's, not the player's */
 	xform orbit, view, world_to_view;
+#ifdef FIRST_PERSON
+	xform chief_view;               /* what the Chief is drawn through: the view, or one that sends him nowhere */
+#ifndef NO_VU0
+	mat4 chief_view4;
+#endif
+#endif
 #ifdef NO_MAP
 	xform bone, bone_world[NODE_COUNT], rifle_m, rifle_view, rifle_world;
 #endif
@@ -2387,14 +3419,23 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	int i, j;
 
 #ifndef NO_MAP
-	/* the Chief stands on the map and the camera circles him */
+	/* the Chief stands on the map; the camera is the player's eyes, or circles him */
 	orbit = chief_placement;
+#ifdef FIRST_PERSON
 	{
-		const float target[3] = { MAP_CHIEF_X, MAP_CHIEF_Y, MAP_CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
+		float eye[3], target[3];
+
+		fp_camera(&player, eye, target);
+		camera_look(eye, target);
+	}
+#else
+	{
+		const float target[3] = { CHIEF_X, CHIEF_Y, CHIEF_Z + (MODEL_CENTER_Z - MODEL_FLOOR_Z) };
 		const float eye[3] = { target[0] + MAP_CAMERA_DISTANCE * c, target[1] + MAP_CAMERA_DISTANCE * s, target[2] + MAP_CAMERA_HEIGHT };
 
 		camera_look(eye, target);
 	}
+#endif
 #else
 	/* orbit about the model's centre; row-vector rotation [[c,s,0],[-s,c,0],[0,0,1]] */
 	memset(&orbit, 0, sizeof(orbit));
@@ -2415,6 +3456,18 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	for (j = 0; j < 3; j++)
 		view.t[j] = -(cam_pos[0] * view.r[0][j] + cam_pos[1] * view.r[1][j] + cam_pos[2] * view.r[2][j]);
 	xform_then(&orbit, &view, &world_to_view);
+#ifdef FIRST_PERSON
+	chief_view = view;
+	if (!chief_in_view(&view)) { memset(&chief_view, 0, sizeof(chief_view)); chief_view.t[2] = 100.f; }
+#ifndef NO_VU0
+	mat4_from_xform(&chief_view4, &chief_view);
+#endif
+#define CHIEF_VIEW chief_view
+#define CHIEF_VIEW4 chief_view4
+#else
+#define CHIEF_VIEW view
+#define CHIEF_VIEW4 view4
+#endif
 
 #ifdef NO_MAP
 	for (i = 0; i < NODE_COUNT; i++)
@@ -2437,7 +3490,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 #ifndef NO_MAP
 	gsKit_clear(gs, GS_SETREG_RGBAQ(0x70, 0x9c, 0xd0, 0x00, 0x00));    /* the sky */
 #ifdef CHIEF_VU1
-	chief_vu1_kick(gs, frame, &view);                                  /* the clear goes out, then VU1 draws the Chief while the EE builds the map */
+	chief_vu1_kick(gs, frame, &CHIEF_VIEW);                                  /* the clear goes out, then VU1 draws the Chief while the EE builds the map */
 	PROF_MARK(P_VU1);
 #endif
 	PROF_MARK(P_SETUP);
@@ -2460,10 +3513,10 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 
 #ifndef NO_MAP
 #ifndef NO_VU0
-	vu0_load_view(&view4);
+	vu0_load_view(&CHIEF_VIEW4);
 	vu0_load_constants(vu_const);
 #endif
-	cached_pose(frame, &view);
+	cached_pose(frame, &CHIEF_VIEW);
 	PROF_MARK(P_RIFLE);
 #else
 #ifndef NO_VU0
@@ -2532,6 +3585,15 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	draw_textured(gs, &rifle_mask_tex, rifle_v, rifle_spec_rgbaq, NULL, rifle_tri, 0, RIFLE_TRIS);
 	gs->PrimAlphaEnable = GS_SETTING_OFF;
 #endif
+#ifdef FIRST_PERSON
+	PROF_MARK(P_SUBMIT);
+	fx_draw_marks(gs);
+	PROF_MARK(P_FX);
+	draw_first_person(gs);
+	PROF_MARK(P_WEAPON);
+	hud_draw(gs);
+	PROF_MARK(P_FX);
+#endif
 	PROF_MARK(P_SUBMIT);
 }
 
@@ -2544,7 +3606,7 @@ int main(void)
 	dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
 	dmaKit_chan_init(DMA_CHANNEL_GIF);
 
-	gs = gsKit_init_global_custom(6 * 1024 * 1024, 16 * 1024);   /* a frame of the map's packets (four passes of a third of its triangles) takes about 2.5 MB */
+	gs = gsKit_init_global_custom(5 * 1024 * 1024, 16 * 1024);   /* a frame of the map's packets (four passes of a third of its triangles) takes about 2.5 MB; the walk's views and the weapon, effects and HUD more. 5 and not 6: with the first-person scene's tables a 6 MB heap no longer fits the EE's 32 MB (malloc fails, and every packet writes through a NULL heap) */
 	gs->Mode = GS_MODE_NTSC;        /* 60 Hz whatever the console's region: the scene is timed for it */
 	gs->Height = 448;               /* gsKit sized the buffers for the console's own mode (PAL: 512 lines) before this */
 	gs->Width = SCREEN_WIDTH;       /* and its magnification (MagH = DW / Width - 1) follows the width */
@@ -2571,6 +3633,10 @@ int main(void)
 	texture_setup(gs, &mask_tex, MASK_TEX_SIZE, GS_PSM_T4, mask_tex_pixels, mask_tex_clut);
 	texture_setup(gs, &rifle_mask_tex, RIFLE_MASK_SIZE, GS_PSM_T4, rifle_mask_pixels, rifle_mask_clut);
 	texture_setup(gs, &display_tex, DISPLAY_TEX_SIZE, GS_PSM_T8, display_tex_pixels, display_tex_clut);
+#ifdef FIRST_PERSON
+	fp_textures_setup(gs);
+	hud_textures_setup(gs);
+#endif
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
 	{
@@ -2589,6 +3655,9 @@ int main(void)
 	if (vram_failed) { printf("VRAM: a texture did not fit; stopping\n"); return 1; }
 	tables_setup();
 #ifndef NO_VU0
+#ifdef FIRST_PERSON
+	fp_vu0_setup();
+#endif
 	pack_vertices();
 #endif
 #ifdef NO_MAP
@@ -2616,7 +3685,11 @@ int main(void)
 	screen_cx = gs->Width * 0.5f;
 	screen_cy = gs->Height * 0.5f;
 #ifndef NO_MAP
+#ifdef FIRST_PERSON
+	focal = (1.f / tanf(fp_vertical_half_fov_degrees(MAP_UNIT_FOV) * (float)M_PI / 180.f)) * gs->Height * 0.5f;      /* the original's 70 degrees across a 4:3 picture */
+#else
 	focal = (1.f / tanf(MAP_FOV_HALF_DEGREES * (float)M_PI / 180.f)) * gs->Height * 0.5f;
+#endif
 	z_near = MAP_NEAR;
 	z_far = MAP_FAR;
 #else
@@ -2629,6 +3702,9 @@ int main(void)
 	z_k2 = 65535.f * z_near / (z_far - z_near);
 #ifndef NO_MAP
 	clip_setup(gs);
+#ifdef FIRST_PERSON
+	lens_fov = MAP_UNIT_FOV;
+#endif
 	placement_setup();
 	pose_cache_build();
 #ifdef CHIEF_VU1
@@ -2639,6 +3715,32 @@ int main(void)
 
 	refresh = gs->Mode == GS_MODE_PAL ? 50.f : 60.f;
 	gsKit_add_vsync_handler(vsync_handler);
+#ifdef FIRST_PERSON
+	if (!pad_init()) printf("PAD: the pad modules did not load; no one can walk\n");
+	/* the demo walks from the front of the fortress to the Chief (2.4 units short of him, on the way from where it started), the
+	   pad takes the player over; -DFP_NO_DEMO stands the player at the start for the pad alone */
+	{
+		static const float via[][2] = { MAP_DEMO_VIA_POINTS };
+		float dx = MAP_DEMO_START_X - MAP_DEMO_CHIEF_X, dy = MAP_DEMO_START_Y - MAP_DEMO_CHIEF_Y, n = sqrtf(dx * dx + dy * dy);
+		float goal_x = MAP_DEMO_CHIEF_X + dx / n * 2.4f, goal_y = MAP_DEMO_CHIEF_Y + dy / n * 2.4f;
+
+		fp_init(&player, MAP_DEMO_START_X, MAP_DEMO_START_Y, atan2f(-dy, -dx));
+#ifndef FP_NO_DEMO
+#ifdef PROFILE
+		u32 plan_start = cpu_ticks();
+#endif
+		if (!fp_demo_init(&demo, &player, MAP_DEMO_START_X, MAP_DEMO_START_Y, goal_x, goal_y, MAP_DEMO_CHIEF_X, MAP_DEMO_CHIEF_Y, via, MAP_DEMO_VIA_COUNT))
+			printf("DEMO: no way from the start to the Chief; the pad alone walks\n");
+		else printf("DEMO: %d points, %.1f units\n", demo.count, demo.length);
+#ifdef PROFILE
+		printf("DEMO: planned in %u ticks (%.0f ms at 294.9 MHz)\n", cpu_ticks() - plan_start, (cpu_ticks() - plan_start) / 294912.f);
+#endif
+#else
+		(void)via; (void)goal_x; (void)goal_y;
+#endif
+	}
+	printf("PLAYER: starts at (%.2f, %.2f, %.3f)\n", player.pos[0], player.pos[1], player.pos[2]);
+#endif
 #ifdef MIP_AUDIT                     /* the whole orbit in half-degree steps, then the report */
 	{
 		int f, t, d;
@@ -2666,6 +3768,55 @@ int main(void)
 		static u32 window_start;
 
 		if (frames == 0) { vsync_at_start = vsync_count; window_start = cpu_ticks(); prof_last = window_start; }
+#endif
+#ifdef FIRST_PERSON
+		{
+			/* the pad is read once a frame, and the player moves by the time the last frame took */
+#ifdef PROFILE
+			static int walk_frame;
+			float now = walk_frame++ / refresh;
+#else
+			float now = vsync_count / refresh;
+#endif
+			static float last_now;
+			fp_pad user, pad;
+			float dt = now - last_now;
+
+			last_now = now;
+			if (dt < 0.f || dt > 0.1f) dt = 0.f;
+#ifdef FP_STILL_SECONDS            /* a still of the demo: it plays FP_STILL_SECONDS in 1/60 s steps (the events print with their times), then holds */
+			static int still_played;
+
+			if (!still_played)
+			{
+				static const fp_pad none;
+				int step, e;
+
+				still_played = 1;
+				for (step = 0; step < (int)(FP_STILL_SECONDS * 60.f); step++)
+				{
+					fp_demo_pad(&demo, &player, &none, &pad, 1.f / 60.f);
+					fp_update(&player, &pad, 1.f / 60.f);
+					fx_feed(&player, 1.f / 60.f);
+					hud_feed(1.f / 60.f);
+					for (e = 0; e < player.events.count; e++)
+						if (player.events.list[e].type != FPW_EVENT_FIRE && player.events.list[e].type != FPW_EVENT_IMPACT)
+							printf("STILL %6.2f s: event %d (%d, %d)\n", (step + 1) / 60.f, player.events.list[e].type, player.events.list[e].a, player.events.list[e].b);
+				}
+				printf("STILL: %.2f s, at (%.2f, %.2f, %.2f) yaw %.1f pitch %.1f, weapon %d (view %d), illumination %.2f, trigger state %d, rounds %d\n", FP_STILL_SECONDS, player.pos[0], player.pos[1], player.pos[2], player.yaw * 57.2958f, player.pitch * 57.2958f,
+				       player.weapons.slots[player.weapons.current].weapon, player.view.weapon, player.weapons.slots[player.weapons.current].triggers[0].illumination, player.weapons.slots[player.weapons.current].triggers[0].state, player.weapons.slots[player.weapons.current].magazines[0].rounds_loaded);
+			}
+			dt = 0.f;
+			user = (fp_pad){ 0 };
+#else
+			pad_read(&user, now);
+#endif
+			fp_demo_pad(&demo, &player, &user, &pad, dt);      /* the demo's pad until a hand touches the real one (a demo that could not plan passes it through) */
+			fp_update(&player, &pad, dt);
+			fx_feed(&player, dt);
+			hud_feed(dt);
+			if (fabsf(fp_field_of_view(&player) - lens_fov) > 1e-4f) lens_set(gs, fp_field_of_view(&player));      /* the weapon's zoom */
+		}
 #endif
 #ifdef DEBUG_SECONDS                 /* a still frame, for comparing builds */
 		render_frame(gs, DEBUG_SECONDS);

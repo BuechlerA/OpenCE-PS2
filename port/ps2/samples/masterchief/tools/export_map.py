@@ -26,6 +26,11 @@
   - the sky: the sky model's dome with its gradient as a 64x64 texture, drawn first around the camera (its vertices
     are transformed by the view without its translation: they come last, from MAP_SKY_FIRST_VERT on)
   - where the Chief stands: the ground height under MAP_CHIEF_X/Y
+  - for the first-person controller (src/fp_controller.c): the structure BSP's collision surfaces (triangulated) with its own tree
+    (nodes, planes and each leaf's surfaces), the collision models of the scenery placed in the world, and a capsule where the
+    Chief stands (the objects in a grid over the ground plane); and the numbers the original reads from
+    the tags: the globals' look function, look acceleration and the player's speeds, the player's biped (camera heights,
+    jump, slopes, collision size)
 
   HALO_MAP (default assets/maps/bloodgulch.map), CHIEF_X, CHIEF_Y, CHIEF_BELOW (the highest ground that
   counts) and LM_SCALE (default 1) in the environment. TEX4_MAX_ERR (default 0: off) sends each base map whose 16-colour,
@@ -37,7 +42,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from bsp import MapFile, load_bsp, oriented, ground_height, unswizzle
+from bsp import MapFile, load_bsp, load_collision_bsp, load_collision_model, oriented, ground_height, unswizzle
 from dxt import decode_dxt1
 
 MAP = os.environ.get('HALO_MAP', os.path.join(HERE, '..', '..', '..', '..', '..', 'assets', 'maps', 'bloodgulch.map'))
@@ -48,6 +53,11 @@ CHIEF_X = float(os.environ.get('CHIEF_X', 68.5))
 CHIEF_Y = float(os.environ.get('CHIEF_Y', -97.5))
 CHIEF_BELOW = float(os.environ.get('CHIEF_BELOW', 6.0))
 LM_SCALE = float(os.environ.get('LM_SCALE', 1.0))
+# the first-person demo walks from the front of the north fortress to the middle of the valley, between the two bases, where the Chief waits
+DEMO_START = (float(os.environ.get('DEMO_START_X', 68.5)), float(os.environ.get('DEMO_START_Y', -97.5)))
+DEMO_CHIEF = (float(os.environ.get('DEMO_CHIEF_X', 62.0)), float(os.environ.get('DEMO_CHIEF_Y', -121.0)))
+# the route bends over the rise east of the fortress and down into the valley (the player's planner joins these up on the ground)
+DEMO_VIA = [(78.0, -104.0), (82.0, -114.0), (72.0, -120.0)]
 TAG_BASE = 0x803a6000
 BASE_MAP = 0x88                    # offsets in a shader_environment: the base map's tag reference ...
 PRIMARY_DETAIL, SECONDARY_DETAIL, MICRO_DETAIL = 0xB4, 0xD4, 0xF8   # ... and each detail map's scale, then its reference
@@ -388,6 +398,156 @@ def flat_color(shader):
         if key in s: return c
     return (0.7, 0.7, 0.7)
 
+
+GRID_CELL = float(os.environ.get('COLLISION_CELL', 4.0))     # the objects' collision grid's cell, in world units
+SCENERY_BSP_AT, SCENERY_COLLISION_AT = 528, 112                 # the scenario's scenery block; a scenery tag's collision model reference
+
+def fan(polygons):
+    """a fan from each polygon's first vertex (collision surfaces are convex), the triangles of one polygon one after the other"""
+    tris, first = [], [0]
+    for p in polygons:
+        for k in range(1, len(p) - 1): tris.append([p[0], p[k], p[k + 1]])
+        first.append(len(tris))
+    return np.array(tris, np.int64).reshape(-1, 3), first
+
+def scenery_collision(mf):
+    """the scenario's scenery that has a collision model, placed in the world as the renderer places it: [(name, P, T)] (the first
+    permutation's BSP of the first node, wound counter-clockwise from the front of its surfaces)"""
+    td = mf.td
+    scenario = [a for (g, n), a in mf.tags.items() if g == b'scnr'][0] - TAG_BASE
+    def block(o):
+        c, a, _ = struct.unpack_from('<iII', td, scenario + o); return c, a - TAG_BASE
+    pc, pa = block(540)
+    palette = [mf.ref(pa + i * 48) for i in range(pc)]
+    count, ia = block(SCENERY_BSP_AT)
+    models, out = {}, []
+    for i in range(count):
+        o = ia + i * 72
+        t = struct.unpack_from('<h', td, o)[0]
+        if t < 0 or any(k in palette[t] for k in SCENERY_SKIP): continue
+        name = palette[t]
+        if name not in models:
+            coll = mf.ref(mf.tags[(b'scen', name)] - TAG_BASE + SCENERY_COLLISION_AT)
+            models[name] = None
+            if coll:
+                nodes = load_collision_model(mf, coll)
+                nodes = [d for i_, d in nodes if i_ == 0 and d['polygons']]       # the nodes of the scenery that carry surfaces are the first, at the origin
+                if nodes:
+                    T, _ = fan(nodes[0]['polygons']); models[name] = (nodes[0]['vertices'], T)
+        if not models[name]: continue
+        pos = np.array(struct.unpack_from('<3f', td, o + 8)); yaw, pitch, roll = struct.unpack_from('<3f', td, o + 20)
+        V, T = models[name]
+        out.append((name, V @ rotation(yaw, pitch, roll).T + pos, T))
+    return out
+
+def capsule_mesh(x, y, z, radius, height, segments=12, rings=3):
+    """an upright capsule (a pill standing on (x, y, z)) as vertices and outward-facing triangles"""
+    low, high = z + radius, z + height - radius
+    profile = [(radius * np.cos(a), low + radius * np.sin(a)) for a in np.linspace(-np.pi / 2, 0, rings + 1)[1:]]
+    profile += [(radius * np.cos(a), high + radius * np.sin(a)) for a in np.linspace(0, np.pi / 2, rings + 1)[:-1]]
+    V = [[x, y, z]]
+    for r, zz in profile:
+        for i in range(segments):
+            a = 2 * np.pi * i / segments; V.append([x + r * np.cos(a), y + r * np.sin(a), zz])
+    top = len(V); V.append([x, y, z + height])
+    T = []
+    for i in range(segments): T.append([0, 1 + i, 1 + (i + 1) % segments])
+    for j in range(len(profile) - 1):
+        for i in range(segments):
+            a, b = 1 + j * segments + i, 1 + j * segments + (i + 1) % segments
+            T += [[a, b, b + segments], [a, b + segments, a + segments]]
+    last = 1 + (len(profile) - 1) * segments
+    for i in range(segments): T.append([last + i, last + (i + 1) % segments, top])
+    V = np.array(V); T = np.array(T, np.int64)
+    for k, t in enumerate(T):                                       # outward: away from the axis
+        n = np.cross(V[t[1]] - V[t[0]], V[t[2]] - V[t[0]]); c = V[t].mean(0) - np.array([x, y, 0.5 * (low + high)])
+        if np.dot(n, c) < 0: T[k] = t[[0, 2, 1]]
+    return V, T
+
+def object_grid(P, T, first_tri):
+    """a uniform grid over x, y of the objects' triangles (ids from first_tri on)"""
+    lo = P.min(0)[:2] - 0.5; hi = P.max(0)[:2] + 0.5
+    w = int(np.ceil((hi[0] - lo[0]) / GRID_CELL)); h = int(np.ceil((hi[1] - lo[1]) / GRID_CELL))
+    cells = [[] for _ in range(w * h)]
+    for i, t in enumerate(T):
+        v = P[t][:, :2]
+        x0, y0 = np.floor((v.min(0) - lo) / GRID_CELL).astype(int); x1, y1 = np.floor((v.max(0) - lo) / GRID_CELL).astype(int)
+        for y in range(max(y0, 0), min(y1, h - 1) + 1):
+            for x in range(max(x0, 0), min(x1, w - 1) + 1): cells[y * w + x].append(first_tri + i)
+    start = np.zeros(w * h + 1, np.uint32); start[1:] = np.cumsum([len(c) for c in cells])
+    return lo, w, h, start, np.array([i for c in cells for i in c], np.uint16)
+
+def collision_data(mf, chief_xy, radius, height):
+    """what the controller collides with: the structure BSP's collision surfaces and its tree, then the objects (the scenery that has a
+    collision model, and a capsule where the Chief stands), as one vertex array and one triangle array (the structure's triangles first,
+    surface after surface)"""
+    c = load_collision_bsp(mf)
+    T, surf_first = fan(c['polygons'])
+    P = c['vertices']
+    zb = ground_height(P, T, chief_xy[0], chief_xy[1], CHIEF_BELOW)
+    assert zb is not None, 'no ground under the demo Chief'
+    objects = scenery_collision(mf)
+    print('collision BSP: %d surfaces (%d triangles, %d vertices), %d nodes, %d leaves, from %s to %s' % (len(c['polygons']), len(T), len(P), len(c['nodes']), len(c['leaves']),
+          np.round(P.min(0), 1), np.round(P.max(0), 1)))
+    print('collision of scenery: %d objects, %d triangles' % (len(objects), sum(len(t) for _n, _p, t in objects)))
+    objects.append(('the Chief', *capsule_mesh(chief_xy[0], chief_xy[1], zb, radius, height)))
+    chief_tris = len(objects[-1][2])
+    Ps, Ts, base = [P], [T], len(P)
+    obj_first = len(T)
+    for _name_, V, TT in objects:
+        Ps.append(V); Ts.append(TT + base); base += len(V)
+    allP = np.concatenate(Ps).astype(np.float32); allT = np.concatenate(Ts)
+    assert len(allT) < 65536 and len(allP) < 65536
+    obj_P = allP[len(P):]; obj_T = allT[obj_first:]
+    return dict(P=allP, T=allT.astype(np.uint16), struct_tris=obj_first, chief_tris=chief_tris, surf_first=np.array(surf_first, np.uint32), nodes=c['nodes'], planes=c['planes'], leaves=c['leaves'],
+                grid=object_grid(allP.astype(np.float64), obj_T, obj_first), chief_z=zb)
+
+# offsets in a biped tag (struct _biped_definition follows the object and unit definitions) and the globals' blocks, as the
+# source reads them (source/units/biped_definitions.h, source/game/game_globals.h); the values below were checked against
+# the Chief's tag (camera heights 0.62 and 0.35, jump 0.07, slopes 45 degrees)
+BIPED_SLOPE_AT, BIPED_JUMP_AT, BIPED_CAMERA_AT, BIPED_COLLISION_AT = 0x358, 0x3B4, 0x400, 0x424
+GLOBALS_PLAYER_CONTROL_AT, GLOBALS_PLAYER_INFORMATION_AT = 272, 368
+UNIT_FOV_AT = 0x1A0                     # the unit's camera_field_of_view (read at the biped tag; 70 degrees)
+
+def player_tunings(mf):
+    """the numbers the original's first-person controller reads from the tags, as (name, value) pairs"""
+    td = mf.td
+    g = mf.tags[(b'matg', 'globals\\globals')] - TAG_BASE
+    def block(at):
+        count, addr, _d = struct.unpack_from('<iII', td, g + at)
+        assert count == 1, 'the globals block at %d has %d elements' % (at, count)
+        return addr - TAG_BASE
+    pc = block(GLOBALS_PLAYER_CONTROL_AT)
+    accel_time, accel_scale, peg, pitch_rate, yaw_rate = struct.unpack_from('<5f', td, pc + 0x40)
+    fcount, faddr, _d = struct.unpack_from('<iII', td, pc + 0x74)
+    look = struct.unpack_from('<%df' % fcount, td, faddr - TAG_BASE)
+    pi = block(GLOBALS_PLAYER_INFORMATION_AT)
+    player_tag = mf.ref(pi)                                               # the player's biped
+    run_fwd, run_back, run_side, run_accel, sneak_fwd, sneak_back, sneak_side, sneak_accel, air_accel = struct.unpack_from('<9f', td, pi + 44 + 8)
+    b = mf.tags[(b'bipd', player_tag)] - TAG_BASE
+    max_slope, dh_falloff, dh_cutoff, dh_scale, uh_falloff, uh_cutoff, uh_scale = struct.unpack_from('<7f', td, b + BIPED_SLOPE_AT)
+    jump, = struct.unpack_from('<f', td, b + BIPED_JUMP_AT)
+    unit_fov, = struct.unpack_from('<f', td, b + UNIT_FOV_AT)
+    min_swap_ticks, min_autolevel_ticks = struct.unpack_from('<2h', td, pc + 0x6C)
+    autolevel_scale, = struct.unpack_from('<f', td, pc + 0x54)
+    pi_ = block(GLOBALS_PLAYER_INFORMATION_AT)
+    idle_lower, idle_upper, idle_skip = struct.unpack_from('<3f', td, pi_ + 0x9C)      # first_person_idle_time_lower_bound, upper bound and skip fraction
+    cam_stand, cam_crouch, crouch_time = struct.unpack_from('<3f', td, b + BIPED_CAMERA_AT)
+    height_stand, height_crouch, radius = struct.unpack_from('<3f', td, b + BIPED_COLLISION_AT)
+    assert 0.3 < cam_stand < 1 and 0 < cam_crouch < cam_stand and 0.05 < radius < 0.5 and 0.01 < jump < 0.2 and 0.5 < max_slope < 1.2, 'the biped tag is not laid out as expected'
+    print('player %s: eye %.2f (crouching %.2f), radius %.2f, jump %.3f/tick, slope %.0f deg; run %.2f/%.2f/%.2f, look rates %g/%g deg/s, look function %s'
+          % (player_tag, cam_stand, cam_crouch, radius, jump, np.degrees(max_slope), run_fwd, run_back, run_side, yaw_rate, pitch_rate, look))
+    return [('LOOK_ACCEL_TIME', accel_time), ('LOOK_ACCEL_SCALE', accel_scale), ('LOOK_PEG', peg), ('LOOK_PITCH_RATE', pitch_rate), ('LOOK_YAW_RATE', yaw_rate),
+            ('RUN_FORWARD', run_fwd), ('RUN_BACKWARD', run_back), ('RUN_SIDEWAYS', run_side), ('RUN_ACCEL', run_accel),
+            ('SNEAK_FORWARD', sneak_fwd), ('SNEAK_BACKWARD', sneak_back), ('SNEAK_SIDEWAYS', sneak_side), ('SNEAK_ACCEL', sneak_accel), ('AIR_ACCEL', air_accel),
+            ('MAX_SLOPE', max_slope), ('DOWNHILL_FALLOFF', dh_falloff), ('DOWNHILL_CUTOFF', dh_cutoff), ('DOWNHILL_SCALE', dh_scale),
+            ('UPHILL_FALLOFF', uh_falloff), ('UPHILL_CUTOFF', uh_cutoff), ('UPHILL_SCALE', uh_scale), ('JUMP_VELOCITY', jump),
+            ('CAMERA_STANDING', cam_stand), ('CAMERA_CROUCHING', cam_crouch), ('CROUCH_TIME', crouch_time),
+            ('HEIGHT_STANDING', height_stand), ('HEIGHT_CROUCHING', height_crouch), ('RADIUS', radius),
+            ('UNIT_FOV', unit_fov), ('MIN_AUTOLEVEL_TICKS', min_autolevel_ticks), ('LOOK_AUTOLEVEL_SCALE', autolevel_scale),
+            ('FP_IDLE_LOWER', idle_lower), ('FP_IDLE_UPPER', idle_upper), ('FP_IDLE_SKIP', idle_skip)], look
+
+
 def main():
     mf = MapFile(MAP)
     mats = load_bsp(mf)
@@ -643,6 +803,26 @@ def main():
     c.write(cstr_array('map_chunks', bounds, 'float', 16))
     c.write(cstr_array('map_lm_order', lm_order, 'int', 16))
     c.write(cstr_array('map_gray_clut', flat(gs_gray_clut()), 'unsigned int', 64))
+    tunings, look_function = player_tunings(mf)
+    pill = dict(tunings)
+    col = collision_data(mf, DEMO_CHIEF, pill['RADIUS'], pill['HEIGHT_STANDING'])
+    demo_z = col['chief_z']
+    demo_heading = float(np.arctan2(DEMO_START[1] - DEMO_CHIEF[1], DEMO_START[0] - DEMO_CHIEF[0]))   # he faces the one who walks up to him
+    print('demo: from (%.1f, %.1f) to the Chief at (%.1f, %.1f, %.2f), facing %.0f degrees' % (DEMO_START[0], DEMO_START[1], DEMO_CHIEF[0], DEMO_CHIEF[1], demo_z, np.degrees(demo_heading)))
+    obj_lo, obj_w, obj_h, obj_start, obj_items = col['grid']
+    leaf_start = np.zeros(len(col['leaves']) + 1, np.uint32); leaf_start[1:] = np.cumsum([len(l) for l in col['leaves']])
+    leaf_items = np.array([i for l in col['leaves'] for i in l], np.uint16)
+    print('collision: %d triangles in all, a tree of %d nodes and %d leaves (%d surface entries), objects in a %dx%d grid of %g-unit cells (%d entries)' % (len(col['T']), len(col['nodes']), len(col['leaves']), len(leaf_items), obj_w, obj_h, GRID_CELL, len(obj_items)))
+    c.write(cstr_array('map_col_pos', flat(col['P']), 'float', 16))
+    c.write(cstr_array('map_col_tri', flat(col['T']), 'unsigned short', 16))
+    c.write(cstr_array('map_col_surface_tri', col['surf_first'], 'unsigned int', 16))
+    c.write(cstr_array('map_col_nodes', flat(col['nodes'].astype(np.int64) & 0xFFFFFFFF), 'unsigned int', 16))
+    c.write(cstr_array('map_col_planes', flat(col['planes']), 'float', 16))
+    c.write(cstr_array('map_col_leaf_start', leaf_start, 'unsigned int', 16))
+    c.write(cstr_array('map_col_leaf_items', leaf_items, 'unsigned short', 16))
+    c.write(cstr_array('map_obj_start', obj_start, 'unsigned int', 16))
+    c.write(cstr_array('map_obj_items', obj_items, 'unsigned short', 16))
+    c.write(cstr_array('map_look_function', look_function, 'float', 16))
     for i, (d, _levels) in enumerate(details):
         c.write(cstr_array('map_detail%d_pixels' % i, flat(d), 'unsigned char', 64))
     for i, pg in enumerate(pages):
@@ -717,9 +897,41 @@ extern const map_reflection_data map_reflection_of[];
 extern const signed char map_normals[];       /* x, y, z (x 127) and a pad, for each vertex */
 extern const unsigned char *const map_cubes[];   /* the reflected cube maps: six faces of 16x16 RGB */
 extern const map_texture_data map_textures[];
-#endif
 ''' % (len(P), len(T), len(textures), nspans, len(lm_order), sky_first_vertex, sky_chunk, nchunks, len(batches) // 3, len(details), len(pages), CHIEF_X, CHIEF_Y, float(zb),
        fog[0][0], fog[0][1], fog[0][2], float(fog[1]), float(fog[2]), float(fog[3])))
+    h.write('''/* what the controller collides with: triangles (outward-facing counter-clockwise), the structure BSP's first, surface after surface, then the
+   objects' (the scenery with a collision model, placed, and a capsule for the Chief). The structure BSP's own tree finds the structure's:
+   a node is a plane (an index into map_col_planes) and two children (a node, or a leaf with the top bit set; all ones: none), a leaf the
+   surfaces on its boundary; the objects are found through a grid over x, y */
+#define MAP_COL_TRIS %d
+#define MAP_COL_STRUCTURE_TRIS %d
+#define MAP_COL_CHIEF_TRIS %d                       /* the Chief's capsule is the last of the triangles */
+#define MAP_COL_SURFACES %d
+#define MAP_COL_NODES %d
+#define MAP_COL_LEAVES %d
+#define MAP_OBJ_X0 %rf
+#define MAP_OBJ_Y0 %rf
+#define MAP_OBJ_CELL %rf
+#define MAP_OBJ_W %d
+#define MAP_OBJ_H %d
+extern const float map_col_pos[];
+extern const unsigned short map_col_tri[];
+extern const unsigned int map_col_surface_tri[];   /* MAP_COL_SURFACES + 1: the first triangle of each surface (a polygon's fan) */
+extern const unsigned int map_col_nodes[];         /* plane, back child, front child; MAP_COL_NODES times */
+extern const float map_col_planes[];               /* normal and offset */
+extern const unsigned int map_col_leaf_start[];    /* MAP_COL_LEAVES + 1: where each leaf's surfaces begin in map_col_leaf_items */
+extern const unsigned short map_col_leaf_items[];
+extern const unsigned int map_obj_start[];         /* MAP_OBJ_W * MAP_OBJ_H + 1: where each cell's triangles begin in map_obj_items */
+extern const unsigned short map_obj_items[];
+/* what the original's first-person controller reads from the tags (the globals and the player's biped): seconds, degrees a second, world units, radians, units a tick */
+#define MAP_LOOK_FUNCTION_COUNT %d
+extern const float map_look_function[];
+''' % (len(col['T']), col['struct_tris'], col['chief_tris'], len(col['surf_first']) - 1, len(col['nodes']), len(col['leaves']), float(obj_lo[0]), float(obj_lo[1]), GRID_CELL, obj_w, obj_h, len(look_function)))
+    for name, value in tunings: h.write('#define MAP_%s %rf\n' % (name, float(value)))
+    h.write('/* the first-person demo: where the walk starts (feet), the points it bends round, and where the Chief stands at its end (feet) and faces */\n#define MAP_DEMO_VIA_COUNT %d\n#define MAP_DEMO_VIA_POINTS %s\n' % (len(DEMO_VIA), ', '.join('{ %rf, %rf }' % v for v in DEMO_VIA)))
+    for name, value in (('DEMO_START_X', DEMO_START[0]), ('DEMO_START_Y', DEMO_START[1]), ('DEMO_CHIEF_X', DEMO_CHIEF[0]), ('DEMO_CHIEF_Y', DEMO_CHIEF[1]), ('DEMO_CHIEF_Z', demo_z), ('DEMO_CHIEF_HEADING', demo_heading)):
+        h.write('#define MAP_%s %rf\n' % (name, float(value)))
+    h.write('#endif\n')
     h.close()
     print('wrote', os.path.abspath(OUT))
 
