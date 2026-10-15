@@ -10,3 +10,5 @@ src/weapon_assets.c
 src/weapon_assets.h
 src/fpm_assets.c
 src/fpm_assets.h
+src/hud_assets.c
+src/hud_assets.h

@@ -41,6 +41,7 @@
 #ifdef FIRST_PERSON
 #include "fp_controller.h"
 #include "fp_demo.h"
+#include "fp_hud.h"
 #include "fpm_assets.h"
 #include "pad.h"
 #endif
@@ -2923,73 +2924,170 @@ static void fx_draw_flash(GSGLOBAL *gs, const fpm_weapon *fw, float t)
 	fx_flush(gs, GS_SETREG_ALPHA(0, 2, 0, 1, 0));
 }
 
-/* a rectangle on the screen's glass, in buffer pixels, in front of everything */
-static void fx_rect(float x0, float y0, float x1, float y1, int red, int green, int blue, int alpha)
+/* ---------- the HUD ---------- */
+
+/* The original's HUD (fp_hud.c, from the tags: the ammunition and grenade panels, the shield, health and motion sensor, the crosshair), drawn as quads of the baked images
+   (hud_assets.h): an image is a rectangle of an 8-bit texture with a palette (alpha / intensity), tinted by the vertex colour and blended; a meter's texture holds a shape and
+   a fill order in each texel and gets a palette for its value (fph_meter_palette), uploaded when it changes, so one quad draws a meter of any value. Placed in the
+   Xbox's 640 x 480 frame scaled to the 640 x 448 display (the buffer is 512 wide: x is scaled by 0.8). */
+static texture hud_tex[HUD_TEXTURES];
+static unsigned hud_meter_palette_sent[HUD_TEXTURES][256];        /* what a meter's palette in video memory holds: the GS-ordered palette */
+static int hud_meter_palette_known[HUD_TEXTURES];
+static fph_state hud_state;
+static fph_player hud_player;
+static float hud_tick_time;
+static int hud_ready, hud_dirty = 1, hud_quad_count;       /* the quads are remade after a tick of the HUD (30 Hz), not each frame */
+
+static void hud_textures_setup(GSGLOBAL *gs)
 {
-	static const int order[6][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 0 }, { 1, 1 }, { 0, 1 } };
+	static unsigned zero[256];
 	int i;
 
-	for (i = 0; i < 6; i++) fx_vertex_at(order[i][0] ? x1 : x0, order[i][1] ? y1 : y0, 65534, red, green, blue, alpha);
-}
-
-/* a decimal digit as seven segments (a, b, c, d, e, f, g: top, upper right, lower right, bottom, lower left, upper left, middle), w x h with a stroke s */
-static void fx_digit(int digit, float x, float y, float w, float h, float s, int red, int green, int blue, int alpha)
-{
-	static const unsigned char segments[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
-	unsigned m = segments[digit];
-
-	if (m & 1) fx_rect(x, y, x + w, y + s, red, green, blue, alpha);
-	if (m & 2) fx_rect(x + w - s, y, x + w, y + h * 0.5f + s * 0.5f, red, green, blue, alpha);
-	if (m & 4) fx_rect(x + w - s, y + h * 0.5f - s * 0.5f, x + w, y + h, red, green, blue, alpha);
-	if (m & 8) fx_rect(x, y + h - s, x + w, y + h, red, green, blue, alpha);
-	if (m & 16) fx_rect(x, y + h * 0.5f - s * 0.5f, x + s, y + h, red, green, blue, alpha);
-	if (m & 32) fx_rect(x, y, x + s, y + h * 0.5f + s * 0.5f, red, green, blue, alpha);
-	if (m & 64) fx_rect(x, y + h * 0.5f - s * 0.5f, x + w, y + h * 0.5f + s * 0.5f, red, green, blue, alpha);
-}
-
-/* a number right-aligned to x (at least one digit); returns its left edge */
-static float fx_number(int value, float right, float y, float w, float h, float s, int red, int green, int blue, int alpha)
-{
-	char text[8];
-	int n = 0, i;
-	float x = right;
-
-	if (value < 0) value = 0;
-	do { text[n++] = (char)(value % 10); value /= 10; } while (value && n < 7);
-	for (i = 0; i < n; i++)
+	for (i = 0; i < HUD_TEXTURES; i++)
 	{
-		x -= w;
-		fx_digit(text[i], x, y, w, h, s, red, green, blue, alpha);
-		x -= w * 0.4f;
+		const hud_texture *t = &hud_textures[i];
+
+		texture_setup_psm(gs, &hud_tex[i], t->width, t->height, GS_PSM_T8, t->pixels, t->clut ? t->clut : zero, 0);
 	}
-	return x + w * 0.4f;
+	fph_init(&hud_state);
+	hud_ready = 1;
 }
 
-/* the HUD: a crosshair, and at the screen's lower left the rounds loaded (large) over the rounds carried, with the magazine as a gauge (the original's HUD shows the
-   same numbers; its zoomed scope overlay is not drawn) */
-static void fx_draw_hud(GSGLOBAL *gs)
+/* the player's state as the HUD reads it (weapons.c: weapon_build_weapon_interface_state) */
+static void hud_gather(void)
 {
 	const fpw_state *w = fpw_current_state(&player.weapons);
-	const fpw_weapon *def = fpw_current(&player.weapons);
-	float right = 36.f + 96.f, bottom = gs->Height - 34.f;        /* (the left corner: the gun holds the right one) */
+	fph_player *h = &hud_player;
 
-	/* the crosshair: four ticks around the aim */
-	fx_rect(screen_cx - 11.f, screen_cy - 1.f, screen_cx - 5.f, screen_cy + 1.f, 170, 225, 255, 0x70);
-	fx_rect(screen_cx + 5.f, screen_cy - 1.f, screen_cx + 11.f, screen_cy + 1.f, 170, 225, 255, 0x70);
-	fx_rect(screen_cx - 1.f, screen_cy - 11.f, screen_cx + 1.f, screen_cy - 5.f, 170, 225, 255, 0x70);
-	fx_rect(screen_cx - 1.f, screen_cy + 5.f, screen_cx + 1.f, screen_cy + 11.f, 170, 225, 255, 0x70);
-	if (w && def && def->magazine_count > 0)
+	memset(h, 0, sizeof(*h));
+	h->weapon = -1; h->zoom_level = player.weapons.zoom_level; h->shield = 1.f; h->health = 1.f; h->grenade_count = 2;
+	h->primary_trigger = player.trigger > 0.f;
+	if (w)
 	{
-		const fpw_magazine_state *mag = &w->magazines[0];
-		int maximum = def->magazines[0].loaded_maximum, low = mag->rounds_loaded * 5 <= maximum, red = low ? 255 : 120, green = low ? 120 : 215, blue = low ? 60 : 255;
-		float fraction = maximum > 0 ? (float)mag->rounds_loaded / (float)maximum : 0.f, gauge_left = right - 96.f;
+		const fpw_weapon *def = &fpw_weapons[w->weapon];
+		int m;
 
-		fx_rect(gauge_left - 2.f, bottom - 50.f, right + 2.f, bottom - 42.f, 0, 20, 40, 0x50);           /* the magazine: a frame and what is in it */
-		fx_rect(gauge_left, bottom - 48.f, gauge_left + 96.f * fraction, bottom - 44.f, red, green, blue, 0x90);
-		fx_number(mag->rounds_loaded, right, bottom - 36.f, 13.f, 24.f, 3.f, red, green, blue, 0x90);
-		fx_number(mag->rounds_total, right, bottom - 6.f, 7.f, 12.f, 2.f, 120, 215, 255, 0x70);
+		h->weapon = w->weapon < HUD_WEAPONS ? w->weapon : -1;
+		h->heat = w->heat; h->age = w->age; h->overheated = (w->flags & FPW_FLAG_OVERHEATED) != 0;
+		h->magazine_count = def->magazine_count < 2 ? def->magazine_count : 2;
+		for (m = 0; m < h->magazine_count; m++)
+		{
+			h->magazines[m].reloading = w->magazines[m].state == FPW_MAGAZINE_RELOADING || w->magazines[m].state == FPW_MAGAZINE_CHAMBERING;
+			h->magazines[m].can_fire = w->magazines[m].state == FPW_MAGAZINE_IDLE;
+			h->magazines[m].rounds_loaded = w->magazines[m].rounds_loaded;
+			h->magazines[m].rounds_loaded_maximum = def->magazines[m].loaded_maximum;
+			h->magazines[m].rounds_remaining = w->magazines[m].rounds_total;
+		}
 	}
-	fx_flush(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0));
+}
+
+/* the HUD's own 30 Hz tick (hud_update_weapon), for the seconds of a frame */
+static void hud_feed(float seconds)
+{
+	hud_tick_time += seconds;
+	hud_gather();
+	while (hud_tick_time >= 1.f / 30.f)
+	{
+		hud_tick_time -= 1.f / 30.f;
+		fph_tick(&hud_state, &hud_player);
+		hud_dirty = 1;
+	}
+}
+
+/* a meter's palette into video memory (when it changed): 256 colours as a 16 x 16 image of 32 bits at the texture's palette, in the order the GS reads them (the entry i is kept at
+   (i & 0xE7) | ((i & 8) << 1) | ((i & 0x10) >> 1)); its alpha is on the GS's scale, 0x80 for 1 */
+static void hud_send_meter_palette(GSGLOBAL *gs, int index, const unsigned *entries)
+{
+	unsigned ordered[256];
+	u64 *p;
+	int i;
+
+	for (i = 0; i < 256; i++)
+	{
+		unsigned e = entries[i];
+		unsigned a = (e >> 24) > 0 ? (((e >> 24) + 1) >> 1) : 0;
+
+		ordered[(i & 0xE7) | ((i & 8) << 1) | ((i & 0x10) >> 1)] = (e & 0xFFFFFF) | (a << 24);
+	}
+	if (hud_meter_palette_known[index] && !memcmp(ordered, hud_meter_palette_sent[index], sizeof(ordered))) return;
+	memcpy(hud_meter_palette_sent[index], ordered, sizeof(ordered));
+	hud_meter_palette_known[index] = 1;
+	/* an image transfer into the palette's place: BITBLTBUF, TRXPOS, TRXREG and TRXDIR, then the 64 quadwords of the image */
+	p = gsKit_heap_alloc(gs, 4 + 1 + 64, (4 + 1 + 64) * 16, GIF_AD);
+	*p++ = GIF_TAG(4, 0, 0, 0, GSKIT_GIF_FLG_PACKED, 1);
+	*p++ = GIF_AD;
+	*p++ = GS_SETREG_BITBLTBUF(0, 0, 0, hud_tex[index].t.VramClut / 256, 1, GS_PSM_CT32); *p++ = GS_BITBLTBUF;
+	*p++ = GS_SETREG_TRXPOS(0, 0, 0, 0, 0); *p++ = GS_TRXPOS;
+	*p++ = GS_SETREG_TRXREG(16, 16); *p++ = GS_TRXREG;
+	*p++ = 0; *p++ = GS_TRXDIR;
+	*p++ = GIF_TAG(64, 1, 0, 0, GSKIT_GIF_FLG_IMAGE, 0);
+	*p++ = 0;
+	memcpy(p, ordered, sizeof(ordered));
+}
+
+/* the quads of the HUD, in front of everything */
+static void hud_draw(GSGLOBAL *gs)
+{
+	static fph_quad quads[FPH_MAX_QUADS];
+	fph_window window = { 48, 34, 592, 414 };         /* the Xbox's title safe frame (48, 36 to 592, 444 of 480 lines) on the display's 448 */
+	const float sx = (float)gs->Width / 640.f;
+	int n, i, current_blend = -1;
+
+	if (!hud_ready) return;
+	if (hud_dirty) { hud_quad_count = fph_render(&hud_state, &hud_player, &window, quads, FPH_MAX_QUADS); hud_dirty = 0; }
+	n = hud_quad_count;
+	gs->PrimFogEnable = GS_SETTING_OFF;
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	for (i = 0; i < n; i++)
+	{
+		const fph_quad *q = &quads[i];
+		const hud_image *im = &hud_images[q->image];
+		const hud_texture *ht = &hud_textures[im->texture];
+		texture *tex = &hud_tex[im->texture];
+		svert sv[4];
+		static const unsigned short order[6] = { 0, 1, 2, 0, 2, 3 };
+		float xs[2] = { q->x0 * sx, q->x1 * sx }, ys[2] = { q->y0, q->y1 };
+		float us[2] = { (float)im->x0, (float)im->x1 }, vs[2] = { (float)im->y0, (float)im->y1 };
+		u64 rgbaq;
+		int k, blend = 0;
+
+		if (q->kind == FPH_METER)
+		{
+			static struct { int threshold, flash_threshold; unsigned gradient_min, gradient_max, flash, empty; float fade; int known; } last[HUD_TEXTURES];
+			typeof(last[0]) *l = &last[im->texture];
+
+			if (!l->known || l->threshold != q->threshold || l->flash_threshold != q->flash_threshold || l->gradient_min != q->gradient_min || l->gradient_max != q->gradient_max ||
+			    l->flash != q->flash || l->empty != q->empty || l->fade != q->fade)
+			{
+				unsigned palette[256];
+
+				l->threshold = q->threshold; l->flash_threshold = q->flash_threshold; l->gradient_min = q->gradient_min; l->gradient_max = q->gradient_max;
+				l->flash = q->flash; l->empty = q->empty; l->fade = q->fade; l->known = 1;
+				fph_meter_palette(q, palette);
+				hud_send_meter_palette(gs, im->texture, palette);
+			}
+			rgbaq = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
+		}
+		else
+			rgbaq = GS_SETREG_RGBAQ((q->color >> 17) & 0x7f, (q->color >> 9) & 0x7f, (q->color >> 1) & 0x7f, (q->color >> 25) & 0x7f, 0x00);        /* half the tint: the GS doubles it */
+		if (blend != current_blend)
+		{
+			gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);          /* blended: (Cs - Cd) * As + Cd */
+			current_blend = blend;
+		}
+		for (k = 0; k < 4; k++)
+		{
+			int cx = (k == 1 || k == 2), cy = (k >= 2);
+
+			sv[k].x = xs[cx]; sv[k].y = ys[cy];
+			sv[k].rgbaq = rgbaq;
+			sv[k].uv = GS_SETREG_UV((int)(us[cx] * 16.f), (int)(vs[cy] * 16.f));
+			sv[k].xyz2 = GS_SETREG_XYZ2(to_gs_xy(xs[cx], gs_offset_x), to_gs_xy(ys[cy], gs_offset_y), 65534);
+		}
+		(void)ht;
+		fp_draw_list(gs, tex, sv, order, 2);
+	}
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
 }
 
 /* the arms and the gun, after the map and the Chief */
@@ -3228,7 +3326,7 @@ static void render_frame(GSGLOBAL *gs, float seconds)
 	PROF_MARK(P_FX);
 	draw_first_person(gs);
 	PROF_MARK(P_WEAPON);
-	fx_draw_hud(gs);
+	hud_draw(gs);
 	PROF_MARK(P_FX);
 #endif
 	PROF_MARK(P_SUBMIT);
@@ -3272,6 +3370,7 @@ int main(void)
 	texture_setup(gs, &display_tex, DISPLAY_TEX_SIZE, GS_PSM_T8, display_tex_pixels, display_tex_clut);
 #ifdef FIRST_PERSON
 	fp_textures_setup(gs);
+	hud_textures_setup(gs);
 #endif
 #ifndef NO_MAP
 	for (i = 0; i < MAP_TEXTURES; i++)
@@ -3434,6 +3533,7 @@ int main(void)
 					fp_demo_pad(&demo, &player, &none, &pad, 1.f / 60.f);
 					fp_update(&player, &pad, 1.f / 60.f);
 					fx_feed(&player, 1.f / 60.f);
+					hud_feed(1.f / 60.f);
 					for (e = 0; e < player.events.count; e++)
 						if (player.events.list[e].type != FPW_EVENT_FIRE && player.events.list[e].type != FPW_EVENT_IMPACT)
 							printf("STILL %6.2f s: event %d (%d, %d)\n", (step + 1) / 60.f, player.events.list[e].type, player.events.list[e].a, player.events.list[e].b);
@@ -3449,6 +3549,7 @@ int main(void)
 			fp_demo_pad(&demo, &player, &user, &pad, dt);      /* the demo's pad until a hand touches the real one (a demo that could not plan passes it through) */
 			fp_update(&player, &pad, dt);
 			fx_feed(&player, dt);
+			hud_feed(dt);
 			if (fabsf(fp_field_of_view(&player) - lens_fov) > 1e-4f) lens_set(gs, fp_field_of_view(&player));      /* the weapon's zoom */
 		}
 #endif

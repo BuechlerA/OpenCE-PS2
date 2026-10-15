@@ -142,10 +142,10 @@ parts is the tens is found from the map's u axis in space (the part header's per
 projects them in the weapon's view with a Z nudge of 40 toward the eye and draws each part as a list, added (`Cs + Cd`): +0.05 ms of the EE and 16 KB of video memory
 (free 611 KB of 4096). The weapon is hidden while zoomed, so the display is too.
 
-## Shots: the muzzle flash, the impact marks and the HUD
+## Shots: the muzzle flash and the impact marks
 
 `main.c`'s `fx_*` (FIRST_PERSON builds): small flat-coloured primitives, a few dozen a frame, each blend a REGLIST packet of RGBAQ and XYZ2 (no texture,
-no lighting). They cost 0.02 to 0.07 ms of the EE a frame (the profile's "fp fx+hud"), which the weapon's 3.3 ms does not notice.
+no lighting). They cost 0.03 ms of the EE a frame (the profile's "fp fx+hud" before the HUD below was added), which the weapon's 3.3 ms does not notice.
 
 - **Marks.** Each `FPW_EVENT_IMPACT` (and a melee blow that hit) not on the Chief (`b == 2`: he takes no damage, and a quad on his capsule would
   float) puts a mark in a ring of 32 at the shot's position and normal: a dark scorch quad (alpha blended, 0.05 units from its centre to its side
@@ -157,11 +157,43 @@ no lighting). They cost 0.02 to 0.07 ms of the EE a frame (the profile's "fp fx+
   the gun's bind-pose vertices within 4 mm of the largest x (+x is the barrel in every weapon's bind pose, checked on the nine), carried by that
   vertex's node: `fpv_skin_matrix` each frame. The star is drawn in front of the whole gun (Z just under the near plane): at its own depth it was behind
   the barrel's nearer parts and did not show (found in a PCSX2 still).
-- **HUD.** A crosshair (four ticks) and at the screen's lower left the magazine as a gauge, the rounds loaded in 7-segment digits (orange under a fifth
-  of the magazine) and the rounds carried under them, from the weapon's state. They are rectangles at the front of the Z range.
+Not done: shell ejection, the Chief's reaction (a hit mark on his armour), impact effects by material (dust, sparks), the flash's light on the map.
 
-Not done: the original's weapon HUD (reticles that change with the weapon, the zoomed scope overlay, the grenade and shield counts), shell
-ejection, the Chief's reaction (a hit mark on his armour), impact effects by material (dust, sparks), the flash's light on the map.
+## The HUD
+
+The HUD is the original's, from its tags: `tools/export_hud.py` reads the weapon hud interfaces of the weapons the player carries (`wphi`: the assault rifle's
+and the pistol's, each with its parents `ui\hud\master rounds` and `ui\hud\master`), the grenade hud (`grhi`), the unit hud (`unhi`: `ui\hud\cyborg`), the digits
+(`hud#`: `ui\hud\counter`) and the interface bitmaps they name, into `src/hud_assets.[ch]` (generated, ignored by git; the sizes of the tag structs are the
+source's: `weapon_hud_interface_definition.h`, `unit_hud_interface_definition.h`, `hud_weapon.c`, `hud_draw.c`). `src/fp_hud.c` (30 Hz, no PS2 code, tested on the
+host) is `hud_weapon.c`, `hud_unit.c` and `hud_draw.c`: it makes the list of quads a frame draws, in the original's order: the crosshairs, the weapon's hud (statics,
+meters, numbers, overlays; the parent's first, the state flags and flashing of each state: total ammunition, rounds loaded, heat, age, the secondary magazine), the grenade
+hud, the unit hud (the shield and health meters with their backgrounds, the motion sensor's two backgrounds). `main.c` draws the quads.
+
+What is on the screen for the rifle, as in the Xbox screenshot it was checked against: at the top left the total rounds in three digits (leading zeros as the tag says) with the
+ammunition icon, the grenade count in its own panel, and under them the magazine as three rows of ticks, one for each round loaded (the flash colour when it is low, the
+panel's background red when the rounds carried run out); at the top right the shield bar (a gradient) and the health ticks; at the bottom left the motion sensor's
+disc and its "15m"; at the middle the reticle (the pistol's zoomed one is the scope's "2x"). The loaded rounds are also on the gun (see "The weapon's own display").
+
+- **Layout.** An element is placed from its corner of the window by its offset in pixels (`hud_calculate_point`, the scale is 1). The window is the Xbox's title safe frame
+  (`RASTERIZER_FRAME_BOUNDS_*`, 48, 36 to 592, 444 of 640 x 480), here 48, 34 to 592, 414 of the display's 640 x 448 lines; the buffer is 512 wide, so x is scaled by 0.8.
+- **Images and textures.** An image is a rectangle of a bitmap (a sprite of its sequence). The bitmaps are alpha / intensity (`ay8`, `a8y8`, swizzled): 8-bit textures with a
+  palette of (intensity, intensity, intensity, alpha), cropped to the sprites used and padded to powers of 2: 18 textures, 139 KB, 180 KB with their palettes (free video memory
+  611 KB before, 432 KB after). The vertex colour is the element's (half: the GS doubles it).
+- **Meters.** The meter bitmaps (`hud_ammo_meters`, `hud_unit_meters`) hold a shape (alpha) and a fill order (intensity: a ramp along the meter; the ammunition's ticks are
+  4 n + 2 for the n-th round, which is what the Xbox's `alpha_multiplier 4, alpha_bias 2` of the rifle's meter compares a value with: `min_alpha = 4 * rounds + 2`; the
+  pistol's is 20 a round, the shield's 1 * 198 + 55). A texel is drawn filled while its fill order is at most that threshold. Here a meter's texture holds, per texel,
+  64 * (the shape's alpha in 4 levels) + (the fill order / 4), and its palette is made for the value (`fph_meter_palette`: the filled texels in the gradient from the
+  meter's minimum colour to its maximum, the flash region in the flash colour, the rest in the empty colour) and sent to the texture's place in video memory
+  (an image transfer in the draw queue, 1 KB, only when it changed): one quad draws a meter of any value. The Xbox's meter pixel shader is a register combiner whose blend
+  constants (source constant colour, destination source alpha) I could not tie to the texture's alpha, so the shape is the alpha of an ordinary blend: it reads on a bright ground
+  as well as a dark one (an added blend washed out on the desert's sand), which may differ from the Xbox's on a bright ground.
+- **A reticle's colours have alpha 0 in the tag** (`0x002896FF`), and it is visible in the Xbox's screenshot, so a crosshair is drawn opaque.
+- **Cost.** 0.24 ms of the EE a frame for about 20 quads (the HUD's own state is made at 30 Hz, but the draw packets are made every frame; a quad is a texture setup and six
+  vertices); the EE is busy 15.0 to 15.4 ms of 16.67 in the fortress, up from 14.7 to 15.2, and the frame rate there stays at 59 to 60.
+- **Not done**: the motion sensor's blips and sweep (the Chief does not move: its backgrounds are drawn), the unit's integrated light meter (the flashlight), the multitexture
+  overlays of the static elements (scan lines on some), the autoaim's red reticle (no target), the zoomed view's extra elements (the sniper's range numbers), the grenade
+  throw's "no grenade" state, the damage indicators, the messages and waypoints, the HUD's sounds, and the multiplayer elements (the exporter leaves out an element used only
+  on several local players). The shield and health are full (the Chief takes no damage) and the grenade count is 2.
 
 ## Walking on the map: the collision BSP
 
@@ -229,6 +261,10 @@ puts the player back at the start.
 - `tools/fp_demo_test.c` (the command is in its header): the demo plans the walk, and the controller, given only the pad
   the demo makes, arrives next to the Chief, four times in 100 s, jumping four times a walk and facing him, never
   stuck; a touch of the pad takes over and Start restarts the demo.
+- `tools/fp_hud_test.c` (`cc -O1 -I src -o /tmp/fp_hud_test tools/fp_hud_test.c src/fp_hud.c src/hud_assets.c -lm && /tmp/fp_hud_test [prefix]`): the quads of
+  the full rifle (the crosshair first, centred; three meters; the loaded meter's threshold 4 * rounds + 2), and, given a prefix, a software composite of the quads with
+  the baked textures into `<prefix>_<scenario>.ppm` (full, 29 rounds, low, empty, reload, pistol, pistol zoomed) for looking at: it is how the layout was
+  compared with the screenshot of the Xbox before PCSX2.
 - `tools/fp_demo_test.c` also counts what the weapons did (rifle 203 shots and pistol 20 in 150 s, four reloads started and finished, four blows, put aways
   and readies, zooms in and out, 84 impacts on the Chief), and prints the first walk's events with their times.
 - **Stills of the demo's states**: `make EXTRA_CFLAGS="-DFIRST_PERSON -DFP_STILL_SECONDS=22.95f"` plays that many seconds of the demo at start-up in 1/60 s steps (the
