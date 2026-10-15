@@ -1,0 +1,183 @@
+/*
+HALO_PORT_CAPACITY.H
+
+Memory capacity of the native builds (Windows, Linux, Android), sized for the
+session limits in halo_port_limits.h, which includes this file. The Xbox
+sizes are given in parentheses below.
+
+Every machine in a session must be built with the same values: the
+distributed netcode names objects and players by their datum index, the
+same on every machine (port/ps2/game/network_objects.c tracks
+MAXIMUM_TRACKED_OBJECTS = HALO_PORT_MAXIMUM_OBJECTS_PER_MAP objects, and a
+client's own objects take the upper half of the object array).
+*/
+
+#ifndef __HALO_PORT_CAPACITY_H
+#define __HALO_PORT_CAPACITY_H
+
+#ifdef HALO_PS2
+/* ---------- the PS2's
+
+The Xbox's capacities, in the PS2's 32 MB (docs/ps2_port_plan.md, "Memory
+budget"). Its game state, tag cache and texture and sound caches are not at
+fixed addresses (physical_memory_map.c places them; a PS2 program cannot
+have the Xbox's), and the tags are moved to where the tag cache is
+(port/ps2/game/tag_relocate.c).
+
+The tag cache holds the map's tags and its current structure BSP: 9 MB is
+the largest multiplayer map's (sidewinder, 8.92 MB). The campaign's (21.3 to
+22 MB on the Xbox) wait for the map converter (14.4 MB, projected). The
+texture and sound caches are small while nothing draws or plays (the null
+Direct3D, port/ps2/src/ps2_d3d_null.c). */
+
+#define HALO_PORT_GAME_STATE_BASE_ADDRESS 0 /* (0x80061000): placed */
+#define HALO_PORT_GAME_STATE_CPU_SIZE 0x305000
+#define HALO_PORT_GAME_STATE_GPU_SIZE 0x40000
+#define HALO_PORT_GAME_STATE_SIZE (HALO_PORT_GAME_STATE_CPU_SIZE+HALO_PORT_GAME_STATE_GPU_SIZE)
+
+#define HALO_PORT_TAG_CACHE_SIZE 0x1130000 /* (0x1600000) */
+/* and where it is: the same in every build, so that the converter can move a
+map's tags there once (tools/ps2/convert_map.py). The program's heap ends
+where it starts (tools/ps2_build.py), and the main thread's stack (128 KB) is
+above it, at the top of the 32 MB. */
+#define HALO_PORT_TAG_CACHE_ADDRESS 0x00EB0000
+typedef char verify_ps2_tag_cache_address[
+	HALO_PORT_TAG_CACHE_ADDRESS + HALO_PORT_TAG_CACHE_SIZE + 0x20000 == 0x2000000 ? 1 : -1];
+#define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x10 /* (0x580): 256 KB */
+#define HALO_PORT_TEXTURE_CACHE_SIZE (HALO_PORT_TEXTURE_CACHE_PAGE_COUNT*0x4000)
+#define HALO_PORT_SOUND_CACHE_SIZE 0x10000 /* (0x400000) */
+
+#define HALO_PORT_MAXIMUM_ACTORS 256
+#define HALO_PORT_MAXIMUM_PROPS 768
+#define HALO_PORT_MAXIMUM_SWARMS 32
+#define HALO_PORT_MAXIMUM_SWARM_COMPONENTS 256
+
+#define HALO_PORT_MAXIMUM_OBJECTS_PER_MAP 2048
+#define HALO_PORT_OBJECT_MEMORY_POOL_SIZE 0x100000
+#define HALO_PORT_MAXIMUM_CLUSTER_REFERENCES 2048
+#define HALO_PORT_MAXIMUM_RENDERED_OBJECTS 256
+#define HALO_PORT_MAXIMUM_CACHED_OBJECT_RENDER_STATES 256
+#define HALO_PORT_MAXIMUM_AREA_OF_EFFECT_OBJECTS 64
+#define HALO_PORT_MAXIMUM_OBJECT_LISTS_PER_MAP 48
+#define HALO_PORT_MAXIMUM_LISTED_OBJECTS_PER_MAP 128
+#define HALO_PORT_MAXIMUM_WIDGETS 64
+#define HALO_PORT_MAXIMUM_LIGHT_VOLUMES 256
+
+#define HALO_PORT_MAXIMUM_EFFECTS 256
+#define HALO_PORT_MAXIMUM_EFFECT_LOCATIONS 512
+#define HALO_PORT_MAXIMUM_PARTICLES 1024
+#define HALO_PORT_MAXIMUM_PARTICLE_SYSTEMS 64
+#define HALO_PORT_MAXIMUM_SYSTEM_PARTICLES 512
+#define HALO_PORT_MAXIMUM_CONTRAILS 256
+#define HALO_PORT_MAXIMUM_CONTRAIL_POINTS 1024
+#define HALO_PORT_MAXIMUM_LIGHTS_PER_MAP 896
+#define HALO_PORT_MAXIMUM_GAME_LOOPING_SOUNDS 1024
+
+#else
+
+/* ---------- game state
+
+The Xbox game state is 0x345000 bytes at 0x80061000 and ends where the tag
+cache begins (0x803A6000). Cache files are linked to that tag cache address,
+so the game state cannot grow in place. The native builds put a 16 MB game
+state above the tag cache (which ends at 0x819A6000), inside the Xbox memory
+window (0x80000000-0xA0000000, Android's to 0x88000000:
+port/ps2/src/platform.h) and below everything the window hands out
+top-down (texture and sound caches, Direct3D resources).
+
+The CPU part holds about 17.2 MB of pools at the sizes below (the Xbox pools
+fill 3,165,260 of its 0x305000 bytes); the GPU part holds only the decal
+vertices, as on the Xbox. A change to a pool's size changes the game state's
+layout: saved games of builds before it no longer load. */
+
+#define HALO_PORT_GAME_STATE_BASE_ADDRESS 0x81A00000 /* (0x80061000) */
+#define HALO_PORT_GAME_STATE_CPU_SIZE 0x13C0000 /* (0x305000) */
+#define HALO_PORT_GAME_STATE_GPU_SIZE 0x40000 /* (0x40000) */
+#define HALO_PORT_GAME_STATE_SIZE (HALO_PORT_GAME_STATE_CPU_SIZE+HALO_PORT_GAME_STATE_GPU_SIZE)
+
+/* ---------- textures
+
+The texture cache holds the textures being drawn in 16 KB pages, 22 MB of
+them on the Xbox, which Xbox maps were made to fit. Halo Custom Edition maps
+were made for Halo PC, which has no such bound: a texture that does not fit
+is drawn as the default one ("YOU GOT STABBED" in debug.txt; Elite_Alpha_Siege
+did at 22 MB), and a frame of bigass_v3 draws more than 64 MB (DamnationCE's
+measurement). The desktop builds' cache is 256 MB, half their 512 MB memory
+window (port/ps2/src/platform.h), whose pages are backed as they are used.
+Android's window is 128 MB, and its cache the Xbox's. */
+
+#ifdef HALO_ANDROID
+#define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x580 /* (0x580) */
+#else
+#define HALO_PORT_TEXTURE_CACHE_PAGE_COUNT 0x4000 /* (0x580) */
+#endif
+#define HALO_PORT_TEXTURE_CACHE_SIZE (HALO_PORT_TEXTURE_CACHE_PAGE_COUNT*0x4000) /* (0x1600000) */
+
+/* ---------- sounds
+
+The sound cache holds the sounds being played in 4 KB pages, 4 MB of them on
+the Xbox. Halo Custom Edition maps' sounds, converted when they load
+(port/ps2/game/custom_edition_sounds.c), and those of sound tags loaded
+over a map's (loose_sounds.c), are longer than the Xbox maps' and fill it (a
+campaign map's dialogue and music did, "SOUND CACHE BLOWN" in debug.txt).
+The desktop builds' cache is 16 MB; Android's window keeps the Xbox's. */
+
+#ifdef HALO_ANDROID
+#define HALO_PORT_SOUND_CACHE_SIZE 0x400000 /* (0x400000) */
+#else
+#define HALO_PORT_SOUND_CACHE_SIZE 0x1000000 /* (0x400000) */
+#endif
+
+/* ---------- AI
+
+Network co-op adds enemies for its players (port/ps2/game/coop_enemies.c):
+the actors, and their knowledge of the units about them (props: with many
+players, more each), have room for several times a level's own. */
+
+#define HALO_PORT_MAXIMUM_ACTORS 1024 /* (256) */
+#define HALO_PORT_MAXIMUM_PROPS 8192 /* (768) */
+#define HALO_PORT_MAXIMUM_SWARMS 128 /* (32) */
+#define HALO_PORT_MAXIMUM_SWARM_COMPONENTS 1024 /* (256) */
+
+/* ---------- objects */
+
+#define HALO_PORT_MAXIMUM_OBJECTS_PER_MAP 8192 /* (2048) */
+#define HALO_PORT_OBJECT_MEMORY_POOL_SIZE 0x800000 /* (0x100000) */
+/* each of the two reference lists of every cluster partition (collideable
+objects, noncollideable objects, lights) */
+#define HALO_PORT_MAXIMUM_CLUSTER_REFERENCES 8192 /* (2048) */
+#define HALO_PORT_MAXIMUM_RENDERED_OBJECTS 1024 /* (256) */
+#define HALO_PORT_MAXIMUM_CACHED_OBJECT_RENDER_STATES 1024 /* (256) */
+/* objects one explosion can damage */
+#define HALO_PORT_MAXIMUM_AREA_OF_EFFECT_OBJECTS 256 /* (64) */
+/* script object lists, and the object references they all share. The
+lists of a tick's scripts are freed after it (object_list_gc): a Halo PC
+map whose scripts test (players) in many places a tick took more than the
+Xbox's 48 (coldsnap's), and its game halted */
+#define HALO_PORT_MAXIMUM_OBJECT_LISTS_PER_MAP 1024 /* (48) */
+#define HALO_PORT_MAXIMUM_LISTED_OBJECTS_PER_MAP 8192 /* (128) */
+/* widgets (light volumes, antennas, flags, glows, lightning), each made with
+its object and kept for its life: an assault rifle's flashlight beam, held or
+dropped, and a plasma bolt's light volume; a full pool draws the object
+without its widget */
+#define HALO_PORT_MAXIMUM_WIDGETS 2048 /* (64) */
+#define HALO_PORT_MAXIMUM_LIGHT_VOLUMES 2048 /* (256) */
+
+/* ---------- effects, particles, lights and sounds */
+
+#define HALO_PORT_MAXIMUM_EFFECTS 2048 /* (256) */
+#define HALO_PORT_MAXIMUM_EFFECT_LOCATIONS 4096 /* (512) */
+#define HALO_PORT_MAXIMUM_PARTICLES 8192 /* (1024) */
+#define HALO_PORT_MAXIMUM_PARTICLE_SYSTEMS 256 /* (64) */
+#define HALO_PORT_MAXIMUM_SYSTEM_PARTICLES 4096 /* (512) */
+#define HALO_PORT_MAXIMUM_CONTRAILS 1024 /* (256) */
+#define HALO_PORT_MAXIMUM_CONTRAIL_POINTS 8192 /* (1024) */
+#define HALO_PORT_MAXIMUM_LIGHTS_PER_MAP 4096 /* (896) */
+#define HALO_PORT_MAXIMUM_GAME_LOOPING_SOUNDS 4096 /* (1024) */
+
+/* the tag cache: the Xbox's, which its maps are linked to */
+#define HALO_PORT_TAG_CACHE_SIZE 0x1600000
+
+#endif /* HALO_PS2 */
+
+#endif /* __HALO_PORT_CAPACITY_H */

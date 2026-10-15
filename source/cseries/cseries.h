@@ -338,7 +338,9 @@ __inline long fast_ftol(
 	long result;
 
 	/* FISTP: round to nearest under the default control word */
-	result = (long)__builtin_rint((double)value);
+	/* port: in single precision (halo_math_float.h); the double round trip
+	is a software call on the PS2 */
+	result = halo_rint_to_long(value);
 
 	return result;
 }

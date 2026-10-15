@@ -4,13 +4,14 @@ breaks (docs/ps2_port_plan.md, Phase 1):
 
     python tools/ps2/compile_check.py [--jobs N] [--only PATTERN ...] [--json OUT]
 
-Each file of the game (port/linux/port.json "game") and each of the port's
-game units (port/linux/game) that the PS2 build compiles is compiled to an
-object with ps2dev's GCC (mips64r5900el-ps2-elf-gcc, found through PS2DEV), with the
-Linux build's MSVC environment (port/linux/include, the XDK declarations,
+Each file of the game (port/ps2/port.json "game") and each of the port's
+game units (port/ps2/game) that the PS2 build compiles is compiled to an
+object with ps2dev's GCC (mips64r5900el-ps2-elf-gcc, found through PS2DEV),
+in the Xbox's MSVC environment (port/ps2/include, the XDK declarations,
 halo_msvc_semantics.h) under port/ps2/include/halo_ps2_prefix.h, with the
-flags of tools/ps2_build.py. Nothing is linked (ninja ps2 links). The report lists the files that fail and the errors, grouped by
-message, most files first, so the work can be taken in order.
+flags of tools/ps2_build.py. Nothing is linked (ninja ps2 links). The report
+lists the files that fail and the errors, grouped by message, most files
+first, so the work can be taken in order.
 
 The objects, the generated header and the report go to build/ps2/check,
 apart from ninja ps2's.
@@ -28,9 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.android_build import VARIADIC_PROTOTYPE_FILES  # noqa: E402
-from tools.linux_build import _load_port_config, game_sources  # noqa: E402
-from tools.ps2_build import VARIADIC_PROTOTYPES, game_compile_flags, ps2_game_units  # noqa: E402
+from tools.ps2_build import (VARIADIC_PROTOTYPES, _load_config, game_compile_flags,  # noqa: E402
+                             game_sources, ps2_game_units)
 
 # apart from ninja ps2's objects (build/ps2/obj), which may have other options
 BUILD = Path("build/ps2/check")
@@ -90,17 +90,18 @@ def main():
 
     cc = compiler()
     sdk = Path(os.environ.get("PS2SDK", Path(os.environ["PS2DEV"]) / "ps2sdk"))
-    config = _load_port_config()
+    config = _load_config()
     flags = [*game_compile_flags(sdk, semantics_header()), *args.optimize.split()]
     # the game's files, and the port's own game units that the PS2 build
-    # compiles (port/linux/game, port/ps2/port.json)
+    # compiles (port/ps2/game, port/ps2/port.json)
+    variadic = set(config["variadic_prototype_files"]["files"])
     sources = [*game_sources(config), *ps2_game_units()]
     sources = [s for s in sources if not args.only or any(p in s.as_posix() for p in args.only)]
 
     def compile_one(source):
         obj = BUILD / "obj" / source.with_suffix(".o")
         obj.parent.mkdir(parents=True, exist_ok=True)
-        extra = ["-include", str(VARIADIC_PROTOTYPES)] if source.as_posix() in VARIADIC_PROTOTYPE_FILES else []
+        extra = ["-include", str(VARIADIC_PROTOTYPES)] if source.as_posix() in variadic else []
         r = subprocess.run([str(cc), *flags, *extra, "-c", str(source), "-o", str(obj)], capture_output=True, text=True)
         return source.as_posix(), r.returncode, r.stderr
 

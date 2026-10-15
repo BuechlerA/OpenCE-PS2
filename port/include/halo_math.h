@@ -2,7 +2,7 @@
 HALO_MATH.H
 
 The same maths functions on every native port (included by the game's
-<math.h>: port/linux/include/math.h, port/windows/include/crt/math.h).
+<math.h>: port/ps2/include/math.h, port/windows/include/crt/math.h).
 
 In a system link game every machine simulates the players from the same
 inputs, and what the host does not correct (projectiles, devices, the
@@ -22,6 +22,9 @@ rounds once instead of twice.
 The macros are function-like, so they rename calls (and musl's definitions)
 but not variables or fields of the same names. The functions that are
 exact in IEEE arithmetic (sqrt, fabs, floor, ceil, fmod) need nothing.
+
+halo_math_float.h, which the game's <math.h> includes after this, sends a
+call whose argument is a float to the single-precision function instead.
 */
 
 #ifndef __HALO_MATH_H

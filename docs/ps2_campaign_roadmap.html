@@ -1,0 +1,435 @@
+<title>PS2 Campaign Roadmap</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (68ch) for prose; the gantt, the level matrix and the hurdle table break out to the page width. */
+:root {
+  --bg: #f3f4f0;
+  --bg-2: #e9ebe4;
+  --fg: #1d2420;
+  --fg-2: #4d5852;
+  --line: #c9cfc6;
+  --accent: #3f6b3a;        /* Mjolnir olive */
+  --accent-ink: #ffffff;
+  --done: #3f6b3a;
+  --part: #b7791f;
+  --todo: #8a95a0;
+  --crit: #a93a2e;
+  --mark: #d6dfd0;
+  --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161a18; --bg-2: #1f2522; --fg: #e4e8e2; --fg-2: #a3ada5; --line: #333b36;
+    --accent: #8fbf7a; --accent-ink: #10150f; --done: #8fbf7a; --part: #e0a93c; --todo: #7d8891; --crit: #e06a5b; --mark: #253127;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161a18; --bg-2: #1f2522; --fg: #e4e8e2; --fg-2: #a3ada5; --line: #333b36;
+  --accent: #8fbf7a; --accent-ink: #10150f; --done: #8fbf7a; --part: #e0a93c; --todo: #7d8891; --crit: #e06a5b; --mark: #253127;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.5; }
+.wrap { max-width: 1100px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 80px; }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; letter-spacing: 0.01em; text-wrap: balance; line-height: 1.05; margin: 0; }
+h1 { font-size: clamp(2.4rem, 6vw, 4rem); }
+h2 { font-size: 1.9rem; margin-top: 56px; padding-top: 14px; border-top: 3px solid var(--fg); }
+h3 { font-size: 1.3rem; margin-top: 28px; }
+p, li { max-width: 68ch; }
+p { margin: 10px 0; }
+ul, ol { padding-left: 1.3em; margin: 8px 0; }
+li { margin: 4px 0; }
+a { color: var(--accent); }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--bg-2); padding: 1px 4px; border-radius: 3px; }
+.eyebrow { font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); }
+.lede { font-size: 1.12rem; color: var(--fg-2); max-width: 62ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 14px; font-family: var(--mono); font-size: 0.82rem; color: var(--fg-2); }
+.pill { display: inline-block; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 8px; border-radius: 3px; border: 1px solid var(--line); color: var(--fg-2); white-space: nowrap; }
+.pill.done { color: var(--done); border-color: var(--done); }
+.pill.part { color: var(--part); border-color: var(--part); }
+.pill.todo { color: var(--todo); border-color: var(--todo); }
+.pill.crit { color: var(--crit); border-color: var(--crit); }
+.pill.gate { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+/* status strip */
+.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 28px; }
+.stat { border-top: 2px solid var(--line); padding-top: 8px; min-width: 0; }
+.stat b { display: block; font-family: var(--display); font-size: 1.9rem; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 0.82rem; color: var(--fg-2); }
+.stat.ok b { color: var(--done); } .stat.warn b { color: var(--part); } .stat.bad b { color: var(--crit); }
+
+/* tables */
+.tbl { overflow-x: auto; margin: 14px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; vertical-align: top; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); font-weight: 500; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 0.84rem; white-space: nowrap; }
+td.k { font-weight: 600; white-space: nowrap; }
+
+/* gantt */
+.gantt { margin-top: 18px; border: 1px solid var(--line); background: var(--bg-2); overflow-x: auto; }
+.gantt-in { min-width: 760px; }
+.g-head, .g-row { display: grid; grid-template-columns: 230px 1fr; align-items: stretch; }
+.g-head { border-bottom: 1px solid var(--line); }
+.g-months { display: grid; grid-template-columns: repeat(24, 1fr); }
+.g-months span { font-family: var(--mono); font-size: 0.68rem; color: var(--fg-2); padding: 6px 0 4px; text-align: center; border-left: 1px dashed var(--line); }
+.g-months span:nth-child(6n+1) { color: var(--fg); border-left-style: solid; }
+.g-label { padding: 9px 12px; font-size: 0.86rem; border-right: 1px solid var(--line); min-width: 0; }
+.g-label small { display: block; color: var(--fg-2); font-size: 0.74rem; }
+.g-track { position: relative; display: grid; grid-template-columns: repeat(24, 1fr); }
+.g-track i { border-left: 1px dashed var(--line); }
+.g-track i:nth-child(6n+1) { border-left-style: solid; }
+.g-bar { position: absolute; top: 9px; height: 22px; border-radius: 3px; background: var(--todo); color: #fff; font-family: var(--mono); font-size: 0.7rem; line-height: 22px; padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.g-bar.done { background: var(--done); color: var(--accent-ink); }
+.g-bar.part { background: var(--part); color: #1d1a10; }
+.g-bar.todo { background: var(--todo); }
+.g-row { border-bottom: 1px solid var(--line); min-height: 40px; }
+.g-row:last-child { border-bottom: 0; }
+.g-gate { position: absolute; top: 4px; width: 0; height: 32px; border-left: 2px solid var(--fg); }
+.g-gate::after { content: attr(data-g); position: absolute; left: 4px; top: -2px; font-family: var(--mono); font-size: 0.66rem; color: var(--fg); }
+.g-note { font-size: 0.8rem; color: var(--fg-2); padding: 8px 12px; border-top: 1px solid var(--line); }
+
+/* milestone cards */
+.ms { margin-top: 30px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ms-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+.ms-head .n { font-family: var(--display); font-size: 2.6rem; font-weight: 700; color: var(--accent); line-height: 1; }
+.ms-head h3 { margin: 0; font-size: 1.55rem; }
+.ms-meta { font-family: var(--mono); font-size: 0.78rem; color: var(--fg-2); margin: 4px 0 10px; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 28px; }
+.cols > div { min-width: 0; }
+@media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+.gate { margin-top: 12px; padding: 10px 14px; background: var(--mark); border-left: 4px solid var(--fg); font-size: 0.92rem; max-width: 80ch; }
+.gate b { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.08em; text-transform: uppercase; }
+
+/* checklist */
+.steps { list-style: none; padding: 0; margin: 6px 0; }
+.steps li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; max-width: none; padding: 5px 0; border-bottom: 1px dotted var(--line); }
+.steps input { margin: 4px 0 0; width: 16px; height: 16px; accent-color: var(--accent); }
+.steps label { cursor: pointer; }
+.steps label small { display: block; color: var(--fg-2); font-size: 0.82rem; }
+.steps li.fixed label { color: var(--fg-2); }
+.steps li.fixed label::after { content: " done"; font-family: var(--mono); font-size: 0.7rem; color: var(--done); text-transform: uppercase; letter-spacing: 0.06em; }
+.progress { display: flex; align-items: center; gap: 12px; margin: 16px 0 0; font-family: var(--mono); font-size: 0.8rem; color: var(--fg-2); }
+.progress .bar { flex: 1; height: 8px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.progress .bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
+.progress button { font: inherit; font-size: 0.74rem; color: var(--fg-2); background: none; border: 1px solid var(--line); border-radius: 3px; padding: 2px 8px; cursor: pointer; }
+.progress button:focus-visible, .steps input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.level-feat { font-size: 0.84rem; }
+.foot { margin-top: 60px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 0.82rem; color: var(--fg-2); }
+@media (prefers-reduced-motion: reduce) { .progress .bar i { transition: none; } }
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">OpenCE-PS2 · Halo: Combat Evolved on the PlayStation 2</div>
+  <h1>From one level in an emulator to the whole campaign on a PS2</h1>
+  <p class="lede">What has to happen, in what order, for all ten campaign levels of Halo: Combat Evolved to play from the start of The Pillar of Autumn to the end of The Maw on a retail PlayStation 2 with 32 MB of memory. Status, hurdles, the steps, and a checklist that is the roadmap.</p>
+  <div class="meta">
+    <span>as of 2026-10-15, fork main at 7a249c42</span>
+    <span>everything measured so far is PCSX2, not hardware</span>
+    <span>sources: docs/ps2_port_plan.md, research/ee_performance.md, research/blood_gulch_map.md, research/vram_and_vu1.md</span>
+  </div>
+
+  <div class="strip">
+    <div class="stat ok"><b>466 / 466</b><span>game C files compile and link for the EE (<code>ninja ps2</code>)</span></div>
+    <div class="stat ok"><b>13 + 1</b><span>levels play 300 ticks in PCSX2: every multiplayer map, and c20 (The Library)</span></div>
+    <div class="stat bad"><b>45.3 ms</b><span>a c20 simulation tick in PCSX2; the budget is 15 ms, and PCSX2 reads low</span></div>
+    <div class="stat warn"><b>9 of 10</b><span>campaign levels do not fit the tag cache yet (21.3 to 21.8 MB; budget 14.5)</span></div>
+    <div class="stat ok"><b>60 fps</b><span>Blood Gulch in the stand-alone sample: BSP, scenery, sky, lightmap, detail, bump, fog, Chief on VU1</span></div>
+    <div class="stat bad"><b>0</b><span>pixels drawn by the game itself: the PS2 renderer is a null Direct3D, and there is no sound or pad</span></div>
+  </div>
+
+  <h2>Where the port stands</h2>
+  <p>The work so far was aimed at two questions: does the game fit, and does it run. Both have partial answers. The game boots to its main menu in PCSX2 at 32 MB, reads maps the PC converter has relocated, allocates its game state and plays with a scripted player. The campaign's smallest level plays its scripts and AI. Separately, a stand-alone sample proved that the Graphics Synthesizer can draw a Halo level with its lightmaps, detail maps, bump relief, reflections, fog and a skinned character at 60 fps, and documented how.</p>
+  <div class="tbl"><table>
+    <tr><th>Subsystem</th><th>State</th><th>What exists</th><th>What is missing for the campaign</th></tr>
+    <tr><td class="k">Toolchain, build</td><td><span class="pill done">done</span></td><td>ps2dev GCC 15, <code>ninja ps2</code>, <code>compile_check.py</code>, PCSX2 runners, the EE benchmark</td><td>CI with the ps2dev image; a hardware runner (ps2link)</td></tr>
+    <tr><td class="k">Memory map, relocation</td><td><span class="pill done">done</span></td><td>Xbox capacities, tags relocated to one cache address, the converter's first pass, 6.5 MB spare on a multiplayer level</td><td>Tag cache sized for the converter's output; the pools cut to measured peaks</td></tr>
+    <tr><td class="k">Platform layer</td><td><span class="pill part">partial</span></td><td>Kernel threads, files on <code>host:</code>, settings, saves, atomics, stack walk, a vblank thread rotator</td><td><code>cdrom0:</code> reads, libpad, memory card, IOP modules</td></tr>
+    <tr><td class="k">Simulation</td><td><span class="pill part">partial</span></td><td>All multiplayer levels and c20 run their ticks; a benchmark with per-section timing</td><td>Three times too slow on c20; no float audit; nothing measured on hardware</td></tr>
+    <tr><td class="k">Map converter</td><td><span class="pill part">partial</span></td><td>Inflate, reset runtime values, relocate (byte-exact against the game's own relocation); the reduction passes prototyped and measured</td><td>Every reduction pass for real; textures, sounds and geometry in PS2 formats; disc layout</td></tr>
+    <tr><td class="k">Renderer</td><td><span class="pill part">sample only</span></td><td>The Master Chief sample: environment passes, scenery, sky, fog, VU0 and VU1 paths, a measured video-memory ledger</td><td><code>source/rasterizer/ps2/</code> itself: none of the 169 <code>rasterizer.h</code> entry points, menus, text, HUD, models in the game, effects</td></tr>
+    <tr><td class="k">Sound</td><td><span class="pill todo">not started</span></td><td>DirectSound fails to start on purpose; the game runs silent</td><td>SPU2 driver, VAG transcode, IOP streaming, 48-voice priority</td></tr>
+    <tr><td class="k">Input, saves</td><td><span class="pill todo">not started</span></td><td>The benchmark's scripted player; saves to <code>host:</code></td><td>DualShock 2 through libpad; saves compressed onto a memory card</td></tr>
+    <tr><td class="k">Disc</td><td><span class="pill todo">not started</span></td><td>Maps read in place from the ELF's folder</td><td>ISO layout, DVD streaming, BSP switch loads at 3 to 5 MB/s</td></tr>
+  </table></div>
+
+  <h2>The hurdles</h2>
+  <p>Ten things stand between the current build and a campaign play-through. Each row says what was measured, what the plan does about it and which milestone owns it. The first two decide whether the project is feasible at all; the rest are work.</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>Hurdle</th><th>Measured</th><th>Approach</th><th>Owner</th></tr>
+    <tr><td class="num">1</td><td class="k">The tick is three times too slow</td><td>c20: 45.3 ms a tick, 64 ms worst, in PCSX2 (which leaves out cache and memory waits). Bipeds 60%, machines 16%, AI 14%. The two largest multiplayer maps already take 15 ms with nobody in them.</td><td>Floats first (<code>-fsingle-precision-constant</code>, a float libm header: a <code>double</code> add is 320 cycles, a float expression with a <code>double</code> literal 850). Then the biped update: keyframe search that continues forward, VU0 macro mode for <code>matrix_math.c</code>, the scratchpad for collision traversal. Then AI staggering by distance.</td><td>M1, M7</td></tr>
+    <tr><td class="num">2</td><td class="k">Nine levels do not fit</td><td>Campaign tag data 21.3 to 22.0 MB on the Xbox; the PS2's tag cache can be about 14.5 MB. The converter's passes plus four game-code format changes project 13.7 to 14.4 MB. The margin is under 1 MB.</td><td>Implement the measured passes: keyframed animations, no super-high LOD, trimmed scripts, 16-byte model and 20-byte BSP vertices, 16-bit collision, compact sound permutations, 12-byte script nodes, 4-bit glyphs. Collision alone is 0.9 to 1.3 MB a level.</td><td>M2</td></tr>
+    <tr><td class="num">3</td><td class="k">The renderer is a rewrite</td><td>42 files of Xbox rasterizer, 169 entry points in <code>rasterizer.h</code>, pixel shaders the GS cannot run. The sample covers the environment and a skinned model at 60 fps with 10.1 ms of EE a frame on average.</td><td>A native <code>source/rasterizer/ps2/</code> at the <code>rasterizer.h</code> level, in the sample's style: REGLIST packets, VU1 for skinning, lighting and fog, multiply passes with alpha-indexed palettes, 16-bit 512x448 buffers.</td><td>M3</td></tr>
+    <tr><td class="num">4</td><td class="k">Textures cannot be resident</td><td>Each campaign map has 35 to 49 MB of textures. The sample kept Blood Gulch's whole set in video memory (1.06 MB); a campaign level cannot. The plan's budget is 4.8 MB of EE texture cache and about 2.3 MB of GS memory.</td><td>A run-time texture cache that streams CLUT textures from the map through the IOP into EE memory and uploads to the GS through path 3 as the frame needs them, with the top mip level dropped and bump maps never loaded (13%).</td><td>M3, M5</td></tr>
+    <tr><td class="num">5</td><td class="k">Sound is a second rewrite, and scripts depend on it</td><td>SPU2: 48 voices, 2 MB. Campaign scripts wait on dialogue and cinematic audio; a silent game must still report durations.</td><td><code>sound_ps2.c</code> on <code>platform_sound.h</code> with an IOP module; VAG transcode in the converter; music and long dialogue streamed by the IOP; a voice priority limit; no reverb at first.</td><td>M4</td></tr>
+    <tr><td class="num">6</td><td class="k">The disc is slow and there is no hard disk</td><td>DVD at 3 to 5 MB/s with slow seeks. Levels load 14 MB of tags at start and switch BSPs mid-level (a10, b40, c40 switch several times). Converted maps are 33 to 142 MB; the disc after conversion fits a single-layer DVD.</td><td>Uncompressed converted maps laid out by BSP, prefetch from <code>predicted_resources.c</code>, larger IOP buffers, a BSP switch that reads one contiguous run. No HDD requirement.</td><td>M5</td></tr>
+    <tr><td class="num">7</td><td class="k">Double precision and IEEE assumptions</td><td>144 explicit <code>double</code> uses and many more implicit promotions; <code>fmod</code>, <code>sin</code>, <code>cos</code>, <code>pow</code> in per-tick code. The EE has no denormals, infinity or NaN. Unaligned access faults.</td><td>Audit on Linux first: FTZ/DAZ and trap mode, <code>-fsanitize=alignment</code> through every level; then the float header and flags on the PS2 build. Saved films compare behaviour.</td><td>M1</td></tr>
+    <tr><td class="num">8</td><td class="k">Nothing has run on hardware</td><td>Every number is PCSX2's cycle accounting. It does not time the GS, ignores PRE on REGLIST tags, and undercounts memory traffic. The sample's worst frame (14.5 of 16.7 ms) is tighter than it looks.</td><td>A PS2 with FreeMcBoot and ps2link (network adapter or USB) as a test target from Gate 1 on; every gate is passed on the console, not the emulator.</td><td>M1</td></tr>
+    <tr><td class="num">9</td><td class="k">Saves are 3.3 MB, the card holds 8 MB</td><td>The game state is written whole; the Xbox had a hard disk. Checkpoints stay in memory, but a level's end and a quit must persist.</td><td>Compress the game state with the game's own zlib (mostly empty pools) and write it to the memory card with a header the game validates. Fix the pool capacities before the first save format ships.</td><td>M4</td></tr>
+    <tr><td class="num">10</td><td class="k">Cinematics and the worst fights</td><td>Animation tolerance errors add up along a skeleton; faces and hands in cinematics show them. The largest fights (b40, c40, the escape from d40) will be the worst ticks.</td><td>Choose the tolerance by looking at cinematics at 0.25 and 0.5 degrees. Per-level caps on actors, particles and effects in the converted scenarios; AI update rates by distance.</td><td>M2, M6, M7</td></tr>
+  </table></div>
+
+  <h2>The roadmap</h2>
+  <p>Seven milestones from here. The order follows the dependencies: the simulation has to be fast enough before a renderer is worth writing against it, the converter's formats decide what the renderer draws, and the disc comes last because until then PCSX2's <code>host:</code> device stands in for it. Months are the plan's estimates for one experienced developer working full time, counted from now, not calendar dates. The three gates are decisions: each is passed on a real console.</p>
+
+  <div class="gantt"><div class="gantt-in">
+    <div class="g-head"><div class="g-label"><small>milestone</small>months from now</div>
+      <div class="g-months">
+        <span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span><span>16</span><span>17</span><span>18</span><span>19</span><span>20</span><span>21</span><span>22</span><span>23</span>
+      </div></div>
+    <div class="g-row"><div class="g-label">M0 Boot and fit<small>done October 2026</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar done" style="left:0;width:4.17%">done</div></div></div>
+    <div class="g-row"><div class="g-label">M1 Gate 1: the simulation on hardware<small>months 0 to 3</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar part" style="left:0;width:12.5%">started</div><div class="g-gate" style="left:12.5%" data-g="G1"></div></div></div>
+    <div class="g-row"><div class="g-label">M2 The converter fits every level<small>months 1 to 5</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar part" style="left:4.17%;width:16.67%">pass 1 done</div><div class="g-gate" style="left:20.83%" data-g="G2"></div></div></div>
+    <div class="g-row"><div class="g-label">M3 The renderer<small>months 3 to 14</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar todo" style="left:12.5%;width:45.83%">menus, BSP, models, weapons, HUD, effects, water, shadows</div></div></div>
+    <div class="g-row"><div class="g-label">M4 Sound, pad, saves<small>months 8 to 11</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar todo" style="left:33.33%;width:12.5%">SPU2, libpad, card</div></div></div>
+    <div class="g-row"><div class="g-label">M5 Disc and streaming<small>months 11 to 14</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar todo" style="left:45.83%;width:12.5%">ISO, DVD, prefetch</div><div class="g-gate" style="left:58.33%" data-g="G3"></div></div></div>
+    <div class="g-row"><div class="g-label">M6 The campaign, level by level<small>months 13 to 20</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar todo" style="left:54.17%;width:29.17%">a10 to d40 on the console</div></div></div>
+    <div class="g-row"><div class="g-label">M7 Performance and finish<small>months 3 to 24, ongoing</small></div><div class="g-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><div class="g-bar todo" style="left:12.5%;width:87.5%">VU0, scratchpad, AI rates, caps, PAL, 480p, README</div></div></div>
+    <div class="g-note">G1: a campaign tick in 15 ms on a PS2. G2: all ten levels load and play in 32 MB. G3: a10 boots from a disc image on the console with picture, sound and a pad. The plan's total after G1 is 1.5 to 2.5 developer-years; most of the uncertainty is in M3 and M7.</div>
+  </div></div>
+
+  <div class="progress"><span id="progress-text">0 of 0 steps</span><div class="bar"><i id="progress-fill"></i></div><button type="button" id="progress-reset">clear my ticks</button></div>
+  <p style="font-size:0.84rem;color:var(--fg-2)">The checkboxes are a working roadmap: ticks are kept in this browser only. Steps marked done are what the repository already has.</p>
+
+  <!-- M0 -->
+  <div class="ms" id="m0">
+    <div class="ms-head"><span class="n">M0</span><h3>Boot and fit</h3><span class="pill done">done</span></div>
+    <div class="ms-meta">October 2026 · docs/ps2_port_plan.md "Phase 1", the sample's three documents</div>
+    <ul class="steps">
+      <li class="fixed"><input type="checkbox" id="s0a" checked disabled><label for="s0a">The game compiles and links for the EE with Xbox structure layouts<small>n32 ABI gives 32-bit pointers and 8-byte doubles; <code>--gc-sections</code> takes the code from 6.4 to 3.4 MB</small></label></li>
+      <li class="fixed"><input type="checkbox" id="s0b" checked disabled><label for="s0b">Memory map at Xbox capacities; the tags relocate to one cache address<small>Checked word for word on all 24 retail maps by <code>relocation_check.py</code></small></label></li>
+      <li class="fixed"><input type="checkbox" id="s0c" checked disabled><label for="s0c">The converter's first pass: inflate, reset runtime values, relocate; the PS2 reads maps in place<small>No cache files, no 730 MB copy, no schema or validator in the PS2 build</small></label></li>
+      <li class="fixed"><input type="checkbox" id="s0d" checked disabled><label for="s0d">Menu, every multiplayer level and c20 play their ticks in PCSX2 with a scripted player<small><code>pcsx2_bench.py</code> breaks the tick into sections</small></label></li>
+      <li class="fixed"><input type="checkbox" id="s0e" checked disabled><label for="s0e">The sample draws Blood Gulch and the Chief at 60 fps with 1.76 MB of video memory spare<small>Environment passes, sky, scenery, fog, VU0 projection, VU1 skinning; the EE cost table and the pitfalls are written down</small></label></li>
+    </ul>
+  </div>
+
+  <!-- M1 -->
+  <div class="ms" id="m1">
+    <div class="ms-head"><span class="n">M1</span><h3>Gate 1: the simulation runs on a PS2 in budget</h3><span class="pill part">in progress</span></div>
+    <div class="ms-meta">months 0 to 3 · source/, port/ps2/src, tools/ps2/pcsx2_bench.py · depends on nothing</div>
+    <div class="cols">
+      <div>
+        <p>The project's first real decision. c20 is three times over budget on emulated cycles, and the emulator reads low. The work is to measure on a console, then take the biped and machine updates apart. Everything here also makes the PC build slightly faster, so it lands on the Linux build first where saved films show whether behaviour moved.</p>
+        <p><b>Implementation.</b> A float header maps <code>fmod</code>, <code>sin</code>, <code>cos</code>, <code>floor</code>, <code>pow</code> to their float forms and <code>fmod(x, 1.0)</code> to <code>x - floorf(x)</code>; the build adds <code>-fsingle-precision-constant</code> and <code>-Wdouble-promotion</code>, and <code>objdump | grep __adddf3</code> counts what is left. The biped update is profiled per phase (animation sampling, physics, collision) with the benchmark's section marks. Keyframe lookup keeps each channel's last index. <code>matrix_math.c</code> and <code>real_math.h</code> get VU0 macro-mode bodies behind the same C functions, as the sample's <code>vu0_skin</code> does. The collision BSP walk's working set moves to the 16 KB scratchpad.</p>
+      </div>
+      <div>
+        <ul class="steps">
+          <li><input type="checkbox" id="s1a"><label for="s1a">A PS2 test target: FreeMcBoot, ps2link, a runner like <code>pcsx2_run.py</code> for the console<small>Also ps2client for the ELF and <code>host:</code> files over the network</small></label></li>
+          <li><input type="checkbox" id="s1b"><label for="s1b">Run the benchmark on hardware for c20 and bloodgulch; record the real ratio to PCSX2</label></li>
+          <li><input type="checkbox" id="s1c"><label for="s1c">Float audit on Linux: FTZ, DAZ and traps through the menus and every level; <code>-fsanitize=alignment</code> the same way</label></li>
+          <li><input type="checkbox" id="s1d"><label for="s1d">Single-precision constants and float libm in the PS2 build; count the remaining <code>__adddf3</code> calls per object</label></li>
+          <li><input type="checkbox" id="s1e"><label for="s1e">Profile the biped update by phase on c20; fix the forward keyframe search</label></li>
+          <li><input type="checkbox" id="s1f"><label for="s1f">VU0 macro mode for <code>matrix_math.c</code> and <code>real_math.h</code></label></li>
+          <li><input type="checkbox" id="s1g"><label for="s1g">Scratchpad for the collision BSP traversal and the actor iterator</label></li>
+          <li><input type="checkbox" id="s1h"><label for="s1h">Machines (7.5 ms): find why doors and lifts cost half the AI</label></li>
+          <li><input type="checkbox" id="s1i"><label for="s1i">Replay a saved film instead of the scripted player, so the same ticks are compared across builds</label></li>
+        </ul>
+      </div>
+    </div>
+    <div class="gate"><b>Gate 1</b> · On a real PS2, a typical c20 tick takes 15 ms or less, with a written plan for the worst cases (large fights, many effects). If the ratio of hardware to PCSX2 makes this unreachable, the open question of a 128 MB or lower-frame-rate target is reopened before any renderer work.</div>
+  </div>
+
+  <!-- M2 -->
+  <div class="ms" id="m2">
+    <div class="ms-head"><span class="n">M2</span><h3>The converter fits every campaign level</h3><span class="pill part">pass 1 done</span></div>
+    <div class="ms-meta">months 1 to 5 · tools/ps2/convert_map.py (or port/tools/ps2_map_convert.c), source/physics, source/hs, source/sound, source/bitmaps · depends on M1's gate for the go-ahead, and on M3's vertex format decision</div>
+    <div class="cols">
+      <div>
+        <p>Every pass is already prototyped and measured by <code>converter_prototype.py</code>; this milestone makes them write a map. The order follows the saving per unit of work: collision first (0.9 to 1.3 MB a level, a game-code change in <code>collision_bsp*.c</code>), then animations (1.0 to 1.9 MB, no game-code change because the engine already decodes its keyframe format), then the LOD, scripts and sound records. The vertex formats come last because they are the renderer's input: 16-byte model vertices (16-bit position, packed normal, 16-bit UV, node and weight) and 20-byte BSP vertices, which the converter can also pre-arrange as VIF unpack data.</p>
+        <p>Textures become 4-bit and 8-bit CLUT in GS layout with the top mip dropped, bump maps left out, cube maps as small sphere maps. Sounds become VAG with the music and long dialogue flagged for streaming. A budget report per map, like <code>cache_file_report</code>, closes the loop with <code>map_budget.py</code>.</p>
+      </div>
+      <div>
+        <ul class="steps">
+          <li class="fixed"><input type="checkbox" id="s2a" checked disabled><label for="s2a">Pass 1: inflate, reset runtime values, relocate to the PS2 cache address</label></li>
+          <li><input type="checkbox" id="s2b"><label for="s2b">16-bit collision BSPs: converter pass and <code>physics/collision_bsp*.c</code> reading them<small>BSP3D nodes over 32,768 keep 32 bits on 8 of 10 levels</small></label></li>
+          <li><input type="checkbox" id="s2c"><label for="s2c">Choose the animation tolerance by viewing cinematics at 0.25 and 0.5 degrees on the PC build</label></li>
+          <li><input type="checkbox" id="s2d"><label for="s2d">Animations re-encoded in the engine's keyframe format</label></li>
+          <li><input type="checkbox" id="s2e"><label for="s2e">Super-high LOD geometry dropped; script node arrays trimmed and 12-byte nodes in <code>hs</code></label></li>
+          <li><input type="checkbox" id="s2f"><label for="s2f">Sound permutations without names and subtitles; 4-bit mouth data; 4-bit glyphs</label></li>
+          <li><input type="checkbox" id="s2g"><label for="s2g">Model and BSP vertices in the PS2 formats, with the renderer</label></li>
+          <li><input type="checkbox" id="s2h"><label for="s2h">Textures to CLUT in GS layout, half size, no bump; cube maps to sphere maps</label></li>
+          <li><input type="checkbox" id="s2i"><label for="s2i">Sounds to VAG; streaming flags</label></li>
+          <li><input type="checkbox" id="s2j"><label for="s2j">A per-map budget report; the tag cache sized to the largest converted level plus margin</label></li>
+          <li><input type="checkbox" id="s2k"><label for="s2k">Game state pools cut to measured peaks (objects 1 MB, actors, props, hs threads); the save layout then frozen</label></li>
+        </ul>
+      </div>
+    </div>
+    <div class="gate"><b>Gate 2</b> · All ten campaign levels load in PCSX2 at 32 MB and play 300 ticks each with the scripted player, with no TLB miss and at least 1 MB of the 32 never taken. The projected peaks: a10 14.11, a30 14.08, a50 14.04, b30 13.74, b40 14.42, c10 13.88, c20 11.34, c40 14.32, d20 14.39, d40 14.12 MB.</div>
+  </div>
+
+  <!-- M3 -->
+  <div class="ms" id="m3">
+    <div class="ms-head"><span class="n">M3</span><h3>The renderer</h3><span class="pill todo">not started</span></div>
+    <div class="ms-meta">months 3 to 14 · source/rasterizer/ps2/ (new), port/ps2/vu1 (new), port/ps2/src/ps2_d3d_null.c retired · depends on M1's gate; its vertex formats feed M2</div>
+    <div class="cols">
+      <div>
+        <p>The largest piece and the one the sample de-risked. The backend implements <code>rasterizer.h</code> directly, never Direct3D: the EE builds REGLIST packet chains, VU1 microprograms transform, skin, light, clip and fog, the GS blends. The sample's findings carry over as rules: one A+D packet and one REGLIST per mesh (72 bytes a textured triangle, not gsKit's 680 cycles each); 16-bit 512x448 buffers with dithering; multiply passes through alpha-indexed palettes; the lightmap as a luminance page plus per-vertex hue; fog on the base pass with a scaled FOGCOL; the clear, the VU1 stream and the path-3 queue ordered by FINISH; a 1,400-pixel guard band.</p>
+        <p>The milestones run in the order a player meets them. Menus and text come first because nothing starts without them. The environment and models cover most of every level. The effects, water, glass and camouflage are what the campaign's set pieces need (a30's beach, a50's cloaked elites, b40's snow, c10's swamp and flashlight). Dynamic lights become per-vertex on VU1; lens flare occlusion becomes a ray cast against the collision BSP, which also deletes a 256 KB result table. Shadows render to a small GS target.</p>
+        <p>Textures are a cache, not resident: an EE-side cache of about 4.8 MB fed by the IOP, and a GS-side working set of about 2.3 MB uploaded through path 3 by the frame's needs, with <code>predicted_resources.c</code> as the prefetch list.</p>
+      </div>
+      <div>
+        <ul class="steps">
+          <li><input type="checkbox" id="s3a"><label for="s3a">Frame skeleton: GS init (NTSC and PAL heights set with the mode), double-buffered packet chains, vblank flip, a free-memory and tick-time overlay</label></li>
+          <li><input type="checkbox" id="s3b"><label for="s3b">Text and widgets: the main menu, the loading screen and the console draw<small><code>rasterizer_xbox_text.c</code>, <code>_widgets.c</code> equivalents; the Xbox HUD and fonts, not the port's high-res ones</small></label></li>
+          <li><input type="checkbox" id="s3c"><label for="s3c">Environment: BSP clusters as precompiled batches, lightmap, detail, fog; no per-frame dynamic triangle lists</label></li>
+          <li><input type="checkbox" id="s3d"><label for="s3d">Texture cache streaming from the map into EE and GS memory, with prefetch</label></li>
+          <li><input type="checkbox" id="s3e"><label for="s3e">Models on VU1: skinning, vertex lighting, change colour and self-illumination passes, multipurpose map</label></li>
+          <li><input type="checkbox" id="s3f"><label for="s3f">First-person weapons and the HUD (motion sensor, reticle, shield and ammo displays)</label></li>
+          <li><input type="checkbox" id="s3g"><label for="s3g">Transparent shaders: the chicago and generic stage combinations the maps really use, mapped to GS blend passes; the converter lists them</label></li>
+          <li><input type="checkbox" id="s3h"><label for="s3h">Effects: particles, contrails, decals, detail objects, plasma and energy, lights as per-vertex terms, lens flares by ray cast</label></li>
+          <li><input type="checkbox" id="s3i"><label for="s3i">Water, glass refraction, active camouflage and screen effects from the GS's own frame buffer</label></li>
+          <li><input type="checkbox" id="s3j"><label for="s3j">Shadows to a low-resolution GS target</label></li>
+          <li><input type="checkbox" id="s3k"><label for="s3k">Cinematic letterbox, fades, the sky's clouds and glow</label></li>
+          <li><input type="checkbox" id="s3l"><label for="s3l">Measure the GS on hardware: fill rate with five blended passes a pixel, packet size per frame (about 2 MB in the sample's heaviest view)</label></li>
+        </ul>
+      </div>
+    </div>
+    <div class="gate"><b>Milestone exit</b> · The Pillar of Autumn is played from the first cinematic to the escape pod in PCSX2 with every surface drawn by the PS2 backend, at 30 frames a second, and the same build runs on the console without a visible fault. Not a gate: the work continues level by level in M6.</div>
+  </div>
+
+  <!-- M4 -->
+  <div class="ms" id="m4">
+    <div class="ms-head"><span class="n">M4</span><h3>Sound, the pad and the memory card</h3><span class="pill todo">not started</span></div>
+    <div class="ms-meta">months 8 to 11 · source/sound/sound_ps2.c (new), port/ps2/irx (new), port/ps2/src/ps2_input.c, saved games · depends on M2's VAG output; can overlap M3</div>
+    <div class="cols">
+      <div>
+        <p>A campaign cannot be played through without these three, and sound is more than atmosphere: scripts wait on dialogue and the cinematic audio. <code>sound_ps2.c</code> implements <code>platform_sound.h</code> as <code>sound_dsound_xbox.c</code> did, driving an IOP module (audsrv extended, or a custom IRX) that plays VAG voices from the 2 MB of sound RAM and streams music and long dialogue from the disc. The EE keeps the volume, pan and pitch maths of the 3D sounds. With 48 voices against the Xbox's 64, the sound manager gets a priority limit; the obstruction ray casts go round-robin. Reverb waits.</p>
+        <p>Input is libpad with the multitap left for later; the DualShock 2's white and black buttons map as L1 and R1. Saves compress the game state with the game's zlib onto the memory card. The capacities frozen in M2 are what make the save layout stable.</p>
+      </div>
+      <div>
+        <ul class="steps">
+          <li><input type="checkbox" id="s4a"><label for="s4a">IOP sound module: VAG voices, a stream channel from the disc, loaded at start</label></li>
+          <li><input type="checkbox" id="s4b"><label for="s4b"><code>sound_ps2.c</code> on <code>platform_sound.h</code>: play, stop, position, pitch; durations correct for the scripts</label></li>
+          <li><input type="checkbox" id="s4c"><label for="s4c">Voice priority at 48; obstruction ray casts a few sounds a tick</label></li>
+          <li><input type="checkbox" id="s4d"><label for="s4d">Music and dialogue streamed by the IOP; the sound cache sized at 0.5 MB EE</label></li>
+          <li><input type="checkbox" id="s4e"><label for="s4e">libpad: a DualShock 2 drives the player, the menus and the vehicles; analogue sticks and dead zones as the README's table</label></li>
+          <li><input type="checkbox" id="s4f"><label for="s4f">Memory card saves: compressed game state, a validated header, a level-end save and resume</label></li>
+          <li><input type="checkbox" id="s4g"><label for="s4g">Checkpoints in memory survive a BSP switch (they live in the game state, which is not in the tag cache)</label></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- M5 -->
+  <div class="ms" id="m5">
+    <div class="ms-head"><span class="n">M5</span><h3>The disc and streaming</h3><span class="pill todo">not started</span></div>
+    <div class="ms-meta">months 11 to 14 · tools/ps2 (ISO build, "ninja ps2_iso"), port/ps2/src (cdrom0: files), the converter's layout pass · depends on M2, M3's texture cache and M4's streaming channel</div>
+    <div class="cols">
+      <div>
+        <p>Until here PCSX2's <code>host:</code> stands in for the disc. The retail game has a DVD at 3 to 5 MB/s, slow seeks and no hard disk. A level start loads about 14 MB of tags in 3 to 5 seconds, which is fine; what is not fine is a seek storm during play. The converter places each BSP's textures, geometry and sounds together, the IOP reads ahead from <code>predicted_resources.c</code>, and a BSP switch is one contiguous read. The ISO is built from converted maps uncompressed, within a single-layer DVD, and boots on a console through its homebrew loader or a burned disc.</p>
+      </div>
+      <div>
+        <ul class="steps">
+          <li><input type="checkbox" id="s5a"><label for="s5a">The file layer reads <code>cdrom0:</code> through the IOP with large aligned reads; <code>host:</code> and <code>mass:</code> stay for development</label></li>
+          <li><input type="checkbox" id="s5b"><label for="s5b">Disc layout by BSP in the converter; a map's resources contiguous</label></li>
+          <li><input type="checkbox" id="s5c"><label for="s5c">Prefetch from <code>predicted_resources.c</code> through the IOP, with its buffers sized by measured stalls</label></li>
+          <li><input type="checkbox" id="s5d"><label for="s5d">BSP switches as one read, measured on a10's and b40's transitions</label></li>
+          <li><input type="checkbox" id="s5e"><label for="s5e"><code>ninja ps2_iso</code>: the ELF, the IRX modules and the converted maps on an image; SYSTEM.CNF</label></li>
+          <li><input type="checkbox" id="s5f"><label for="s5f">Boot the image in PCSX2 and on the console; record the load times and the stalls</label></li>
+        </ul>
+      </div>
+    </div>
+    <div class="gate"><b>Gate 3</b> · The Pillar of Autumn boots from a disc image on a real PS2 with picture, sound and a pad, and plays to its end without a stall over one second outside the loading screen. From here the project is a campaign pass, not an engine port.</div>
+  </div>
+
+  <!-- M6 -->
+  <div class="ms" id="m6">
+    <div class="ms-head"><span class="n">M6</span><h3>The campaign, level by level</h3><span class="pill todo">not started</span></div>
+    <div class="ms-meta">months 13 to 20 · every subsystem; a saved film per level · depends on Gate 3</div>
+    <p>Each level is played from its first cinematic to its last on the console, on Normal, with its checkpoints and its BSP switches, and a saved film is kept so that a later build can be compared. The table says what each level brings that the one before it did not. The tag sizes are the projected PS2 peaks with every converter and game-code change; the Xbox's are 21.3 to 22.0 MB for all but c20.</p>
+    <div class="tbl"><table>
+      <tr><th>Level</th><th class="num">PS2 tags</th><th>What it adds</th><th>Watch for</th><th>Done</th></tr>
+      <tr><td class="k">a10 The Pillar of Autumn</td><td class="num">14.11 MB</td><td class="level-feat">Ship interiors, many BSP switches, doors and lifts (machines), the first cinematics, marines, glass</td><td class="level-feat">Machine update cost (16% of c20's tick); seeks at each BSP switch; the escape pod cinematic</td><td><input type="checkbox" id="l-a10" aria-label="a10 done"></td></tr>
+      <tr><td class="k">a30 Halo</td><td class="num">14.08 MB</td><td class="level-feat">Open terrain with long draw distances, the warthog and vehicle physics, water (streams and the lake), fog, lifeboat set pieces, many AI at once</td><td class="level-feat">Chunk culling at distance; the water shader; vehicle physics on the EE's FPU; the first big fights</td><td><input type="checkbox" id="l-a30" aria-label="a30 done"></td></tr>
+      <tr><td class="k">a50 Truth and Reconciliation</td><td class="num">14.04 MB</td><td class="level-feat">Night, the gravity lift, Covenant ship interiors, cloaked elites (active camouflage), stealth AI, the hangar fight</td><td class="level-feat">Active camouflage from the GS frame buffer; dark scenes under 16-bit dithering; the hangar's actor count</td><td><input type="checkbox" id="l-a50" aria-label="a50 done"></td></tr>
+      <tr><td class="k">b30 The Silent Cartographer</td><td class="num">13.74 MB</td><td class="level-feat">The beach landing cinematic, sea water, the island's open BSP, underground facility, warthog on an island loop</td><td class="level-feat">The largest open view in the game; the Pelican cinematic's animations at the chosen tolerance</td><td><input type="checkbox" id="l-b30" aria-label="b30 done"></td></tr>
+      <tr><td class="k">b40 Assault on the Control Room</td><td class="num">14.42 MB</td><td class="level-feat">Snow and ice, the scorpion, the banshee, the ghost, the bridge, the largest fights, many BSP switches, the longest level</td><td class="level-feat">The largest tag peak; the worst ticks of the campaign; vehicle-heavy fights with many actors; streaming across the level's length</td><td><input type="checkbox" id="l-b40" aria-label="b40 done"></td></tr>
+      <tr><td class="k">c10 343 Guilty Spark</td><td class="num">13.88 MB</td><td class="level-feat">The swamp, rain, heavy fog, the flashlight (a dynamic light), the flood's first appearance, dark interiors</td><td class="level-feat">The flashlight as a per-vertex light on VU1; fog density; flood biped counts</td><td><input type="checkbox" id="l-c10" aria-label="c10 done"></td></tr>
+      <tr><td class="k">c20 The Library</td><td class="num">11.34 MB</td><td class="level-feat">Flood hordes, the peak biped count of the campaign, repetitive interiors, long elevator rides</td><td class="level-feat">Already plays 300 ticks; the biped update is 60% of its 45 ms tick; the level is the benchmark for M1 and M7</td><td><input type="checkbox" id="l-c20" aria-label="c20 done"></td></tr>
+      <tr><td class="k">c40 Two Betrayals</td><td class="num">14.32 MB</td><td class="level-feat">b40 in reverse at night, the banshee, sentinels and their beams, three-way fights between Covenant, flood and sentinels, the pulse generators</td><td class="level-feat">Three factions at once is the AI's worst case; sentinel beams are transparent geometry; dark snow</td><td><input type="checkbox" id="l-c40" aria-label="c40 done"></td></tr>
+      <tr><td class="k">d20 Keyes</td><td class="num">14.39 MB</td><td class="level-feat">The Truth and Reconciliation again, flood everywhere, the Keyes cinematic, the gravity lift again, the banshee escape</td><td class="level-feat">The second-largest tag peak; flood plus Covenant in the ship's corridors</td><td><input type="checkbox" id="l-d20" aria-label="d20 done"></td></tr>
+      <tr><td class="k">d40 The Maw</td><td class="num">14.12 MB</td><td class="level-feat">The Autumn again, the engine room, Cortana's countdown, the warthog run, the final cinematic</td><td class="level-feat">The warthog run is the campaign's worst sustained tick cost and streaming case; the game's time keeps the countdown fair in slow motion, but it must not drop frames</td><td><input type="checkbox" id="l-d40" aria-label="d40 done"></td></tr>
+    </table></div>
+    <ul class="steps">
+      <li><input type="checkbox" id="s6a"><label for="s6a">Every level has a saved film and a per-section tick profile from the console</label></li>
+      <li><input type="checkbox" id="s6b"><label for="s6b">Every cinematic viewed at the chosen animation tolerance; faces and hands accepted or the tolerance tightened for those tags</label></li>
+      <li><input type="checkbox" id="s6c"><label for="s6c">Every checkpoint, level transition and memory card resume works; difficulty and settings survive</label></li>
+      <li><input type="checkbox" id="s6d"><label for="s6d">The full campaign played through on the console in one sitting from a disc image, on Normal</label></li>
+    </ul>
+  </div>
+
+  <!-- M7 -->
+  <div class="ms" id="m7">
+    <div class="ms-head"><span class="n">M7</span><h3>Performance and finish</h3><span class="pill todo">ongoing from M1</span></div>
+    <div class="ms-meta">months 3 to 24 · source/ai, source/objects, port/ps2, docs · runs beside M3 to M6, driven by the profiles from each level</div>
+    <div class="cols">
+      <div>
+        <p>Gate 1 buys a typical tick; the campaign needs the worst ticks too. The levers, in order of how much they change behaviour: the AI timeslice given to fewer actors, perception staggered by distance with a phase per actor, movement and looking at 15 Hz for actors no player sees, lower actor limits in the converted scenarios where an encounter allows. Each lever is compared against the saved films. Particle and contrail updates move to a VU0 loop with per-level caps. Hot files compile at <code>-O2</code> and the rest at <code>-Os</code> for the 16 KB instruction cache. The debug overlay shows free memory, pool peaks and tick time by subsystem, on hardware.</p>
+        <p>The finish is what a user needs: NTSC and PAL, 480p as an option, a README for players (convert your own disc, build the image) and for builders, and CI building the ELF with the ps2dev image and booting the menu in PCSX2.</p>
+      </div>
+      <div>
+        <ul class="steps">
+          <li><input type="checkbox" id="s7a"><label for="s7a">AI update rates by distance and visibility; the timeslice threshold tuned; films compared</label></li>
+          <li><input type="checkbox" id="s7b"><label for="s7b">Particles and contrails on VU0 with per-level caps</label></li>
+          <li><input type="checkbox" id="s7c"><label for="s7c">Data cache layout of the hot structures (object, actor, tag definitions reached by <code>tag_get</code>); hot files at <code>-O2</code></label></li>
+          <li><input type="checkbox" id="s7d"><label for="s7d">Packet building on the scratchpad; the GS's load measured and the pass count trimmed where it overdraws</label></li>
+          <li><input type="checkbox" id="s7e"><label for="s7e">A hardware debug overlay: free EE memory, pool peaks, tick by subsystem, frame time</label></li>
+          <li><input type="checkbox" id="s7f"><label for="s7f">NTSC and PAL, 480p; the HUD scaled from 640x480 to 512x448</label></li>
+          <li><input type="checkbox" id="s7g"><label for="s7g">CI: the ps2dev Docker image builds the ELF, PCSX2 boots the menu; a release README</label></li>
+          <li><input type="checkbox" id="s7h"><label for="s7h">Later, not for the play-through: split-screen co-op with the multitap, system link over the network adapter</label></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <h2>Risks that could change the roadmap</h2>
+  <div class="tbl"><table>
+    <tr><th>Risk</th><th>Likelihood</th><th>If it happens</th><th>Reduction</th></tr>
+    <tr><td class="k">Hardware is slower than PCSX2 by more than the plan's 4 to 5x on game logic</td><td><span class="pill crit">medium to high</span></td><td>Gate 1 fails; 15 to 20 frames a second or slow motion in fights</td><td>Measure in M1 before anything else; the 128 MB development-kit mode and a 20 fps target are the fallbacks the plan names</td></tr>
+    <tr><td class="k">The converted levels do not fit after all (margin under 1 MB)</td><td><span class="pill part">medium</span></td><td>b40 or d20 cannot load</td><td>The 24-bit BSP3D nodes (0.2 MB), dropping three quarters of the tag names (0.1 MB), a looser animation tolerance (0.3 MB), smaller pools</td></tr>
+    <tr><td class="k">A shader combination the GS cannot approximate</td><td><span class="pill part">medium</span></td><td>Visual differences in water, glass, plasma</td><td>The converter lists the combinations in use; accept simplifications per shader, as the sample did for bump and reflection</td></tr>
+    <tr><td class="k">DVD seeks during play</td><td><span class="pill part">medium</span></td><td>Stalls, textures that appear late</td><td>Layout by BSP, prefetch, larger IOP buffers; measure on the console in M5</td></tr>
+    <tr><td class="k">Scripts or AI that depend on removed tag data</td><td><span class="pill todo">low to medium</span></td><td>A level's script stalls or an encounter misbehaves</td><td>The level pass in M6 with saved films; the relocation check already proves every pointer is known</td></tr>
+    <tr><td class="k">Hidden IEEE or alignment dependence</td><td><span class="pill crit">high that some exist</span>, low that they cannot be fixed</td><td>Crashes, physics differences</td><td>The Linux audits in M1 before the PS2 build sees them</td></tr>
+  </table></div>
+
+  <h2>What to do next week</h2>
+  <ol>
+    <li>Get a console on the desk with FreeMcBoot and ps2link, and run <code>pcsx2_bench.py</code>'s ELF on it for c20 and bloodgulch. That one number, the ratio of hardware to PCSX2, decides the shape of M1.</li>
+    <li>Land the float fixes on the Linux build with <code>-fsingle-precision-constant</code> and the float libm header, and compare saved films. They are the cheapest tick savings on the list and they are needed on every platform.</li>
+    <li>Profile the biped update on c20 by phase with the benchmark's section marks, so M1's work is aimed at the right third of the 27 ms.</li>
+    <li>Choose the animation tolerance by looking at the cinematics on the PC, which unblocks the converter's largest pass with no game-code change.</li>
+  </ol>
+
+  <div class="foot">This page is <code>docs/ps2_campaign_roadmap.html</code> in the fork. The numbers come from the repository's own measurements as of 2026-10-15; the estimates are the plan's, for one developer, and are not promises. Everything was checked in PCSX2 and nothing yet on hardware.</div>
+</div>
+
+<script>
+(function () {
+  var KEY = 'ps2-roadmap-ticks-v1';
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox]'));
+  var live = boxes.filter(function (b) { return !b.disabled; });
+  var text = document.getElementById('progress-text');
+  var fill = document.getElementById('progress-fill');
+  function load() {
+    try { var s = JSON.parse(localStorage.getItem(KEY) || '{}'); live.forEach(function (b) { if (s[b.id]) b.checked = true; }); } catch (e) {}
+  }
+  function save() {
+    try { var s = {}; live.forEach(function (b) { if (b.checked) s[b.id] = 1; }); localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {}
+  }
+  function update() {
+    var done = boxes.filter(function (b) { return b.checked; }).length;
+    text.textContent = done + ' of ' + boxes.length + ' steps';
+    fill.style.width = (boxes.length ? 100 * done / boxes.length : 0) + '%';
+  }
+  load(); update();
+  live.forEach(function (b) { b.addEventListener('change', function () { save(); update(); }); });
+  document.getElementById('progress-reset').addEventListener('click', function () {
+    live.forEach(function (b) { b.checked = false; }); save(); update();
+  });
+})();
+</script>

@@ -4,10 +4,9 @@ port's budget (docs/ps2_port_plan.md):
 
     python tools/ps2/map_budget.py (--iso IMAGE | --maps DIR) [--only a10 ...] [--json OUT]
 
-Reads the maps straight from an Xbox disc image (XDVDFS, as
-port/linux/src/xiso.c reads it) or from a folder, inflates them, and walks
+Reads the maps straight from an Xbox disc image (XDVDFS) or from a folder, inflates them, and walks
 every tag of the shared tag data and of each structure BSP with the tag
-schema (export_tag_schema.py). Every byte is attributed to a tag group and
+schema (tag_schema.json). Every byte is attributed to a tag group and
 the block it is in.
 
 How an Xbox map uses the 22 MB tag cache: the shared tags stay loaded for

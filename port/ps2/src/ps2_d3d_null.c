@@ -1048,7 +1048,7 @@ void WINAPI D3DPalette_Lock(D3DPalette *palette, D3DCOLOR **colors, DWORD flags)
 }
 
 /* ---------- the port's display functions (port/linux/src/d3d8_gl.c,
-xbox_textures.c; declared in port/linux/include/halo_linux_source_fixups.h)
+xbox_textures.c; declared in port/ps2/include/halo_linux_source_fixups.h)
 
 The PS2 draws the Xbox's 640 by 480: no wider screen, no anti-aliasing,
 the Xbox's shadow maps, no mouse pointer, and no Custom Edition maps. */

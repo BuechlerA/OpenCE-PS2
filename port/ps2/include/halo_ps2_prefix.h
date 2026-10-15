@@ -26,7 +26,7 @@ which the Linux prefix does for the XDK headers: have it first (16-bit, by
 -fshort-wchar) */
 #include <stddef.h>
 
-#include "../../linux/include/halo_linux_prefix.h"
+#include "halo_linux_prefix.h"
 
 /* ---------- MSVC types and calling conventions clang knows and GCC does not */
 
@@ -64,7 +64,7 @@ keeps <limits.h>'s. */
 
 ps2sdk's libkernel has system calls named CreateThread and ResumeThread,
 which its own startup and pthreads call; the Win32 functions of those names
-(port/linux/src/xbox_kernel.c) would replace them. The game and the platform
+(port/ps2/src/xbox_kernel.c) would replace them. The game and the platform
 layer call the Win32 ones by other names. A unit that includes ps2sdk's
 <kernel.h> (port/ps2/src) #undefs these first. */
 

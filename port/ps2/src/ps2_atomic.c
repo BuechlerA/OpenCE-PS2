@@ -2,7 +2,7 @@
 PS2_ATOMIC.C
 
 The atomic operations GCC calls for the EE, which has no LL/SC to build them
-from: the Win32 Interlocked calls (port/linux/src/xbox_kernel.c), the
+from: the Win32 Interlocked calls (port/ps2/src/xbox_kernel.c), the
 debug log's file (source/cseries/errors.c) and the tick counter's start.
 
 The EE has one core, and its threads change only at an interrupt or a call

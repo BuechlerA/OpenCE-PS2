@@ -1,7 +1,7 @@
 /*
 PS2_FILES.C
 
-What the file layer (port/linux/src/xbox_files.c) needs that the EE's newlib
+What the file layer (port/ps2/src/xbox_files.c) needs that the EE's newlib
 declares but does not have: pread and pwrite, the positioned reads and
 writes the layer's ReadFile and WriteFile with an OVERLAPPED offset are.
 

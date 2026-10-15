@@ -254,7 +254,7 @@ real periodic_function_evaluate(
 	if (function_tables_initialized)
 	{
 		time *= 25.6f;
-		fraction = (real)fmod((double)time, 1.0);
+		fraction = halo_fmod1f(time); /* port: fmod(time, 1.0) in single precision (halo_math_float.h) */
 		index = fast_ftol(time-fraction);
 		table = periodic_function_tables[function_type];
 		index &= PERIODIC_FUNCTION_TABLE_MASK;
@@ -316,7 +316,7 @@ real transition_function_evaluate(
 	{
 		table = transition_function_tables[function_type];
 		scaled = value*(real)(PERIODIC_FUNCTION_TABLE_SIZE-1);
-		fraction = (real)fmod((double)scaled, 1.0);
+		fraction = halo_fmod1f(scaled); /* port: fmod(scaled, 1.0) in single precision */
 		index = fast_ftol(scaled-0.5f);
 		if ((short)index == PERIODIC_FUNCTION_TABLE_SIZE-1)
 			return table[PERIODIC_FUNCTION_TABLE_SIZE-1] * (1.0f/255.0f);
@@ -372,17 +372,19 @@ static void transition_function_build_table(
 		case _transition_function_linear:
 			result = value;
 			break;
+		/* port: the four powers as square roots and products in single
+		precision, not double pow (a software call on the PS2) */
 		case _transition_function_early:
-			result = (real)pow((double)value, 0.5);
+			result = (real)sqrt(value);
 			break;
 		case _transition_function_very_early:
-			result = (real)pow((double)value, 0.25);
+			result = (real)sqrt((real)sqrt(value));
 			break;
 		case _transition_function_late:
-			result = (real)pow((double)value, 2.0);
+			result = value*value;
 			break;
 		case _transition_function_very_late:
-			result = (real)pow((double)value, 4.0);
+			result = (value*value)*(value*value);
 			break;
 		case _transition_function_cosine:
 			result = ((real)sin(value*3.1415927f-1.5707964f)+1.0f)*0.5f;
@@ -442,20 +444,20 @@ static void periodic_function_build_table(
 			result = (real)cos(random_x*6.2831855f);
 			break;
 		case _periodic_function_slide:
-			result = (real)fmod((double)x, 1.0);
+			result = halo_fmod1f(x); /* port: fmod(x, 1.0) in single precision */
 			break;
 		case _periodic_function_slide_variable_period:
-			result = (real)fmod((double)random_x, 1.0);
+			result = halo_fmod1f(random_x); /* port: fmod(random_x, 1.0) in single precision */
 			break;
 		case _periodic_function_diagonal_wave:
-			result = (real)fmod((double)x, 1.0);
+			result = halo_fmod1f(x); /* port: fmod(x, 1.0) in single precision */
 			if (result < 0.5f)
 				result *= 2.0f;
 			else
 				result = 1.0f-(result-0.5f)*2.0f;
 			break;
 		case _periodic_function_diagonal_wave_variable_period:
-			result = (real)fmod((double)random_x, 1.0);
+			result = halo_fmod1f(random_x); /* port: fmod(random_x, 1.0) in single precision */
 			if (result < 0.5f)
 				result *= 2.0f;
 			else
@@ -476,7 +478,7 @@ static void periodic_function_build_table(
 			}
 			break;
 		case _periodic_function_spark:
-			result = (real)fmod((double)random_x, 1.0);
+			result = halo_fmod1f(random_x); /* port: fmod(random_x, 1.0) in single precision */
 			result *= result;
 			break;
 		/* result is left unassigned only by this default arm. Not reached unassigned: the

@@ -2,7 +2,7 @@
  * Prices the floating-point operations the game and the samples use per vertex or per object, in
  * EE cycles. Each loop runs for a quarter of a second against the bus-clock timer (147.456 MHz, half
  * the EE's). The output array is volatile so the compiler cannot delete a loop whose result is never
- * read. See docs/ps2_ee_performance.md for the numbers and what they mean.
+ * read. See docs/research/ee_performance.md for the numbers and what they mean.
  *
  *     make                                  # PS2DEV, PS2SDK set; writes bench.elf
  *     python tools/ps2/pcsx2_run.py tools/ps2/eebench/bench.elf --until "BENCH DONE"
