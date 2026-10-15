@@ -66,6 +66,11 @@ ninja ps2
 python tools/ps2/pcsx2_run.py build/ps2/halo.elf --until unimplemented: --timeout 60
 ```
 
+The game's units are compiled with `-fsingle-precision-constant` (the EE
+has no double FPU; `port/include/halo_math_float.h`) and `-Wdouble-promotion`,
+which `-w` hides: `HALO_PS2_WARNINGS=1 python configure.py` leaves `-w` out,
+and the next `ninja ps2` prints each float that still becomes a double.
+
 Every function the game calls that the PS2's platform layer has not got
 is a stub: it prints `unimplemented: NAME` and stops. `build/ps2/unimplemented.txt`
 lists the stubs, none now: `port/ps2/src/ps2_null_platform.c` answers for

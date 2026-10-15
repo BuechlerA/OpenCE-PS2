@@ -839,11 +839,13 @@ pixel32 real_a_rgb_color_to_pixel32(
 			color->green,
 			color->blue));
 
+	/* port: rounded in single precision (halo_rint_to_long,
+	halo_math_float.h), as in bitmaps_inlines.h */
 	result = (pixel32)(
-		((long)__builtin_rint((double)color->blue * scale) & 0xff) |
-		(((long)__builtin_rint((double)color->green * scale) & 0xff) << 8) |
-		(((long)__builtin_rint((double)color->red * scale) & 0xff) << 16) |
-		((long)__builtin_rint((double)alpha * scale) << 24));
+		(halo_rint_to_long(color->blue * scale) & 0xff) |
+		((halo_rint_to_long(color->green * scale) & 0xff) << 8) |
+		((halo_rint_to_long(color->red * scale) & 0xff) << 16) |
+		(halo_rint_to_long(alpha * scale) << 24));
 
 	return result;
 }

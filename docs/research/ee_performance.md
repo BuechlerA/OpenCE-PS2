@@ -144,10 +144,15 @@ from 24 ms of EE time to 8.6 to 13.4 ms. The order they paid off in:
   matrix, a small part of its cost) than on the skinning: the FPU build was
   within 10%.
 - A triangle that must be clipped costs about 2,000 cycles even with a lean
-  vertex path; keep the guard band wide (the GS allows 2048 pixels from its
-  origin, gsKit puts that at the screen's corner: 1400 outside the screen
-  fits) so only triangles that cross the near plane and the very large ones
-  are clipped (about 8% of a view's triangles).
+  vertex path (the 150 or so a frame the map clips are 1.0 ms of its 7), but
+  **do not buy fewer clips with a wide guard band**. The GS allows 2048 pixels
+  from its origin (gsKit puts that at the screen's corner), and the sample
+  first used 1,400 outside the screen to clip little. The margin also decides
+  which chunks and triangles count as in view, so at 1,400 pixels the frame
+  processed 2.0 times the vertices and 1.7 times the triangles, cost 3 ms more
+  of the EE (10.0 against 7.0) and sent the GS triangles that were wholly off
+  the screen; the number of clipped triangles did not change. 64 pixels is the
+  sample's margin now ([vram_and_vu1.md](vram_and_vu1.md)).
 - `mips` is a predefined macro on the EE's GCC: a variable of that name does
   not compile.
 - A wrong guard band does not fail loudly. At 1700 pixels the right edge

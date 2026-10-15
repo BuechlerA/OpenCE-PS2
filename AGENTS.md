@@ -24,7 +24,10 @@ the `ps2` remote). Upstream's own `main` is the local `upstream-main`, tracking
 | `port/third_party/` | zlib, musl's maths, tomlc17 |
 | `tools/ps2_build.py`, `tools/ps2/` | The `ninja ps2` build, the map tools and converter, and the PCSX2 runners ([tools/ps2/README.md](tools/ps2/README.md)) |
 | `docs/ps2_port_plan.md` | The plan, the memory budget and the phases |
-| `docs/research/` | Measured findings from the renderer prototype: `ee_performance.md` (what the EE does slowly, read before writing per-vertex or per-tick code), `blood_gulch_map.md` (Blood Gulch's data and how it was drawn on the GS), `vram_and_vu1.md` (video memory, GS fog, mip audit, the Chief on VU1, VIF/VU1/PCSX2 pitfalls: read before touching textures, frame buffers, GIF paths or VU1) |
+| `docs/ps2_kernel_plan.md` | The PS2 boot and runtime layer (milestones K0 to K7): how the PS2's architecture replaces the Xbox kernel's design |
+| `docs/ps2_renderer_design.md` | The design of the game's PS2 renderer (`source/rasterizer/ps2/`, not written yet): where it plugs in behind `rasterizer.h`, the frame's DMA chains, the VU1 programs, the texture cache, the hardware gate, the first milestone's files and steps |
+| `docs/ps2_campaign_roadmap.html` | The campaign's roadmap as a page |
+| `docs/research/` | Measured findings from the renderer prototype: `ee_performance.md` (what the EE does slowly, read before writing per-vertex or per-tick code), `blood_gulch_map.md` (Blood Gulch's data and how it was drawn on the GS), `vram_and_vu1.md` (video memory, GS fog, mip audit, the Chief on VU1, VIF/VU1/PCSX2 pitfalls: read before touching textures, frame buffers, GIF paths or VU1), `first_person_controller.md` (the sample's first-person controller: what was ported from which file of `source/`, the walking collision) |
 | `assets/` | Game data for local runs (gitignored) |
 
 ### What was removed
@@ -45,6 +48,10 @@ from it when needed.
   `PS2SDK`). A build takes about 10 s on a laptop with `-j` at its default.
 - `python tools/ps2/compile_check.py` compiles each game file and groups the
   errors.
+- The game's units are compiled with `-fsingle-precision-constant` (the EE has
+  no double FPU; `port/include/halo_math_float.h`) and `-Wdouble-promotion`,
+  which `-w` hides: `HALO_PS2_WARNINGS=1 python configure.py` shows each float
+  that still becomes a double.
 - Run PS2 programs in PCSX2 without its window with `tools/ps2/pcsx2_run.py`;
   keep the emulator's memory at 32 MB so it enforces the retail budget.
   `tools/ps2/pcsx2_bench.py` runs the tick benchmark.

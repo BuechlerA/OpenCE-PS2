@@ -198,7 +198,9 @@ errata that GCC works around).
 Write `source/rasterizer/ps2/` to the `rasterizer.h` interface. The EE
 builds packet chains, VU1 microprograms transform, clip, light and fog the
 vertices, and the GS draws them. The converter prepares data offline, so
-the run-time work is small.
+the run-time work is small. The design of that renderer's skeleton (where it
+plugs in, the frame's chains, the VU1 programs, the texture cache, the
+hardware gate, the first milestone) is [ps2_renderer_design.md](ps2_renderer_design.md).
 
 | Halo feature | PS2 method |
 | --- | --- |
@@ -511,6 +513,25 @@ places than its 144 explicit uses:
 - **IEEE behavior.** The EE has no denormals, infinities or NaN. Find
   dependencies with the FTZ, DAZ and trap audit on Linux (Phase 0).
 
+**Done (October 2026).** `port/include/halo_math_float.h`, included by the
+game's `<math.h>` on every port, sends `sin`, `cos`, `pow`, `fabs`, `floor`,
+`sqrt`, `fmod` and the rest to their float forms when the argument is a
+float (the exact ones to the builtins; the transcendental ones to newlib's
+`sinf` and so on on the PS2, and on the native ports to `halo_sin` rounded,
+so that those keep their bits). `fast_ftol` (cseries.h) and the colour
+packing round in single precision; `fmod(x, 1.0)` in `periodic_functions.c`
+and `model_animations.c` is `halo_fmod1f`, which keeps `fmod`'s sign; the
+four constant powers are square roots and products. The PS2 build has
+`-fsingle-precision-constant` and `-Wdouble-promotion` (`HALO_PS2_WARNINGS=1`
+at configure time shows the warnings). The software double calls in the
+game's objects went from 7,707 to 1,501, all but 17 of them float-to-double
+promotions, and those are the `%f` arguments of assertion messages, which
+only a failed assertion formats: `objects.o` 201 to 169, `units.o` 159 to
+120, `actor_looking.o` 103 to 71, `physics.o` 90 to 42, `real_math.o` 79 to
+23, `actor_moving.o` 64 to 36, `periodic_functions.o` 39 to 0,
+`model_animations.o` 32 to 6. The c20 benchmark (below) went from 45.8 to
+32.6 ms a tick in PCSX2 (not measured on hardware).
+
 ### Game logic: AI
 
 The AI already rations its expensive work. `actor_get_timeslice`
@@ -657,6 +678,11 @@ multiplayer maps need half the budget, so a multiplayer level is the
 natural first target for Phase 1 and the first renderer milestones.
 
 ### Phase 1: the simulation on hardware (2 to 3 months)
+
+The boot and runtime layer (the IOP and its modules, the data root, the
+fault handler, the gamepad, saves and disc reads, the scheduler on
+hardware) has its own plan, in milestones K0 to K7:
+[ps2_kernel_plan.md](ps2_kernel_plan.md).
 
 Done so far:
 
@@ -810,7 +836,9 @@ starts there (VU0 for the matrix maths, the scratchpad for the hot loops).
 **A campaign level.** `c20` (tags and largest BSP 17.2 MB, the least of the
 campaign's) loads, runs its scripts and AI, and plays 300 ticks in PCSX2
 with the scripted player (`pcsx2_bench.py --map c20`): **45.3 ms a tick on
-average, 64 ms the longest, every tick over 15 ms**. The benchmark breaks
+average, 64 ms the longest, every tick over 15 ms** (32.6 ms, 45 ms the
+longest, since the floating-point fixes above: bipeds 17.7 ms, machines
+6.5 ms, AI 4.2 ms). The benchmark breaks
 the tick down (`game_tick` and `objects_update` mark their sections):
 
 | Section | Time a tick | Share |
@@ -874,7 +902,8 @@ screen effects, split screen.
 ### Phase 4: sound, input, saves and streaming (2 to 3 months)
 
 The IOP sound module and streaming, libpad and multitap, memory card saves,
-texture and geometry streaming from DVD with prefetch.
+texture and geometry streaming from DVD with prefetch. The gamepad, saves
+and disc reads are milestones K4 to K6 of [ps2_kernel_plan.md](ps2_kernel_plan.md).
 
 ### Phase 5: performance (ongoing, 3 or more months)
 
@@ -908,11 +937,12 @@ uncertainty is in Phase 3 and Phase 5.
 
 1. **Target hardware.** Decided: a retail PS2 (32 MB), developed on PCSX2
    at 32 MB.
-2. **HDD.** May the port require the HDD of early models (as Final Fantasy
-   XI did)? It makes streaming much easier, but most consoles do not have
-   one.
-3. **Scope.** Is the campaign the first goal, or split-screen multiplayer?
-   Multiplayer maps need 5 to 7 MB of tag data against 15 MB for the
-   campaign (measured), so they are a faster first target.
+2. **HDD.** Decided: not required. Slim compatibility matters, and the slim
+   models have no HDD bay. Maps are read from the DVD
+   ([ps2_kernel_plan.md](ps2_kernel_plan.md), K6).
+3. **Scope.** Decided: the full single-player campaign. Split screen is out
+   of scope. The multiplayer maps (5 to 7 MB of tag data against 15 MB for
+   the campaign, measured) stay the quick test level while the campaign's
+   levels wait for the converter.
 4. **Frame rate.** Is 30 frames each second required, or is a lower frame
    rate acceptable at first?
