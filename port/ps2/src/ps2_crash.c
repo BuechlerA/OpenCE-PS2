@@ -223,9 +223,12 @@ static void ps2_crash_self_test(void)
 	pointer = (volatile unsigned *)0;
 	*pointer = 1;
 #elif defined(HALO_PS2_CRASH_TEST_UNALIGNED)
-	static unsigned char bytes[16];
+	static unsigned char bytes[16] __attribute__((aligned(16)));
+	/* the address goes through a volatile so that the compiler cannot see it
+	is odd and write the store as swl/swr, which never faults */
+	volatile unsigned long address = (unsigned long)bytes + 1;
 
-	pointer = (volatile unsigned *)(bytes + 1);
+	pointer = (volatile unsigned *)address;
 	*pointer = 1;
 #else
 	__asm__ volatile("teq $0, $0");

@@ -82,6 +82,13 @@ timeout 20 ps2client -h 192.168.0.10 reset
 
 ## The loop that finds hardware bugs
 
+Before the console, run the build under PCSX2's EE interpreter, which catches
+most unaligned accesses without hardware (`python tools/ps2/pcsx2_run.py halo.elf
+--interpreter`, then look for `Address Error, addr=` in the output; see
+tools/ps2/README.md, "Make PCSX2 closer to the console"). It found the script
+stack bug at the same address the console reported. It does not replace the
+console: it logs, then skips the instruction, so only the first line is trusted.
+
 PCSX2 never reports unaligned accesses, so the console is where they show, one
 per run (the handler parks the EE at the first). Each pass:
 

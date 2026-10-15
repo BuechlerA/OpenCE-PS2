@@ -117,6 +117,41 @@ emulated cycles, which leave out the caches' and the memory's waits: compare
 builds with it, and measure on a PS2 for the gate. Of the campaign's levels only `c20` fits the PS2's tag cache
 (`docs/ps2_port_plan.md`, Phase 1).
 
+## Make PCSX2 closer to the console
+
+PCSX2's default EE recompiler forgives what the EE faults on. `pcsx2_run.py
+--interpreter` runs the EE in PCSX2's interpreter instead, which differs in
+two ways that matter here (checked on v2.8.2 with this game):
+
+- **Unaligned halfword, word and doubleword accesses** are logged as
+  `Address Error, addr=0x... [store|load]` (the recompiler is silent). The
+  interpreter does not raise the exception: it skips the instruction, so
+  the game carries on with a wrong value and may fail later in an
+  unrelated place (an assertion's stack walk read past the end of RAM). The
+  line has no PC; find the instruction from the address, or from the first
+  `Address Error` onwards. The script stack bug (`hs_runtime.c`) that faulted on
+  the console printed `addr=0x9b0afa`, the console's own BadVAddr.
+- **A null-page load or store** (a TLB miss) reaches the program's own
+  exception handler, as on the console, so `ps2_crash.c` writes its report.
+  The recompiler only logs `TLB Miss` and goes on. (`PauseOnTLBMiss` in
+  PCSX2.ini pauses on it in the recompiler.)
+
+The fixed game reaches the main menu in the interpreter with no
+`Address Error` and no exception. `--ee-cache` (with `--interpreter`) turns on
+PCSX2's model of the EE's 8 KB, 2-way data cache (64 sets of 64-byte lines,
+with valid, dirty and lock bits): it should expose a DMA that reads or writes
+memory the cache still holds, and it has not been exercised, because the
+game does no DMA yet. Not modelled or not checked: the recompiler's
+alignment (none), the exact timing (cycle counts stay PCSX2's estimate; with
+the cache on, whether misses cost cycles was not checked), the instruction
+cache, and VU1 (`vu1Instant` and `vuThread` in PCSX2.ini are on in the
+default configuration; turn them off to run VU1 as a separate unit when
+measuring it). Wall time at the main menu was the same in all modes; a heavy
+level was not timed.
+
+PCSX2 has a debugger window (breakpoints, memory, registers); this was not
+used here. Its source has no GDB stub.
+
 A fault on the EE (an address error, a bus error, a trap) writes the
 registers, the exception and a scan of the stack to `host:crash.txt` and the
 console (`port/ps2/src/ps2_crash.c`); name the addresses with `addr2line`
