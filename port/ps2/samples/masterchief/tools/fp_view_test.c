@@ -101,6 +101,47 @@ static void state_tests(void)
 	}
 }
 
+/* the assault rifle's display: the digits of the rounds loaded (its two numeric parts), and the compass's frames over a turn */
+static void display_tests(void)
+{
+	const fpm_weapon *w = &fpm_weapons[FPW_ASSAULT_RIFLE];
+	const fpm_display_part *tens = NULL, *units = NULL, *compass = NULL;
+	static const int rounds[6] = { 60, 45, 7, 0, 10, 59 };
+	int i, seen[8] = { 0 }, frames_seen = 0;
+
+	for (i = 0; i < w->display_count; i++)
+	{
+		const fpm_display_part *d = &w->display[i];
+
+		if (d->kind == 1 && d->place == 1) tens = d;
+		if (d->kind == 1 && d->place == 0) units = d;
+		if (d->kind == 2) compass = d;
+	}
+	CHECK(tens && units && compass, "the rifle's display has no tens (%p), units (%p) or compass (%p)", (const void *)tens, (const void *)units, (const void *)compass);
+	if (!tens || !units || !compass) return;
+	CHECK(w->display_count == 5, "the rifle's display has %d parts, not 5 (compass, data, two digits, icons)", w->display_count);
+	for (i = 0; i < 6; i++)
+	{
+		int t = fpv_display_frame(tens, rounds[i], 60, 0.f), u = fpv_display_frame(units, rounds[i], 60, 0.f);
+
+		CHECK(t == rounds[i] / 10 && u == rounds[i] % 10, "%d rounds show %d%d", rounds[i], t, u);
+	}
+	CHECK(fpv_display_frame(&w->display[1], 30, 60, 0.f) == -1, "a static part has a frame");
+	for (i = 0; i < 720; i++)
+	{
+		float yaw = i * (float)M_PI / 360.f;
+		int f = fpv_display_frame(compass, 0, 60, fpv_compass_value(yaw));
+
+		CHECK(f >= 0 && f < 8, "compass frame %d at yaw %.2f", f, yaw);
+		if (f >= 0 && f < 8) seen[f] = 1;
+	}
+	for (i = 0; i < 8; i++) frames_seen += seen[i];
+	CHECK(frames_seen == 8, "a turn shows %d of the compass's 8 frames", frames_seen);
+	/* facing north (the angle of the player's forward as the original reads it, pi / 2 - yaw, equal to the scenario's) is the counter's middle */
+	CHECK(fabsf(fpv_compass_value((float)M_PI * 0.5f - FPM_LOCAL_NORTH) - 0.5f) < 1e-4f, "north is not the middle of the compass: %.4f", fpv_compass_value((float)M_PI * 0.5f - FPM_LOCAL_NORTH));
+	printf("display: the rifle's %d parts, digits of 60 / 45 / 7 / 0 rounds, the compass's 8 frames: ok\n", w->display_count);
+}
+
 int main(int argc, char **argv)
 {
 	fpv_state v;
@@ -108,7 +149,7 @@ int main(int argc, char **argv)
 	float p[3];
 	static const int vertices[5] = { 0, 100, 500, 1000, -1 };
 
-	if (argc != 4) { state_tests(); printf(failures ? "%d FAILURES\n" : "all passed\n", failures); return failures != 0; }
+	if (argc != 4) { state_tests(); display_tests(); printf(failures ? "%d FAILURES\n" : "all passed\n", failures); return failures != 0; }
 	if (argc == 4) { weapon = atoi(argv[1]); type = atoi(argv[2]); frame = atoi(argv[3]); }
 	pose_at(&v, weapon, type, frame);
 	for (i = 0; i < 5; i++)

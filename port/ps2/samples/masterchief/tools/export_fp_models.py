@@ -4,13 +4,19 @@
 For each hand weapon of tools/export_weapons.py (HALO_MAP, default assets/maps/bloodgulch.map) and the arms the player holds it with
 (game globals' first-person interface: characters\\cyborg\\fp\\fp):
 
-  - the first-person models' triangles (the soso shaders' parts: the HUD parts of a weapon are not drawn), their vertices (position and
+  - the first-person models' triangles (the soso shaders' parts; the transparent chicago parts, a weapon's own display (the assault
+    rifle's ammunition digits, compass, icons and glow), are the "display" below), their vertices (position and
     normal in the bind pose, texture coordinates, the two nodes and the weight that skin them), each node's inverse bind matrix, and which
     node of the animation graph each model node is (by name: model_build_remapping_table_for_animation_graph)
   - the weapon's first-person animation graph: its nodes' parents, and every animation the graph's table of animations by kind names,
     as the tag holds it (the flags of the nodes with a rotation, translation or scale, the default data, the frames' data)
   - each part's base map, as an 8-bit palettised 256x256 texture in the GS's palette order, gamma encoded as the Chief's; the arms' armour
     with the change colour baked in (the multipurpose map's blue) as the Chief's armour has it
+
+  - the display parts: each chicago part's geometry (bind pose, UV with the map's scale and offset, node), the shader's numeric counter
+    (counter limit, the bitmap's frame count: source/rasterizer/xbox/rasterizer_xbox_transparent_geometry.c) and its map: the map of the
+    soso display (the same bitmap) is the texture the program already holds; the frames of the numeric maps (the digits 0-9 and the
+    compass's 8 headings, 64x64 DXT1 each) are cut to 32x32 and packed into one 4-bit atlas of 256x128 (8 a row)
 
 source/interface/first_person_weapons.c draws a weapon's model and the arms' with the same node matrices from the graph (remapped).
 """
@@ -175,6 +181,112 @@ class Textures:
         return self.key[key]
 
 
+ATLAS_W, ATLAS_H, FRAME = 256, 128, 32                      # the numeric maps' frames, 32x32 each, 8 a row
+SCHI_FLAG_NUMERIC = 0x80                                     # shader_transparent_flag_numeric_bit
+
+
+class Atlas:
+    """the frames of the numeric chicago maps (the digits, the compass), each bitmap's frames in order, one 4-bit texture"""
+    def __init__(self): self.frames, self.first = [], {}
+
+    def add(self, mf, bitmap):
+        if bitmap not in self.first:
+            self.first[bitmap] = len(self.frames)
+            for info in mf.bitmaps(bitmap):
+                self.frames.append(resample(mf.rgb(info), FRAME))
+            assert len(self.frames) <= (ATLAS_W // FRAME) * (ATLAS_H // FRAME), 'the atlas is full'
+        return self.first[bitmap]
+
+    def pack(self):
+        sheet = np.zeros((ATLAS_H, ATLAS_W, 3))
+        for i, f in enumerate(self.frames):
+            x, y = (i % (ATLAS_W // FRAME)) * FRAME, (i // (ATLAS_W // FRAME)) * FRAME
+            sheet[y:y + FRAME, x:x + FRAME] = f
+        # additive light on black: the colours the way the program's other textures hold them (gamma encoded), 16 of them
+        im = Image.fromarray((np.clip(sheet, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8))
+        q = im.quantize(16, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+        pal = np.array(q.getpalette()[:48], dtype=np.uint8).reshape(-1, 3)
+        if len(pal) < 16: pal = np.vstack([pal, np.zeros((16 - len(pal), 3), np.uint8)])
+        idx = np.array(q, dtype=np.uint8)
+        black = int(np.argmin(pal.astype(int).sum(1)))
+        assert pal[black].sum() < 24, 'the atlas has no black'
+        clut = np.zeros(16, dtype='<u4')
+        for i in range(16):
+            r, g, b = (int(x) for x in pal[i]); clut[i] = r | (g << 8) | (b << 16) | (0x80 << 24)
+        return idx[:, 0::2] | (idx[:, 1::2] << 4), clut
+
+
+def load_display(mf, name, textures, atlas):
+    """the chicago parts of a first-person model -> list of dict(kind, P, UV, ND, T, texture, atlas_first, frames, limit, place)"""
+    td = mf.td
+    mo = mf.tags[(b'mode', name)] - B
+    scale = struct.unpack_from('<2f', td, mo + 0x30)
+    sc_, sa = struct.unpack_from('<II', td, mo + 0xac + 48); sa -= B
+    shaders = []
+    for i in range(sc_):
+        g, nm, _n, _i = struct.unpack_from('<4sIII', td, sa + i * 0x20)
+        shaders.append((g[::-1], td[nm - B:td.index(b'\0', nm - B)].decode()))
+    gc, ga = struct.unpack_from('<II', td, mo + 0xac + 36); ga -= B
+    pc, pa = struct.unpack_from('<II', td, ga + 0x24); pa -= B
+    nodes = model_nodes(td, mo); nn = len(nodes)
+    out = []
+    for p in range(pc):
+        po = pa + p * 0x68
+        flags, shader = struct.unpack_from('<IH', td, po)
+        group, sname = shaders[shader] if shader < len(shaders) else (b'', '')
+        if group != b'schi': continue
+        so = mf.tags[(group, sname)] - B
+        limit, sflags, _ftype = struct.unpack_from('<BBh', td, so + 0x28)
+        blend, = struct.unpack_from('<h', td, so + 0x2C)
+        extra_flags, = struct.unpack_from('<H', td, so + 0x60)
+        mc, ma, _ = struct.unpack_from('<iII', td, so + 0x54); ma -= B
+        if not mc: continue
+        bitmap = mf.ref(ma + 0x6C)
+        u_scale, v_scale, u_offset, v_offset = struct.unpack_from('<4f', td, ma + 0x54)
+        if blend != 3 or extra_flags & 2:             # (the sniper rifle's scope subscreen is alpha blended: not done)
+            print('  %s: a chicago shader that is not added (blend %d, extra flags %x): left out' % (sname, blend, extra_flags)); continue
+        ttype, tcount, tbase = struct.unpack_from('<HxxII', td, po + 0x44)
+        vtype, vcount, voff, vbase, vhw = struct.unpack_from('<HxxIIII', td, po + 0x54)
+        vdata = struct.unpack_from('<I', td, vhw - B + 4)[0] - B
+        n = tcount + 2 if ttype == 1 else tcount * 3
+        idx = np.array(struct.unpack_from('<%dH' % n, td, tbase - B), dtype=np.int64)
+        raw = np.frombuffer(td, dtype=np.uint8, count=vcount * 32, offset=vdata).reshape(vcount, 32)
+        pos = np.frombuffer(raw[:, :12].tobytes(), dtype='<f4').reshape(vcount, 3).astype(np.float64)
+        uv = np.frombuffer(raw[:, 24:28].tobytes(), dtype='<i2').reshape(vcount, 2) / 32767.0 * np.array(scale)
+        uv = uv * np.array([u_scale, v_scale]) + np.array([u_offset, v_offset])
+        node = raw[:, 28].astype(np.int64) // 3
+        node[node >= nn] = 0
+        tris = []
+        if ttype == 1:
+            for i in range(len(idx) - 2):
+                a, b, c = idx[i], idx[i + 1], idx[i + 2]
+                if a == b or b == c or a == c: continue
+                tris.append((a, c, b) if i & 1 else (a, b, c))
+        else:
+            tris = [tuple(idx[i * 3:i * 3 + 3]) for i in range(tcount)]
+        tris = np.array(tris, dtype=np.int64).reshape(-1, 3)
+        frames = len(mf.bitmaps(bitmap))
+        numeric = bool(sflags & SCHI_FLAG_NUMERIC) and frames > 1
+        part = dict(name=sname, P=pos, UV=uv, ND=node, T=tris, limit=limit if numeric else 0, frames=frames if numeric else 1, bitmap=bitmap, place=0)
+        if numeric:
+            part['kind'] = 2 if frames == 8 else 1                  # the compass has 8 frames (the counter reads function D), the digits 10 (A)
+            part['atlas_first'] = atlas.add(mf, bitmap); part['texture'] = -1
+        else:
+            part['kind'] = 0; part['atlas_first'] = 0
+            part['texture'] = textures(mf, 'display', bitmap, None, name)
+        out.append(part)
+    # a digit's place by where it reads: a number's digits are the parts of one shader, the one that reads first (smaller along the map's u) is the highest
+    digits = [p for p in out if p['kind'] == 1]
+    if len(digits) > 1:
+        def u_axis(p):
+            A = np.c_[p['P'], np.ones(len(p['P']))]
+            return np.linalg.lstsq(A, p['UV'][:, 0], rcond=None)[0][:3]
+        ref = u_axis(digits[0]); ref = ref / np.linalg.norm(ref)
+        digits.sort(key=lambda p: float(p['P'].mean(0) @ ref))      # along the map's u: the first read is the highest place
+        for i, p in enumerate(digits): p['place'] = len(digits) - 1 - i
+    return out
+
+
 def load_graph(mf, tag, weapon_types):
     td = mf.td
     g = mf.tags[(b'antr', tag)] - B
@@ -211,7 +323,8 @@ def load_graph(mf, tag, weapon_types):
 def main():
     mf = MapFile(MAP)
     textures = Textures()
-    weapons, graphs = [], []
+    atlas = Atlas()
+    weapons, graphs, displays = [], [], []
     hands = load_model(mf, HANDS, textures, textures)
     print('hands: %d vertices, %d triangles, %d nodes, parts %s' % (len(hands['P']), len(hands['T']), len(hands['nodes']), [(p['name'], p['count']) for p in hands['parts']]))
     for name in WEAPONS:
@@ -219,12 +332,17 @@ def main():
         try:
             gun = load_model(mf, tag, textures, textures)
         except AssertionError as e:
-            print('%-16s left out: %s' % (name, e)); weapons.append(None); graphs.append(None); continue
+            print('%-16s left out: %s' % (name, e)); weapons.append(None); graphs.append(None); displays.append([]); continue
         graph = load_graph(mf, tag, None)
         weapons.append(gun); graphs.append(graph)
+        displays.append(load_display(mf, tag, textures, atlas))
         print('%-16s %d vertices, %d triangles, %d model nodes, graph of %d nodes and %d animations; parts %s' %
               (name, len(gun['P']), len(gun['T']), len(gun['nodes']), len(graph['names']), len(graph['animations']), [(p['name'], p['count']) for p in gun['parts']]))
-    print('%d textures (%d KB)' % (len(textures.list), len(textures.list) * (TEX * TEX + 1024) // 1024))
+    print('%d textures (%d KB), the display atlas of %d frames (%d KB)' % (len(textures.list), len(textures.list) * (TEX * TEX + 1024) // 1024, len(atlas.frames), ATLAS_W * ATLAS_H // 2 // 1024))
+
+    scenario = [a for (g, n), a in mf.tags.items() if g == b'scnr'][0] - B
+    local_north, = struct.unpack_from('<f', mf.td, scenario + 0x4C)        # scenario: three references, the sky block, type, flags, the scenario references, then local_north
+    assert -7 < local_north < 7, local_north
 
     os.makedirs(OUT, exist_ok=True)
     c = open(os.path.join(OUT, 'fpm_assets.c'), 'w')
@@ -233,6 +351,10 @@ def main():
         c.write('/* %s */\n' % t['name'].replace('\\', '/'))
         c.write(cstr_array('fpm_texture%d_pixels' % i, t['pixels'].reshape(-1), 'unsigned char', 64))
         c.write(cstr_array('fpm_texture%d_clut' % i, t['clut'], 'unsigned int', 64))
+    atlas_pixels, atlas_clut = atlas.pack()
+    c.write('/* the numeric maps of the weapons\' displays: %d frames of %dx%d, 4-bit, %dx%d */\n' % (len(atlas.frames), FRAME, FRAME, ATLAS_W, ATLAS_H))
+    c.write(cstr_array('fpm_atlas_pixels', atlas_pixels.reshape(-1), 'unsigned char', 64))
+    c.write(cstr_array('fpm_atlas_clut', atlas_clut, 'unsigned int', 64))
     c.write('const fpm_texture fpm_textures[FPM_TEXTURES] = {\n')
     for i in range(len(textures.list)): c.write('\t{ fpm_texture%d_pixels, fpm_texture%d_clut },\n' % (i, i))
     c.write('};\n\n')
@@ -261,6 +383,21 @@ def main():
         write_model(sym + '_gun', gun, graph['names'])
         hands_remap = [graph['names'].index(n['name']) if n['name'] in graph['names'] else -1 for n in hands['nodes']]
         c.write(cstr_array(sym + '_hands_graph_node', hands_remap, 'short'))
+        disp = displays[w_i]
+        for d_i, d in enumerate(disp):
+            ds = '%s_d%d' % (sym, d_i)
+            remap = [graph['names'].index(gun['nodes'][n]['name']) if gun['nodes'][n]['name'] in graph['names'] else -1 for n in range(len(gun['nodes']))]
+            c.write(cstr_array(ds + '_position', d['P'].reshape(-1), 'float'))
+            c.write(cstr_array(ds + '_uv', d['UV'].reshape(-1), 'float'))
+            c.write(cstr_array(ds + '_triangle', d['T'].astype(np.uint16).reshape(-1), 'unsigned short'))
+        if disp:
+            c.write('static const fpm_display_part %s_display_parts[%d] = {\n' % (sym, len(disp)))
+            for d_i, d in enumerate(disp):
+                ds = '%s_d%d' % (sym, d_i)
+                assert len(set(d['ND'].tolist())) == 1, 'a display part on more than one node'
+                c.write('\t{ %d, %d, %d, %d, %d, %d, %d, %d, %s_position, %s_uv, %s_triangle, %d },     /* %s */\n' % (
+                    d['kind'], len(d['P']), len(d['T']), d['texture'], d['atlas_first'], d['frames'], d['limit'], d['place'], ds, ds, ds, int(d['ND'][0]), d['name'].replace('\\', '/')))
+            c.write('};\n')
         c.write(cstr_array(sym + '_parent', graph['parents'], 'short'))
         for a_i, a in enumerate(graph['animations']):
             c.write(cstr_array('%s_a%d_defaults' % (sym, a_i), np.frombuffer(a['defaults'], dtype=np.uint8), 'unsigned char'))
@@ -275,8 +412,8 @@ def main():
         c.write('const fpm_graph %s_graph = { %d, %s_parent, %d, %s_animations, { %s } };\n\n' % (sym, len(graph['names']), sym, len(graph['animations']), sym, ', '.join(str(s) for s in slot)))
     c.write('const fpm_weapon fpm_weapons[FPW_COUNT] = {\n')
     for w_i, gun in enumerate(weapons):
-        if gun is None: c.write('\t{ 0, 0, 0, 0 },\n')
-        else: c.write('\t{ &fpm_w%d_gun, &fpm_w%d_graph, fpm_w%d_hands_graph_node, 1 },\n' % (w_i, w_i, w_i))
+        if gun is None: c.write('\t{ 0, 0, 0, 0, 0, 0 },\n')
+        else: c.write('\t{ &fpm_w%d_gun, &fpm_w%d_graph, fpm_w%d_hands_graph_node, 1, %d, %s },\n' % (w_i, w_i, w_i, len(displays[w_i]), 'fpm_w%d_display_parts' % w_i if displays[w_i] else '0'))
     c.write('};\n')
     c.close()
 
@@ -319,12 +456,22 @@ typedef struct
 	const fpm_animation *animations;
 	short animation_of_type[FPM_ANIMATION_TYPES];     /* index into animations by kind (weapons.h: _first_person_weapon_animation_*), or -1 */
 } fpm_graph;
-typedef struct { const fpm_model *gun; const fpm_graph *graph; const short *hands_graph_node; int present; } fpm_weapon;
+/* a part of a weapon's own display (a transparent chicago shader, added to the picture, unlit, two sided): kind 0 static (texture: an index of fpm_textures),
+   1 a digit of a number (the atlas' frames from atlas_first, `frames` of them: the digit is (counter / 10^place) %% frames of the counter round (limit * the
+   weapon's value)), 2 the compass (the counter reads the heading); the geometry is in the gun's bind pose on one node of the model */
+typedef struct { int kind, vertices, triangles, texture, atlas_first, frames, limit, place; const float *position, *uv; const unsigned short *triangle; int node; } fpm_display_part;
+typedef struct { const fpm_model *gun; const fpm_graph *graph; const short *hands_graph_node; int present; int display_count; const fpm_display_part *display; } fpm_weapon;
+#define FPM_ATLAS_W %d
+#define FPM_ATLAS_H %d
+#define FPM_ATLAS_FRAME %d
+#define FPM_LOCAL_NORTH %sf                  /* the scenario's local north, radians (the compass part's) */
+extern const unsigned char fpm_atlas_pixels[];
+extern const unsigned int fpm_atlas_clut[];
 extern const fpm_texture fpm_textures[FPM_TEXTURES];
 extern const fpm_model fpm_hands;
 extern const fpm_weapon fpm_weapons[FPW_COUNT];
 #endif
-''' % (len(textures.list), TEX, len(WEAPONS), ANIMATION_TYPES))
+''' % (len(textures.list), TEX, len(WEAPONS), ANIMATION_TYPES, ATLAS_W, ATLAS_H, FRAME, repr(local_north)))
     h.close()
     print('wrote', os.path.abspath(OUT))
 

@@ -510,3 +510,32 @@ void fpv_tick(fpv_state *v, const fpv_input *in, const fpw_state *w)
 	}
 	if (!v->built) { memcpy(v->previous_matrices, v->matrices, sizeof(v->matrices)); v->built = 1; }
 }
+
+/* ---------- a weapon's own display ---------- */
+
+/* the compass part's counter value (objects.c: object_export_function_values, _object_function_compass): the weapon's heading against the scenario's local north,
+   0.5 at north, a turn over 0..1. The original reads the weapon's forward (i, j) as atan2 (i, j); the player's yaw is 0 along +x, positive to the left */
+float fpv_compass_value(float yaw)
+{
+	float angle = PI_F * 0.5f - yaw, difference = angle - FPM_LOCAL_NORTH, value;
+
+	while (difference >= PI_F) difference -= 2.f * PI_F;
+	while (difference <= -PI_F) difference += 2.f * PI_F;
+	value = 0.15915494f * difference + 0.5f;
+	return value < 0.f ? 0.f : value > 1.f ? 1.f : value;
+}
+
+/* the frame of the numeric map a display part shows (rasterizer_xbox_transparent_geometry.c: counter = limit * the function's value, rounded and pinned, the digit of
+   its place by dividing by the frame count once for each place, the frame the remainder); -1 for a part with no frames to choose among */
+int fpv_display_frame(const fpm_display_part *part, int rounds_loaded, int loaded_maximum, float compass_value)
+{
+	float value;
+	int counter, place;
+
+	if (part->kind == 0 || part->frames < 2) return -1;
+	value = part->kind == 2 ? compass_value : (loaded_maximum > 0 ? (float)rounds_loaded / (float)loaded_maximum : 0.f);
+	counter = (int)floorf((float)part->limit * value + 0.5f);
+	if (counter < 0) counter = 0; else if (counter > part->limit) counter = part->limit;
+	for (place = 0; place < part->place; place++) counter /= part->frames;
+	return counter % part->frames;
+}

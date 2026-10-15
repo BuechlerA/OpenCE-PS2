@@ -123,6 +123,25 @@ products by their bones, the projection is one divide, and a normal is lit by th
 into a gamma table coming out of the same registers: the EE packs the GS registers. The weapon costs 3.3 ms of the EE a frame (the C path:
 5.3; the first version, which also lit every vertex, about 9). VRAM: all 17 textures stay resident, 1.1 MB (0.6 MB free).
 
+## The weapon's own display
+
+The assault rifle shows its rounds loaded **on the gun**, as the Xbox does: its first-person model has five parts that are `shader_transparent_chicago`
+shaders (the `soso` parts are all the first version drew), added to the picture, unlit and two sided: the display's glow (`ar data`) and icons (`icons`: the
+"x" and the bullet), a compass (`compass`: an arrow, 8 frames, for the heading against the scenario's `local_north`, `FPM_LOCAL_NORTH`) and two `numbers` quads, a
+digit each. A shader with the numeric flag (bit 7 of its flags) and a counter limit (60 for the digits, 8 for the compass) picks the frame of its map from a function
+of the weapon: `counter = round(limit * value)`, the digit of place p is `(counter / frames^p) % frames`
+(`rasterizer_xbox_transparent_geometry.c`; here `fpv_display_frame`). The digits read the rounds loaded over the magazine's size; the tags' own function
+modes for the rifle are (integrated light, primary ammunition, illumination, none) by the source's enum, which does not obviously give the digits the
+ammunition, so what the program shows is what the screenshot of the Xbox shows (60 for a full magazine), not a proved reading of the tags. The graph has no
+first-person "ammunition" animation for either gun (its table has 17 entries; the original's overlay of that kind is idle).
+
+`tools/export_fp_models.py` reads the parts (geometry in the bind pose, UV with the map's scale and offset, the node), reuses the texture the soso `display` part already
+holds (the same `display_fp` bitmap) and packs the numeric maps' frames (the digits 0-9 and the compass's 8, 64x64 DXT1 each) cut to 32x32 into one 4-bit atlas of
+256x128 (16 KB with its palette; 18 of 32 frames used). A shader that is not added (the sniper's scope subscreen is alpha blended) is left out. Which of two digit
+parts is the tens is found from the map's u axis in space (the part header's permutation index is -1). `fp_draw_display` (main.c) skins the 41 vertices on the EE (one node),
+projects them in the weapon's view with a Z nudge of 40 toward the eye and draws each part as a list, added (`Cs + Cd`): +0.05 ms of the EE and 16 KB of video memory
+(free 611 KB of 4096). The weapon is hidden while zoomed, so the display is too.
+
 ## Shots: the muzzle flash, the impact marks and the HUD
 
 `main.c`'s `fx_*` (FIRST_PERSON builds): small flat-coloured primitives, a few dozen a frame, each blend a REGLIST packet of RGBAQ and XYZ2 (no texture,

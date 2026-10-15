@@ -2277,6 +2277,7 @@ static int chief_in_view(const xform *view)
 #define FP_NEAR 0.035f                    /* the near plane of the weapon's view, world units */
 #define FP_Z_NEAR 65500                   /* the Z values the weapon spans: 62000 (a unit away) to 65500 (at the near plane) */
 #define FP_Z_RANGE 3500.f
+#define FP_DISPLAY_Z_NUDGE 40             /* the weapon's display, over its panel: 0.01 of a unit toward the eye */
 
 static texture fp_tex[FPM_TEXTURES];
 static float fp_p[FP_MAX_VERTS + FP_EXTRA_VERTS][3], fp_t[FP_EXTRA_VERTS][2], fp_c[FP_EXTRA_VERTS][3];   /* (the extras: a vertex made by the clip has its colour and texture coordinate here) */
@@ -2287,11 +2288,14 @@ static u64 fp_uv_cache[2][FP_MAX_VERTS];  /* a model's vertices' texture coordin
 static int fp_uv_weapon = -1;
 static float fp_light[3][3];              /* the lights' directions in the camera's space */
 
+static texture fp_atlas_tex;               /* the frames of the weapons' displays' numeric maps (the digits, the compass): 4-bit */
+
 static void fp_textures_setup(GSGLOBAL *gs)
 {
 	int i;
 
 	for (i = 0; i < FPM_TEXTURES; i++) texture_setup(gs, &fp_tex[i], FPM_TEXTURE_SIZE, GS_PSM_T8, fpm_textures[i].pixels, fpm_textures[i].clut);
+	texture_setup_psm(gs, &fp_atlas_tex, FPM_ATLAS_W, FPM_ATLAS_H, GS_PSM_T4, fpm_atlas_pixels, fpm_atlas_clut, 0);
 }
 
 #ifndef NO_VU0
@@ -2671,6 +2675,71 @@ static void fp_draw_model(GSGLOBAL *gs, const fpm_model *m, const short *graph_n
 #endif
 
 
+/* ---------- the weapon's own display: the rifle's digits, compass and icons ---------- */
+
+/* The parts of the gun's model that are transparent chicago shaders (fpm_display_part): geometry on one node of the gun, drawn added to the picture with no light,
+   after the gun (rasterizer_xbox_transparent_geometry.c's numeric counters: the digits are frames of one map, chosen by the rounds loaded, fp_view.c). A few dozen
+   vertices, so on the EE; in front of the gun's own surfaces (the display sits a hair above its panel). */
+#define FP_DISPLAY_MAX_VERTS 32
+static svert fp_display_sv[FP_DISPLAY_MAX_VERTS];
+
+static void fp_draw_display(GSGLOBAL *gs, const fpm_weapon *fw, float t)
+{
+	const fpw_state *w = fpw_current_state(&player.weapons);
+	float compass;
+	int part, rounds, maximum;
+
+	if (!fw->display_count || !w || w->weapon != player.view.weapon) return;
+	rounds = w->magazines[0].rounds_loaded;
+	maximum = fpw_weapons[w->weapon].magazine_count ? fpw_weapons[w->weapon].magazines[0].loaded_maximum : 0;
+	compass = fpv_compass_value(player.yaw);
+	gs->PrimAlphaEnable = GS_SETTING_ON;
+	gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 2, 2, 1, 0x80), 0);          /* Cs + Cd */
+	for (part = 0; part < fw->display_count; part++)
+	{
+		const fpm_display_part *d = &fw->display[part];
+		const texture *tex = d->texture >= 0 ? &fp_tex[d->texture] : &fp_atlas_tex;
+		float m[12], origin_u = 0.f, origin_v = 0.f;
+		int frame = fpv_display_frame(d, rounds, maximum, compass), v, behind = 0;
+
+		if (d->vertices > FP_DISPLAY_MAX_VERTS) continue;
+		fpv_skin_matrix(&player.view, fw->gun, fw->gun->graph_node, d->node, t, m);
+		if (frame >= 0)         /* a frame of the atlas: its corner in texels */
+		{
+			int slot = d->atlas_first + frame;
+
+			origin_u = (float)((slot % (FPM_ATLAS_W / FPM_ATLAS_FRAME)) * FPM_ATLAS_FRAME);
+			origin_v = (float)((slot / (FPM_ATLAS_W / FPM_ATLAS_FRAME)) * FPM_ATLAS_FRAME);
+		}
+		for (v = 0; v < d->vertices; v++)
+		{
+			const float *b = &d->position[v * 3], *uv = &d->uv[v * 2];
+			float p[3];
+			svert *o = &fp_display_sv[v];
+
+			p[0] = b[0] * m[0] + b[1] * m[3] + b[2] * m[6] + m[9];
+			p[1] = b[0] * m[1] + b[1] * m[4] + b[2] * m[7] + m[10];
+			p[2] = b[0] * m[2] + b[1] * m[5] + b[2] * m[8] + m[11];
+			if (p[0] < FP_NEAR * 2.f) { behind = 1; break; }
+			fp_project(p, o);
+			o->xyz2 = (o->xyz2 & 0xffffffffull) | ((u64)((int)((o->xyz2 >> 32) & 0xffffff) + FP_DISPLAY_Z_NUDGE) << 32);
+			o->rgbaq = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
+			if (frame >= 0)
+			{
+				float tu = uv[0] * FPM_ATLAS_FRAME, tv = uv[1] * FPM_ATLAS_FRAME;
+
+				tu = tu < 0.5f ? 0.5f : tu > FPM_ATLAS_FRAME - 0.5f ? FPM_ATLAS_FRAME - 0.5f : tu;      /* (not into the next frame) */
+				tv = tv < 0.5f ? 0.5f : tv > FPM_ATLAS_FRAME - 0.5f ? FPM_ATLAS_FRAME - 0.5f : tv;
+				o->uv = GS_SETREG_UV((int)((origin_u + tu) * 16.f), (int)((origin_v + tv) * 16.f));
+			}
+			else o->uv = uv_reg(uv[0], uv[1], (float)FPM_TEXTURE_SIZE);
+		}
+		if (behind) continue;
+		fp_draw_list(gs, tex, fp_display_sv, d->triangle, d->triangles);
+	}
+	gs->PrimAlphaEnable = GS_SETTING_OFF;
+}
+
 /* ---------- what the shots leave and show: impact marks, the muzzle flash, the ammunition and the crosshair ---------- */
 
 /* Small flat-coloured primitives, a few dozen a frame: the marks are quads on the surface a shot hit (FPW_EVENT_IMPACT: a scorch that stays a
@@ -2836,7 +2905,7 @@ static void fx_draw_flash(GSGLOBAL *gs, const fpm_weapon *fw, float t)
 	fpv_skin_matrix(&player.view, fw->gun, fw->gun->graph_node, fx_muzzle_node, t, m);
 	for (k = 0; k < 3; k++) tip[k] = fx_muzzle_bind[0] * m[k] + fx_muzzle_bind[1] * m[3 + k] + fx_muzzle_bind[2] * m[6 + k] + m[9 + k];
 	intensity = w->triggers[0].illumination;
-	radius = 0.06f * (0.7f + 0.3f * intensity);
+	radius = 0.05f * (0.7f + 0.3f * intensity);
 	phase = (float)fx_shots * 1.3f;
 	for (i = 0; i < 8; i++)
 	{
@@ -2847,9 +2916,9 @@ static void fx_draw_flash(GSGLOBAL *gs, const fpm_weapon *fw, float t)
 		svert sv[3];
 
 		for (k = 0; k < 3; k++) { fp_project(p[k], &sv[k]); sv[k].xyz2 = (sv[k].xyz2 & 0xffffffffull) | ((u64)(FP_Z_NEAR - 100) << 32); }     /* in front of the whole gun */
-		fx_vertex_at(sv[0].x, sv[0].y, (int)((sv[0].xyz2 >> 32) & 0xffffff), 255, 235, 170, (int)(0x50 + 0x30 * intensity));
-		fx_vertex_at(sv[1].x, sv[1].y, (int)((sv[1].xyz2 >> 32) & 0xffffff), 255, 150, 50, (int)(0x28 * intensity));
-		fx_vertex_at(sv[2].x, sv[2].y, (int)((sv[2].xyz2 >> 32) & 0xffffff), 255, 150, 50, (int)(0x28 * intensity));
+		fx_vertex_at(sv[0].x, sv[0].y, (int)((sv[0].xyz2 >> 32) & 0xffffff), 255, 235, 170, (int)(0x40 + 0x40 * intensity));
+		fx_vertex_at(sv[1].x, sv[1].y, (int)((sv[1].xyz2 >> 32) & 0xffffff), 255, 150, 50, 0);
+		fx_vertex_at(sv[2].x, sv[2].y, (int)((sv[2].xyz2 >> 32) & 0xffffff), 255, 150, 50, 0);
 	}
 	fx_flush(gs, GS_SETREG_ALPHA(0, 2, 0, 1, 0));
 }
@@ -2956,6 +3025,7 @@ static void draw_first_person(GSGLOBAL *gs)
 	}
 	fp_draw_model(gs, &fpm_hands, fw->hands_graph_node, t, fp_uv_cache[0], 0);
 	fp_draw_model(gs, fw->gun, fw->gun->graph_node, t, fp_uv_cache[1], 1);
+	fp_draw_display(gs, fw, t);
 	fx_draw_flash(gs, fw, t);
 }
 #endif

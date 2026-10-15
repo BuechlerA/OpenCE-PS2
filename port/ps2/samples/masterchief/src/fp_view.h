@@ -67,4 +67,9 @@ void fpv_skin_matrix(const fpv_state *v, const fpm_model *model, const short *gr
 /* the node of the graph's animation of a kind (weapons.h: _first_person_weapon_animation_*), or NULL */
 const fpm_animation *fpv_animation_of_type(const fpv_state *v, int type);
 
+/* a weapon's own display (the assault rifle's digits and compass: fpm_assets.h's display parts): the compass part's counter value for a yaw (0.5 at the scenario's
+   north), and the frame of the numeric map a part shows for the rounds loaded; -1 for a part that has none to choose */
+float fpv_compass_value(float yaw);
+int fpv_display_frame(const fpm_display_part *part, int rounds_loaded, int loaded_maximum, float compass_value);
+
 #endif
