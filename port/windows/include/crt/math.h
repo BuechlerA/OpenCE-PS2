@@ -11,5 +11,7 @@ on every port (port/include/halo_math.h).
 #include_next <math.h>
 
 #include "../../../include/halo_math.h"
+/* and their single-precision forms where the argument is a float */
+#include "../../../include/halo_math_float.h"
 
 #endif
