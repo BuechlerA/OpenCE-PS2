@@ -51,9 +51,24 @@ def default_config():
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "PCSX2/inis/PCSX2.ini"
 
 
-def run_config(text):
+def set_key(text, section, key, value):
+    text, n = re.subn(rf'^{key}\s*=.*$', f'{key} = {value}', text, flags=re.M)
+    if not n:
+        text = re.sub(rf'^\[{section}\]\s*$', f'[{section}]\n{key} = {value}', text, count=1, flags=re.M)
+    return text
+
+
+def run_config(text, interpreter=False, ee_cache=False, pause_on_tlb_miss=False):
     """the configuration with the console logging on, and the host
-    filesystem (the program's own files, as host:name)"""
+    filesystem (the program's own files, as host:name); with interpreter, the
+    EE interpreter, which logs the unaligned accesses the recompiler lets by
+    and raises the null-page TLB miss as the EE exception it is"""
+    if interpreter:
+        text = set_key(text, 'EmuCore/CPU/Recompiler', 'EnableEE', 'false')
+    if ee_cache:
+        text = set_key(text, 'EmuCore/CPU/Recompiler', 'EnableEECache', 'true')
+    if pause_on_tlb_miss:
+        text = set_key(text, 'EmuCore/CPU/Recompiler', 'PauseOnTLBMiss', 'true')
     for section, key in (("Logging", "EnableFileLogging"), ("Logging", "EnableEEConsole"),
                          ("Logging", "EnableIOPConsole"), ("EmuCore", "HostFs")):
         text, n = re.subn(rf'^{key}\s*=.*$', f'{key} = true', text, flags=re.M)
@@ -71,7 +86,14 @@ def main():
     parser.add_argument('--config', type=Path, default=default_config(),
                         help='the PCSX2.ini to copy (default: your own)')
     parser.add_argument('--log', type=Path, help="also keep PCSX2's whole log here")
+    parser.add_argument('--interpreter', action='store_true',
+                        help="run the EE in PCSX2's interpreter (slow): unaligned accesses are logged as "
+                             "'Address Error, addr=...' and a null-page access reaches the program's exception handler")
+    parser.add_argument('--ee-cache', action='store_true',
+                        help="emulate the EE's 8 KB data cache (needs --interpreter; slower still)")
     args = parser.parse_args()
+    if args.ee_cache and not args.interpreter:
+        parser.error('--ee-cache needs --interpreter')
 
     elf = args.elf.resolve()
     if not elf.is_file():
@@ -86,7 +108,7 @@ def main():
         # PCSX2 keeps its data in a PCSX2 folder inside -datapath
         inis = work / 'PCSX2' / 'inis'
         inis.mkdir(parents=True)
-        (inis / 'PCSX2.ini').write_text(run_config(args.config.read_text()))
+        (inis / 'PCSX2.ini').write_text(run_config(args.config.read_text(), args.interpreter, args.ee_cache))
         log = work / 'pcsx2.log'
         command = [str(args.pcsx2), '-datapath', str(work), '-nogui', '-fastboot', '-logfile', str(log),
                    '-elf', str(elf)]
