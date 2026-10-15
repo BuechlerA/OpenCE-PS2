@@ -11,7 +11,10 @@ hardware", "Phase 4: sound, input, saves and streaming").
 
 It is not a new operating system. The port plan commits to ps2dev's GCC and
 ps2sdk on the EE's own kernel, and a kernel of our own would cost months and
-give the game nothing it needs. "The kernel" here is:
+give the game nothing it needs. Nor is it the Xbox's kernel kept for good:
+the shim that emulates it is how the game got running (below, "Where it
+stands"), and "What the PS2's architecture changes" says where the PS2's own
+design replaces it. The layer is:
 
 - the Xbox kernel emulation (`port/linux/src/xbox_kernel.c`, built as it is on
   ps2sdk's pthreads) and the PS2 files that support it (`port/ps2/src`);
@@ -46,6 +49,32 @@ So "boots and runs" has two gaps:
 1. It is proven only under PCSX2 and ps2link, not standalone on a console.
 2. The services a player needs (pad, saves, disc reads) are missing.
 
+## What the PS2's architecture changes
+
+The Xbox was one CPU with a hard disk: everything the game did, it did on
+that CPU, and it overlapped the disk with play by running threads. The PS2
+is two processors and a set of DMA paths: the EE runs the game, the IOP
+(a separate CPU with its own 2 MB) reads the disc, drives the pad and the
+card and plays sound, and the data moves between them by DMA over the SIF.
+Emulating the Xbox's kernel calls on the EE was the right first step: the
+calls themselves (threads, events, mutexes, clocks, files) are not in the
+tick, which is bipeds, machines and AI (the port plan's `c20` figures), so
+the shim costs nothing per frame. But three of the Xbox's designs behind
+those calls do cost, and the milestones replace them rather than emulate
+them:
+
+| The Xbox's design | Why it is wrong on the PS2 | The PS2's | Where |
+| --- | --- | --- | --- |
+| Four threads: the game's, a loader (`cache_files_windows.c`), a decompressor and copier (`cache_files_decompress_windows.c`) and input (`input_xbox.c`), sharing one CPU by preemption. | The EE's kernel does not preempt among equals; `ps2_vblank.c` rotates their queue at each vertical blank to keep them alive, and each switch goes through the kernel. The loader exists to overlap the disk with play, which the IOP does by itself; the copier copied maps to a hard disk there is none of; input is a pad poll the IOP does. | One EE thread for the game. Reads are issued to the IOP without blocking (`sceCdRead`, `sceCdSync` and `sceCdCallback`; `sceCdStRead` streams through an IOP-side buffer) and completed from a callback or a semaphore the game's loop checks each tick, as the loader's event is checked now. The decompressor and copier are out (the maps are converted on the PC). The pad is read by `padRead` from the game's loop. The vertical blank rotation stays only while a second thread does. | K6, K7 |
+| File reads through a kernel call, into a buffer, then copied to where they are used (the tag cache, the texture and sound caches). | Each copy is the EE's time and its 8 KB data cache. newlib and ps2sdk's fileio RPC are a settings file's path, not a 17 MB map's or a texture stream's. | The IOP's DMA writes the sectors straight into the tag cache and the streaming buffers (destinations 64-byte aligned, lengths whole sectors, the converter laying the data out so), with no copy on the EE. | K6 |
+| One flat memory, cached, with page protection for the guards. | The EE's cache is 8 KB of data and 16 KB of instructions, write-back; a stream written by DMA under a cached mapping is stale in the cache or clobbers it. The scratchpad (16 KB, uncached, at the EE's speed) and VU0 are what the hot loops run on. | Streaming buffers and anything DMA writes are read through the uncached accelerated window (`UNCACHED_ACCL_SEG`, 0x30000000), or invalidated (`SyncDCache`) before use. The memory map reserves the scratchpad for Phase 5 and keeps the game state and the tag cache cached. | K2, K6 |
+
+Sound is the same change (the SPU2 and its streaming are the IOP's, Phase
+4), and the renderer is the GS, VU1 and the DMA chains (Phase 3); neither is
+planned here, but K1's ledger of the IOP's memory and K2's module loader are
+what they start from. The VU0 maths and the scratchpad loops of the tick are
+Phase 5's and the port plan's.
+
 ## The milestones
 
 Each milestone has a test that decides whether it is done. Say in each commit
@@ -74,8 +103,8 @@ model" is not promised: the plan says which models K2 was checked on.
 | K3 | Alignment and FPU audit | Run the Linux build with `-fsanitize=alignment` through the menus and all ten campaign levels, scripts included. That covers the code's own accesses; the tag data's layout it covers only where that run reads it, and PCSX2 never faults on it. So the converter also checks every map: the tag schema (`tag_schema.json`) knows each field's type, and an 8-byte field (`double`, `long long`) at an offset that is not a multiple of 8 is a fault on the EE. Run the flush-to-zero, denormals-are-zero and trap audit (both are Phase 0 items of the port plan). | No reports from either, or each one fixed with a `port:` comment. |
 | K4 | Gamepad | libpad and padman for one DualShock 2, mapped to `XINPUT_GAMEPAD` in `ps2_input.c` (the README's button table: white is L1, black is R1), with the vibration motors. The multitap is out of scope while split screen is. | Menus and `c20` play with a DualShock 2. |
 | K5 | Saves | The game's save calls (the campaign's checkpoints and its persistent state) go to the memory card. A checkpoint today writes the whole game state (3.4 MB, `GAME_STATE_SIZE`) on the main thread with the game's time stopped (`game_state_save`, `game_state_write_to_file` in `game_state_xbox.c`) to a file kept open, and a revert (every death) reads it back (`game_state_read_from_file`, into place on the PS2). A card holds 8 MB and writes slowly, so the PS2's version compresses the state with the game's own zlib, keeps the compressed image in memory for the reverts, and writes it to the card from a thread for the next boot. Before the design: measure the compressed size on the Linux build (the plan's "a few hundred KB" is a guess), and budget zlib's working memory (about 256 KB at the default settings, less with a smaller window) and the image out of the 1 MB `c20` leaves. | Play `c20` to a checkpoint, die and revert, switch the console off, load it. |
-| K6 | Disc reads | `cdrom0:` replaces `host:` for the maps: with no HDD, the converted map is read in place from the DVD, as `ps2_cached_map_file_open` already does. An asynchronous read thread, with its own semaphore and not a game thread's. A prefetch hook for `predicted_resources.c`. A plan for the structure BSP switches inside a campaign level (below). PCSX2 boots an ISO and emulates the drive's speed and seeks, so the layout and the switch stall are measured there first, and on the console on the ESR disc (K2) after. | `c20`, then every converted campaign level, loads from a DVD, in PCSX2 and on the console, and crosses its BSP switches with the stall decided below. |
-| K7 | Scheduler and Gate 1 | Measure the vertical-blank rotation on hardware. Check what ps2sdk's `sched_yield` does (the kernel shim's `SwitchToThread` and `Sleep(0)`): if it does not rotate the EE's ready queue, a game thread that spins waiting for another keeps the EE until the next vertical blank, and the shim should rotate the queue itself (`RotateThreadReadyQueue`). Decide whether the condition variables should become raw EE semaphores. Run the benchmark on a campaign level. | Gate 1 of the port plan: a typical campaign tick of 15 ms or less on a real PS2. |
+| K6 | Disc reads | The disc replaces `host:` for the maps, and the IOP replaces the loader thread. The converted map is read in place from the DVD (as `ps2_cached_map_file_open` opens it now) by sector: `sceCdRead` without blocking, straight into the tag cache or a streaming buffer by the IOP's DMA, the completion taken from `sceCdCallback` or `sceCdSync` in the game's loop, where the loader's event is polled today. The converter lays the map out so that every read the game makes is whole sectors to a 64-byte-aligned place, and the destinations DMA writes are read uncached or invalidated. A prefetch hook for `predicted_resources.c`. A plan for the structure BSP switches inside a campaign level (below). PCSX2 boots an ISO and emulates the drive's speed and seeks, so the layout and the switch stall are measured there first, and on the console on the ESR disc (K2) after. | `c20`, then every converted campaign level, loads from a DVD, in PCSX2 and on the console, with no copy of the data on the EE, and crosses its BSP switches with the stall decided below. |
+| K7 | One thread, and Gate 1 | Take the game down to one EE thread: the loader's work is the IOP's after K6, the copier and decompressor are out with the converter, and the pad is polled from the loop (K4). What remains of the Xbox threads (`CreateThread` is called in three game files and the netcode's `thread_win32.c`) runs as a call from the loop, with a `port:` comment each. The vertical blank thread stays for the flip and the callback; its rotation of the ready queue goes when the last second game thread does. Until then, check what ps2sdk's `sched_yield` does (`SwitchToThread`, `Sleep(0)`): if it does not rotate the EE's ready queue, a thread that spins keeps the EE until the next blank. Measure the tick before and after on hardware: the switches and the rotation are the kernel's share of it, and the rest is Phase 5's. Run the benchmark on a campaign level. | The game runs on one EE thread beside the vertical blank's, and Gate 1 of the port plan: a typical campaign tick of 15 ms or less on a real PS2. |
 
 Sound (the SPU2 module) and the renderer belong to Phases 3 and 4. They need
 K2's module loader first and nothing else from this plan.
@@ -113,8 +142,9 @@ K2's module loader first and nothing else from this plan.
   second-run fault stands.
 - K2 and K3 next, in parallel.
 - K4, K5 and K6 after K2, in parallel, on `c20`.
-- K7 last, because it measures the finished system. K6 and K7 repeat on the
-  other campaign levels as the converter produces them.
+- K7 last, because it removes the threads K4 and K6 made unnecessary and
+  measures the finished system. K6 and K7 repeat on the other campaign
+  levels as the converter produces them.
 
 ## Risks
 
@@ -122,7 +152,8 @@ K2's module loader first and nothing else from this plan.
 | --- | --- | --- |
 | The EE has about 1 MB of the 32 MB to spare with `c20`, and about 5 MB with the 9 MB multiplayer tag cache. Each IRX's EE-side buffers, the pad's and the card's come out of it. The IOP's own 2 MB holds the modules and, later, the sound streaming buffers. | A module that loads in PCSX2 and fails on the console | K1's ledger gives both figures before K2 adds modules. Load only the modules a retail disc needs. |
 | PCSX2 ignores unaligned accesses and null-page TLB misses; the EE faults on both. | A bug that shows only on hardware | K3 on the Linux build; run every milestone on the console as well. |
-| ps2sdk's file and IOP RPCs are not safe across threads. | The K0 fault again, in K4 to K6 | One lock for all RPCs of a kind, none from the game threads that cannot wait, and none from an exception handler (K1). |
+| ps2sdk's file and IOP RPCs are not safe across threads. | The K0 fault again, in K4 to K6 | One lock for all RPCs of a kind, none from the game threads that cannot wait, and none from an exception handler (K1). K7's one thread ends the question. |
+| A stream DMA writes under a cached mapping is read stale, or the cache writes back over it. | Corrupt tags or textures that PCSX2, whose cache is not emulated by default, never shows | Uncached reads or `SyncDCache` on every DMA destination (above); check on hardware, where K0 to K2 already run. |
 | The campaign tick is 45 ms in PCSX2 (`c20`: biped objects 60%, machines 16%, AI 14%). | Gate 1 fails on kernel work alone | That cost is Phase 5's (VU0 maths, the scratchpad) and the converter's (fewer keyframes). K7 only measures it. |
 | With no HDD, a BSP switch or a texture stream stalls the game for seconds. | A freeze in play on every campaign level | Disc layout by BSP, the prefetch list, and the K6 measurement before any design. |
 | Slim consoles differ from the fat ones (no expansion bay, a different DVD drive, not every model has a network port, and the last ones run no FreeMcBoot from a card). | A boot that works on the development console and fails on others | Test K2 on a slim and a fat model; load nothing meant for the expansion bay; name the models checked. |
