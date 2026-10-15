@@ -160,7 +160,7 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
     n.rule(name="ps2_cc", command="$ps2_cc -MMD -MF $out.d $cflags -c $in -o $out",
            description="PS2 CC $out", depfile="$out.d", deps="gcc")
     n.rule(name="ps2_stubs",
-           command="$python tools/ps2/unimplemented_stubs.py --cc $ps2_cc --output $out --report $report @$out.rsp",
+           command="$python tools/ps2/unimplemented_stubs.py --cc $ps2_cc --output $out --report $report $libraries @$out.rsp",
            description="PS2 STUBS $out", rspfile="$out.rsp", rspfile_content="$in_newline")
     n.rule(name="ps2_link", command="$ps2_cc $ldflags -o $out @$out.rsp",
            description="PS2 LINK $out", rspfile="$out.rsp", rspfile_content="$in_newline")
@@ -212,7 +212,7 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
     stub_report = build_dir / "unimplemented.txt"
     n.build(outputs=stubs, rule="ps2_stubs", inputs=objects,
             implicit=[Path("tools/ps2/unimplemented_stubs.py")], implicit_outputs=[stub_report],
-            variables={"report": stub_report})
+            variables={"report": stub_report, "libraries": f"--library {sdk / 'ee/lib/libdebug.a'}"})
     stub_object = obj_dir / "generated" / "unimplemented.o"
     n.build(outputs=stub_object, rule="ps2_cc", inputs=stubs,
             variables={"cflags": " ".join([*EE_FLAGS, "-std=gnu11", "-w", OPTIMISATION])})
@@ -230,7 +230,8 @@ def generate_ps2_build(n: Writer, sln: Any) -> None:
                                               f"PROVIDE(_heap_size = {TAG_CACHE_ADDRESS} - _end);"))
     ldflags = [f"-T{heap_linkfile}", OPTIMISATION, f"-L{sdk / 'ee/lib'}", "-Wl,-zmax-page-size=128",
                "-Wl,--gc-sections"]
-    n.build(outputs=output, rule="ps2_link", inputs=[*objects, stub_object],
+    # libdebug (the debug text, ps2_debug.c) comes after the objects that use it
+    n.build(outputs=output, rule="ps2_link", inputs=[*objects, stub_object, sdk / "ee/lib/libdebug.a"],
             variables={"ldflags": " ".join(ldflags)})
     n.build(outputs="ps2", rule="phony", inputs=[output])
     n.newline()

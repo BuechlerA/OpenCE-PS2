@@ -93,6 +93,8 @@ def main():
     parser.add_argument('--cc', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--report', type=Path, required=True)
+    # the libraries the link names itself (libdebug, ps2_build.py)
+    parser.add_argument('--library', action='append', default=[])
     parser.add_argument('objects', nargs='+')
     args = parser.parse_args()
     # ninja quotes the paths with spaces in a response file ('source/saved games/...')
@@ -105,6 +107,7 @@ def main():
                               check=True).stdout.strip()
         if Path(path).is_file():
             libraries.append(path)
+    libraries.extend(args.library)
     ours = {}
     defined, undefined = symbols(nm, args.objects, ours)
     library_strong = {}

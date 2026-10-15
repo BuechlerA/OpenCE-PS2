@@ -176,6 +176,10 @@ static void write_to_debug_file(
 	}
 	fprintf(file, "%s%s", prefix, string);
 	fflush(file);
+#ifdef HALO_PS2
+	/* port: the PS2 shows the game's error lines on the screen too (port/ps2/src/ps2_debug.c) */
+	ps2_debug_log("%s", string);
+#endif
 }
 
 void write_to_error_file(

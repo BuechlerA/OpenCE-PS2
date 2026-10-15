@@ -100,6 +100,17 @@ and moves its tags and structure BSPs to where the PS2 reads them (one
 address in every build, `HALO_PORT_TAG_CACHE_ADDRESS`); it takes about a
 second for a multiplayer map. A converted map is 33 to 142 MB.
 
+## Debug text on a console
+
+`halo.elf` prints its boot steps (`main: start`, the memory blocks, the
+settings, `shell initialized`), everything `platform_log` says, the game's
+error lines (assertions) and a heartbeat every 300 frames of the main loop
+(`main loop: frame N ...`) to the screen (ps2sdk's `scr_printf`) and to
+ps2link's console (stderr). Save the screen as a picture from the host with
+`ps2client -h 192.168.0.10 scrdump shot.bmp` while the game runs
+(`port/ps2/src/ps2_debug.c`). It takes the display over, so it goes when the
+renderer owns the GS.
+
 ## Measure the game's ticks
 
 With the maps converted (above), the benchmark loads a multiplayer level from
