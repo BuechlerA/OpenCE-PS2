@@ -678,6 +678,11 @@ natural first target for Phase 1 and the first renderer milestones.
 
 ### Phase 1: the simulation on hardware (2 to 3 months)
 
+The boot and runtime layer (the IOP and its modules, the data root, the
+fault handler, the gamepad, saves and disc reads, the scheduler on
+hardware) has its own plan, in milestones K0 to K7:
+[ps2_kernel_plan.md](ps2_kernel_plan.md).
+
 Done so far:
 
 - The ps2dev toolchain (v2.0.0) runs on the development Mac, and PCSX2
@@ -896,7 +901,8 @@ screen effects, split screen.
 ### Phase 4: sound, input, saves and streaming (2 to 3 months)
 
 The IOP sound module and streaming, libpad and multitap, memory card saves,
-texture and geometry streaming from DVD with prefetch.
+texture and geometry streaming from DVD with prefetch. The gamepad, saves
+and disc reads are milestones K4 to K6 of [ps2_kernel_plan.md](ps2_kernel_plan.md).
 
 ### Phase 5: performance (ongoing, 3 or more months)
 
@@ -930,11 +936,12 @@ uncertainty is in Phase 3 and Phase 5.
 
 1. **Target hardware.** Decided: a retail PS2 (32 MB), developed on PCSX2
    at 32 MB.
-2. **HDD.** May the port require the HDD of early models (as Final Fantasy
-   XI did)? It makes streaming much easier, but most consoles do not have
-   one.
-3. **Scope.** Is the campaign the first goal, or split-screen multiplayer?
-   Multiplayer maps need 5 to 7 MB of tag data against 15 MB for the
-   campaign (measured), so they are a faster first target.
+2. **HDD.** Decided: not required. Slim compatibility matters, and the slim
+   models have no HDD bay. Maps are read from the DVD
+   ([ps2_kernel_plan.md](ps2_kernel_plan.md), K6).
+3. **Scope.** Decided: the full single-player campaign. Split screen is out
+   of scope. The multiplayer maps (5 to 7 MB of tag data against 15 MB for
+   the campaign, measured) stay the quick test level while the campaign's
+   levels wait for the converter.
 4. **Frame rate.** Is 30 frames each second required, or is a lower frame
    rate acceptable at first?
