@@ -512,6 +512,25 @@ places than its 144 explicit uses:
 - **IEEE behavior.** The EE has no denormals, infinities or NaN. Find
   dependencies with the FTZ, DAZ and trap audit on Linux (Phase 0).
 
+**Done (October 2026).** `port/include/halo_math_float.h`, included by the
+game's `<math.h>` on every port, sends `sin`, `cos`, `pow`, `fabs`, `floor`,
+`sqrt`, `fmod` and the rest to their float forms when the argument is a
+float (the exact ones to the builtins; the transcendental ones to newlib's
+`sinf` and so on on the PS2, and on the native ports to `halo_sin` rounded,
+so that those keep their bits). `fast_ftol` (cseries.h) and the colour
+packing round in single precision; `fmod(x, 1.0)` in `periodic_functions.c`
+and `model_animations.c` is `halo_fmod1f`, which keeps `fmod`'s sign; the
+four constant powers are square roots and products. The PS2 build has
+`-fsingle-precision-constant` and `-Wdouble-promotion` (`HALO_PS2_WARNINGS=1`
+at configure time shows the warnings). The software double calls in the
+game's objects went from 7,707 to 1,501, all but 17 of them float-to-double
+promotions, and those are the `%f` arguments of assertion messages, which
+only a failed assertion formats: `objects.o` 201 to 169, `units.o` 159 to
+120, `actor_looking.o` 103 to 71, `physics.o` 90 to 42, `real_math.o` 79 to
+23, `actor_moving.o` 64 to 36, `periodic_functions.o` 39 to 0,
+`model_animations.o` 32 to 6. The c20 benchmark (below) went from 45.8 to
+32.6 ms a tick in PCSX2 (not measured on hardware).
+
 ### Game logic: AI
 
 The AI already rations its expensive work. `actor_get_timeslice`
@@ -811,7 +830,9 @@ starts there (VU0 for the matrix maths, the scratchpad for the hot loops).
 **A campaign level.** `c20` (tags and largest BSP 17.2 MB, the least of the
 campaign's) loads, runs its scripts and AI, and plays 300 ticks in PCSX2
 with the scripted player (`pcsx2_bench.py --map c20`): **45.3 ms a tick on
-average, 64 ms the longest, every tick over 15 ms**. The benchmark breaks
+average, 64 ms the longest, every tick over 15 ms** (32.6 ms, 45 ms the
+longest, since the floating-point fixes above: bipeds 17.7 ms, machines
+6.5 ms, AI 4.2 ms). The benchmark breaks
 the tick down (`game_tick` and `objects_update` mark their sections):
 
 | Section | Time a tick | Share |

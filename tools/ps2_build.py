@@ -57,6 +57,15 @@ OPTIMISATION = "-Os"
 # errors; -fpermissive makes them warnings again, as -Wno-error=... does for
 # clang.
 GAME_FLAGS = ["-std=gnu89", "-D__STRICT_ANSI__", "-w", "-fpermissive"]
+# The EE has no double-precision FPU: a double is a software call (docs/
+# ps2_ee_performance.md). The game's literals without an f (`x * 0.5`) are
+# floats, so a float expression stays in single precision; the game's own
+# double code (hs.c, the profiler) keeps double variables, with its literals
+# rounded to float first. -Wdouble-promotion names what still promotes; -w
+# hides it unless HALO_PS2_WARNINGS is set when configure.py runs.
+GAME_FLOAT_FLAGS = ["-fsingle-precision-constant", "-Wdouble-promotion"]
+if os.environ.get("HALO_PS2_WARNINGS"):
+    GAME_FLAGS.remove("-w")
 # tools/linux_build.py PLATFORM_FLAGS, less clang's warning options
 PLATFORM_FLAGS = ["-std=gnu11", "-D_GNU_SOURCE", "-DHALO_LINUX_PLATFORM_LAYER", "-w", "-fpermissive"]
 
@@ -88,7 +97,7 @@ def game_compile_flags(sdk: Path, semantics_header: Path) -> List[str]:
     """the flags of the game's files and of the port's game units (without
     the optimisation, which the caller chooses)"""
     config = _load_port_config()
-    return [*EE_FLAGS, *GAME_FLAGS,
+    return [*EE_FLAGS, *GAME_FLAGS, *GAME_FLOAT_FLAGS,
             "-include", str(PREFIX), "-include", str(semantics_header),
             f"-I{LINUX_DIR / 'include'}", "-iquote", config["game_sources"],
             *[f"-D{d}" for d in config["game"].get("defines", [])],
