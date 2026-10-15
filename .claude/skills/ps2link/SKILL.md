@@ -80,6 +80,39 @@ timeout 20 ps2client -h 192.168.0.10 reset
   or a half-reset leaves it answering pings with no PS2Link on the EE; reset
   again, and if that fails power-cycle it.
 
+## The loop that finds hardware bugs
+
+PCSX2 never reports unaligned accesses, so the console is where they show, one
+per run (the handler parks the EE at the first). Each pass:
+
+1. Run the stripped ELF; read the log for `EE exception` or a `crash.txt`.
+2. `addr2line` the EPC and RA against the unstripped ELF; read the code. Trust
+   EPC and RA first: the stack scan lists stale returns too (one run named
+   `first_person_weapon_predict` for a script fault).
+3. Fix it with a `port:` comment, rebuild (`ninja ps2`; unset
+   `HALO_PS2_CRASH_TEST`), strip, and check the build still runs in PCSX2.
+4. Reset, wait, run again. A reset after a handled crash works.
+
+The reset and wait that worked, as shell:
+
+```bash
+timeout 20 ps2client -h 192.168.0.10 reset >/dev/null 2>&1
+for i in $(seq 1 25); do ping -c 1 -t 1 192.168.0.10 >/dev/null 2>&1 || { echo "down at $i"; break; }; done
+for i in $(seq 1 60); do ping -c 1 -t 1 192.168.0.10 >/dev/null 2>&1 && { echo "up at $i"; break; }; done
+ping -c 5 -i 1 127.0.0.1 >/dev/null 2>&1   # a few seconds for PS2Link to start
+```
+
+If "down" never prints, the reset did nothing (see "Not done" below): do not
+go on to `execee`.
+
+A good run: the log has no `EE exception`, `host:/stabbed.txt` is opened again
+and again (the main menu's idle message in the decompilation, "YOU GOT
+STABBED", is written to it every ten seconds: it means the game loop is
+alive, not that anything failed), and the host folder's `debug.txt` (the
+game's own log, written by the console over `host:`) ends with the main menu
+music lines. The game's `platform_log` output on the console has its values
+blanked (see "Run a build"), so read `debug.txt` for the memory ledger.
+
 ## Read a hardware crash
 
 `port/ps2/src/ps2_crash.c` replaces ps2link's own exception screen (which parks
